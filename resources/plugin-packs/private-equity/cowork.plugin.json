@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Skills for deal sourcing, LBO modeling, portfolio monitoring, exit analysis, and fund-level reporting",
   "type": "pack",
-  "author": "CoWork-OSS",
+  "author": "CoWork OS",
   "keywords": ["private-equity", "lbo", "buyout", "portfolio", "fund-reporting", "exits"],
   "icon": "🏢",
   "category": "Finance",
