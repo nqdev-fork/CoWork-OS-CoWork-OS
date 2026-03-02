@@ -56,6 +56,8 @@ npm run dev
 | `npm run qa:eval:build` | Build regression eval corpus from failed/partial tasks |
 | `npm run qa:eval:run` | Replay eval suite (deterministic or hooks mode) |
 | `npm run qa:eval:enforce-regressions` | Enforce production-fix -> eval-case policy |
+| `npm run qa:timeline:backfill` | Recompute timeline completion telemetry for `task_completed` timeline events |
+| `npm run qa:timeline:enforce` | Enforce timeline reliability thresholds from completion telemetry |
 | `npm run qa:reliability` | Reliability loop (`qa:eval:run` + battery script) |
 | `npm run skills:validate-routing` | Validate skill routing metadata |
 | `npm run skills:validate-content` | Validate skill prompt content, placeholders, and references |
@@ -76,6 +78,12 @@ COWORK_DB_PATH=/tmp/cowork-eval.db npm run qa:eval:run -- --suite reliability-re
 
 # Validate production-fix regression policy (mainly used by PR CI)
 npm run qa:eval:enforce-regressions
+
+# Recompute timeline completion telemetry for an existing DB
+npm run qa:timeline:backfill -- --db /absolute/path/to.db
+
+# Enforce timeline reliability thresholds on completion telemetry
+npm run qa:timeline:enforce -- --db /absolute/path/to.db
 ```
 
 See also:
