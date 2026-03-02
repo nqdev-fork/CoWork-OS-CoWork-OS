@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Test coverage analysis, flaky test detection, release readiness assessment, and test plan generation for QA engineers.",
   "type": "pack",
-  "author": "CoWork-OSS",
+  "author": "CoWork OS",
   "keywords": ["qa", "testing", "quality", "test-automation", "coverage"],
   "icon": "🧪",
   "category": "Engineering",
