@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Documentation freshness auditing, API changelog generation, style guide compliance, and content creation for technical writers.",
   "type": "pack",
-  "author": "CoWork-OSS",
+  "author": "CoWork OS",
   "keywords": ["docs", "documentation", "technical-writing", "api-docs", "changelog"],
   "icon": "📚",
   "category": "Operations",
