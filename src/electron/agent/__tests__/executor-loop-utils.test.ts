@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LLMMessage } from "../llm";
 import {
+  computeToolFailureDecision,
   handleMaxTokensRecovery,
   maybeInjectLowProgressNudge,
   maybeInjectStopReasonNudge,
@@ -151,6 +152,29 @@ describe("executor-loop-utils guardrails", () => {
     expect(String((messages[0].content as Any[])[0]?.text || "")).toContain("repeated tool-use");
   });
 
+  it("injects required-write nudge instead of stop-tools when suppressed", () => {
+    const messages: LLMMessage[] = [];
+    const injected = maybeInjectStopReasonNudge({
+      stopReason: "tool_use",
+      consecutiveToolUseStops: 6,
+      consecutiveMaxTokenStops: 0,
+      remainingTurns: 4,
+      messages,
+      phaseLabel: "step",
+      stopReasonNudgeInjected: false,
+      suppressToolUseStopNudge: true,
+      requiredToolNames: ["create_document"],
+      log: vi.fn(),
+    });
+
+    expect(injected).toBe(true);
+    expect(messages.length).toBe(1);
+    expect(String((messages[0].content as Any[])[0]?.text || "")).toContain(
+      "requires an artifact mutation",
+    );
+    expect(String((messages[0].content as Any[])[0]?.text || "")).toContain("create_document");
+  });
+
   it("locks follow-up tool calls after persistent tool_use streak", () => {
     const shouldLock = shouldLockFollowUpToolCalls({
       stopReason: "tool_use",
@@ -194,5 +218,23 @@ describe("executor-loop-utils guardrails", () => {
       previousStreak: streak,
     });
     expect(streak).toBe(0);
+  });
+
+  it("does not hard-stop on duplicate-only tool failures and injects one recovery hint", () => {
+    const decision = computeToolFailureDecision({
+      toolResults: [{ type: "tool_result", tool_use_id: "x", content: "{}", is_error: true }],
+      hasDisabledToolAttempt: false,
+      hasDuplicateToolAttempt: true,
+      hasUnavailableToolAttempt: false,
+      hasHardToolFailureAttempt: false,
+      toolRecoveryHintInjected: false,
+      iterationCount: 1,
+      maxIterations: 10,
+      allowRecoveryHint: true,
+    });
+
+    expect(decision.allToolsFailed).toBe(true);
+    expect(decision.shouldStopFromFailures).toBe(false);
+    expect(decision.shouldInjectRecoveryHint).toBe(true);
   });
 });
