@@ -120,6 +120,13 @@ export function deriveTaskOutputSummaryFromEvents(events: TaskEvent[]): TaskOutp
       continue;
     }
 
+    if (event.type === "timeline_artifact_emitted") {
+      const path = event.payload?.path;
+      if (!isNonEmptyString(path)) continue;
+      created.set(normalizePath(path), event.timestamp || Date.now());
+      continue;
+    }
+
     if (event.type === "file_modified") {
       const path = event.payload?.path || event.payload?.to || event.payload?.from;
       if (!isNonEmptyString(path)) continue;
