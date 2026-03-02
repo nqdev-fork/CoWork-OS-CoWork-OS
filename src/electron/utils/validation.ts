@@ -86,7 +86,8 @@ export const AgentConfigSchema = z
     toolRestrictions: z.array(z.string().min(1).max(200)).max(50).optional(),
     allowedTools: z.array(z.string().min(1).max(200)).max(120).optional(),
     originChannel: OriginChannelSchema.optional(),
-    maxTurns: z.number().int().min(1).max(100).optional(),
+    maxTurns: z.number().int().min(1).max(250).optional(),
+    lifetimeMaxTurns: z.number().int().min(1).max(5000).optional(),
     maxTokens: z.number().int().min(1).max(1_000_000).optional(),
     retainMemory: z.boolean().optional(),
     bypassQueue: z.boolean().optional(),
@@ -94,9 +95,7 @@ export const AgentConfigSchema = z
     allowSharedContextMemory: z.boolean().optional(),
     conversationMode: z.enum(["task", "chat", "hybrid"]).optional(),
     executionMode: z.enum(["execute", "propose", "analyze"]).optional(),
-    taskDomain: z
-      .enum(["auto", "code", "research", "operations", "writing", "general"])
-      .optional(),
+    taskDomain: z.enum(["auto", "code", "research", "operations", "writing", "general"]).optional(),
     autonomousMode: z.boolean().optional(),
     qualityPasses: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional(),
     collaborativeMode: z.boolean().optional(),
@@ -120,6 +119,17 @@ export const AgentConfigSchema = z
       .optional(),
     verificationAgent: z.boolean().optional(),
     reviewPolicy: z.enum(["off", "balanced", "strict"]).optional(),
+    autoContinueOnTurnLimit: z.boolean().optional(),
+    maxAutoContinuations: z.number().int().min(0).max(20).optional(),
+    minProgressScoreForAutoContinue: z.number().min(-1).max(1).optional(),
+    continuationStrategy: z.enum(["adaptive_progress", "fixed_caps"]).optional(),
+    compactOnContinuation: z.boolean().optional(),
+    compactionThresholdRatio: z.number().min(0.5).max(0.95).optional(),
+    loopWarningThreshold: z.number().int().min(1).max(200).optional(),
+    loopCriticalThreshold: z.number().int().min(1).max(400).optional(),
+    globalNoProgressCircuitBreaker: z.number().int().min(1).max(1000).optional(),
+    sideChannelDuringExecution: z.enum(["paused", "limited", "enabled"]).optional(),
+    sideChannelMaxCallsPerWindow: z.number().int().min(0).max(100).optional(),
   })
   .strict();
 
@@ -427,44 +437,46 @@ export const SearchSettingsSchema = z.object({
 
 // ============ X/Twitter Settings Schema ============
 
-export const XSettingsSchema = z.object({
-  enabled: z.boolean().default(false),
-  authMethod: z.enum(["browser", "manual"]).default("browser"),
-  authToken: z.string().max(2000).optional(),
-  ct0: z.string().max(2000).optional(),
-  cookieSource: z.array(z.string().max(50)).max(10).optional(),
-  chromeProfile: z.string().max(200).optional(),
-  chromeProfileDir: z.string().max(MAX_PATH_LENGTH).optional(),
-  firefoxProfile: z.string().max(200).optional(),
-  timeoutMs: z.number().int().min(1000).max(120000).optional(),
-  cookieTimeoutMs: z.number().int().min(1000).max(120000).optional(),
-  quoteDepth: z.number().int().min(0).max(5).optional(),
-  mentionTrigger: z
-    .object({
-      enabled: z.boolean().default(false),
-      commandPrefix: z.string().trim().min(1).max(50).default("do:"),
-      allowedAuthors: z.array(z.string().trim().min(1).max(50)).max(200).default([]),
-      pollIntervalSec: z.number().int().min(30).max(3600).default(120),
-      fetchCount: z.number().int().min(1).max(200).default(25),
-      workspaceMode: z.enum(["temporary"]).default("temporary"),
-    })
-    .default({
-      enabled: false,
-      commandPrefix: "do:",
-      allowedAuthors: [],
-      pollIntervalSec: 120,
-      fetchCount: 25,
-      workspaceMode: "temporary",
-    }),
-}).superRefine((data, ctx) => {
-  if (data.mentionTrigger.enabled && data.mentionTrigger.allowedAuthors.length === 0) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["mentionTrigger", "allowedAuthors"],
-      message: "At least one allowed author is required when mention trigger is enabled",
-    });
-  }
-});
+export const XSettingsSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    authMethod: z.enum(["browser", "manual"]).default("browser"),
+    authToken: z.string().max(2000).optional(),
+    ct0: z.string().max(2000).optional(),
+    cookieSource: z.array(z.string().max(50)).max(10).optional(),
+    chromeProfile: z.string().max(200).optional(),
+    chromeProfileDir: z.string().max(MAX_PATH_LENGTH).optional(),
+    firefoxProfile: z.string().max(200).optional(),
+    timeoutMs: z.number().int().min(1000).max(120000).optional(),
+    cookieTimeoutMs: z.number().int().min(1000).max(120000).optional(),
+    quoteDepth: z.number().int().min(0).max(5).optional(),
+    mentionTrigger: z
+      .object({
+        enabled: z.boolean().default(false),
+        commandPrefix: z.string().trim().min(1).max(50).default("do:"),
+        allowedAuthors: z.array(z.string().trim().min(1).max(50)).max(200).default([]),
+        pollIntervalSec: z.number().int().min(30).max(3600).default(120),
+        fetchCount: z.number().int().min(1).max(200).default(25),
+        workspaceMode: z.enum(["temporary"]).default("temporary"),
+      })
+      .default({
+        enabled: false,
+        commandPrefix: "do:",
+        allowedAuthors: [],
+        pollIntervalSec: 120,
+        fetchCount: 25,
+        workspaceMode: "temporary",
+      }),
+  })
+  .superRefine((data, ctx) => {
+    if (data.mentionTrigger.enabled && data.mentionTrigger.allowedAuthors.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["mentionTrigger", "allowedAuthors"],
+        message: "At least one allowed author is required when mention trigger is enabled",
+      });
+    }
+  });
 
 // ============ Notion Settings Schema ============
 
@@ -550,9 +562,30 @@ export const GuardrailSettingsSchema = z.object({
   enforceAllowedDomains: z.boolean().default(false),
   allowedDomains: z.array(z.string().max(255)).max(100).default([]),
 
+  // Web search policy
+  webSearchMode: z.enum(["disabled", "cached", "live"]).default("cached"),
+  webSearchMaxUsesPerTask: z.number().int().min(1).max(500).default(8),
+  webSearchMaxUsesPerStep: z.number().int().min(1).max(100).default(3),
+  webSearchAllowedDomains: z.array(z.string().max(255)).max(100).default([]),
+  webSearchBlockedDomains: z.array(z.string().max(255)).max(100).default([]),
+
   // Iterations
   maxIterationsPerTask: z.number().int().min(5).max(500).default(50),
   iterationLimitEnabled: z.boolean().default(true),
+
+  // Execution continuation
+  autoContinuationEnabled: z.boolean().default(true),
+  defaultMaxAutoContinuations: z.number().int().min(0).max(20).default(3),
+  defaultMinProgressScore: z.number().min(-1).max(1).default(0.25),
+  lifetimeTurnCapEnabled: z.boolean().default(true),
+  defaultLifetimeTurnCap: z.number().int().min(20).max(5000).default(320),
+  compactOnContinuation: z.boolean().default(true),
+  compactionThresholdRatio: z.number().min(0.5).max(0.95).default(0.75),
+  loopWarningThreshold: z.number().int().min(1).max(200).default(8),
+  loopCriticalThreshold: z.number().int().min(1).max(400).default(14),
+  globalNoProgressCircuitBreaker: z.number().int().min(1).max(1000).default(20),
+  sideChannelDuringExecution: z.enum(["paused", "limited", "enabled"]).default("paused"),
+  sideChannelMaxCallsPerWindow: z.number().int().min(0).max(100).default(2),
 });
 
 // ============ Infrastructure Settings Schema ============
@@ -1005,6 +1038,13 @@ export const ChatGPTImportSchema = z.object({
   forcePrivate: z.boolean().optional(),
   distillProvider: z.string().max(100).optional(),
   distillModel: z.string().max(200).optional(),
+});
+
+export const TextMemoryImportSchema = z.object({
+  workspaceId: WorkspaceIdSchema,
+  provider: z.string().trim().min(1).max(80),
+  pastedText: z.string().trim().min(1).max(1_000_000),
+  forcePrivate: z.boolean().optional(),
 });
 
 export const FindImportedSchema = z.object({
