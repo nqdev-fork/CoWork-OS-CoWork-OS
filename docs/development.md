@@ -172,3 +172,18 @@ Recommended VM specs: 4+ GB RAM, 2+ CPU cores, 40+ GB disk space.
 ## Troubleshooting
 
 See [Troubleshooting](troubleshooting.md) for common build and setup issues.
+
+## Executor Budget Contracts
+
+Hard executor budget contracts are now opt-in.
+
+- Env var: `COWORK_AGENT_BUDGET_CONTRACTS`
+- Default: `false`
+- Effect when disabled: strict budget-contract caps (including tool-call caps) are not enforced by default.
+- To restore legacy behavior: set `COWORK_AGENT_BUDGET_CONTRACTS=true`
+
+Validation after this change:
+
+- `executor-step-failures` tests pass.
+- `npm run type-check` passes.
+- `npm run build:electron` passes.
