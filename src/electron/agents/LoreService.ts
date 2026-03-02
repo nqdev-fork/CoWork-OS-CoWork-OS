@@ -285,7 +285,8 @@ export class LoreService {
     const stmt = this.db.prepare(`
       SELECT e.task_id as taskId, e.timestamp as timestamp, e.payload as payload
       FROM task_events e
-      WHERE e.type = 'task_completed' AND e.timestamp >= ?
+      WHERE (e.type = 'task_completed' OR e.legacy_type = 'task_completed')
+        AND e.timestamp >= ?
       ORDER BY e.timestamp ASC
       LIMIT ?
     `);
