@@ -852,7 +852,9 @@ if (!gotTheLock) {
           const resultAvailable =
             typeof params.resultText === "string" && params.resultText.trim().length > 0;
           const hasFullResult =
-            (params.status === "ok" || params.status === "partial_success") &&
+            (params.status === "ok" ||
+              params.status === "partial_success" ||
+              params.status === "needs_user_action") &&
             !params.summaryOnly &&
             resultAvailable;
 
@@ -865,7 +867,7 @@ if (!gotTheLock) {
           const statusEmoji =
             params.status === "ok"
               ? "✅"
-              : params.status === "partial_success"
+              : params.status === "partial_success" || params.status === "needs_user_action"
                 ? "⚠️"
                 : params.status === "error"
                   ? "❌"
@@ -888,6 +890,8 @@ if (!gotTheLock) {
               msg += `Task completed successfully.\n`;
             } else if (params.status === "partial_success") {
               msg += `Task completed with partial results.\n`;
+            } else if (params.status === "needs_user_action") {
+              msg += `Task completed - action required.\n`;
             } else if (params.status === "error") {
               msg += `Task failed.\n`;
             } else {
@@ -941,7 +945,7 @@ if (!gotTheLock) {
             const statusEmoji =
               evt.status === "ok"
                 ? "✅"
-                : evt.status === "partial_success"
+                : evt.status === "partial_success" || evt.status === "needs_user_action"
                   ? "⚠️"
                   : evt.status === "error"
                     ? "❌"
@@ -951,6 +955,8 @@ if (!gotTheLock) {
                 ? "completed"
                 : evt.status === "partial_success"
                   ? "completed with partial results"
+                  : evt.status === "needs_user_action"
+                    ? "completed, action required"
                   : evt.status === "error"
                     ? "failed"
                     : "timed out";
@@ -963,12 +969,19 @@ if (!gotTheLock) {
                 const job = cronService ? await cronService.get(evt.jobId) : null;
                 const jobName = job?.name || "Scheduled Task";
                 await notificationService.add({
-                  type: evt.status === "ok" ? "task_completed" : "task_failed",
+                  type:
+                    evt.status === "ok"
+                      ? "task_completed"
+                      : evt.status === "partial_success" || evt.status === "needs_user_action"
+                        ? "warning"
+                        : "task_failed",
                   title: `${statusEmoji} ${jobName} ${statusText}`,
                   message:
                     evt.error ||
                     (evt.status === "ok"
                       ? "Task completed successfully."
+                      : evt.status === "needs_user_action"
+                        ? "Task completed but is waiting on user action."
                       : "Task did not complete."),
                   taskId: evt.taskId,
                   cronJobId: evt.jobId,
