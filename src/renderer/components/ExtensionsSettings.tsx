@@ -182,6 +182,13 @@ export function ExtensionsSettings() {
     }
   };
 
+  const normalizeAuthor = (author?: string): string | undefined => {
+    if (typeof author !== "string") return undefined;
+    const trimmed = author.trim();
+    if (!trimmed) return undefined;
+    return /^cowork-oss$/i.test(trimmed) ? "CoWork OS" : trimmed;
+  };
+
   if (loading) {
     return <div className="settings-loading">Loading extensions...</div>;
   }
@@ -221,64 +228,67 @@ export function ExtensionsSettings() {
           </div>
         ) : (
           <div className="extensions-list">
-            {extensions.map((ext) => (
-              <div
-                key={ext.name}
-                className={`extension-item ${selectedExtension === ext.name ? "selected" : ""}`}
-                onClick={() => handleSelectExtension(ext.name)}
-              >
-                <div className="extension-icon">{getTypeIcon(ext.type)}</div>
-                <div className="extension-info">
-                  <div className="extension-name">
-                    {ext.displayName || ext.name}
-                    <span className="extension-version">v{ext.version}</span>
+            {extensions.map((ext) => {
+              const normalizedAuthor = normalizeAuthor(ext.author);
+              return (
+                <div
+                  key={ext.name}
+                  className={`extension-item ${selectedExtension === ext.name ? "selected" : ""}`}
+                  onClick={() => handleSelectExtension(ext.name)}
+                >
+                  <div className="extension-icon">{getTypeIcon(ext.type)}</div>
+                  <div className="extension-info">
+                    <div className="extension-name">
+                      {ext.displayName || ext.name}
+                      <span className="extension-version">v{ext.version}</span>
+                    </div>
+                    <div className="extension-description">{ext.description}</div>
+                    <div className="extension-meta">
+                      <span className="extension-state" style={{ color: getStateColor(ext.state) }}>
+                        {ext.state}
+                      </span>
+                      <span className="extension-type">{ext.type}</span>
+                      {normalizedAuthor && <span className="extension-author">by {normalizedAuthor}</span>}
+                    </div>
                   </div>
-                  <div className="extension-description">{ext.description}</div>
-                  <div className="extension-meta">
-                    <span className="extension-state" style={{ color: getStateColor(ext.state) }}>
-                      {ext.state}
-                    </span>
-                    <span className="extension-type">{ext.type}</span>
-                    {ext.author && <span className="extension-author">by {ext.author}</span>}
-                  </div>
-                </div>
-                <div className="extension-actions">
-                  {ext.state === "active" || ext.state === "registered" ? (
+                  <div className="extension-actions">
+                    {ext.state === "active" || ext.state === "registered" ? (
+                      <button
+                        className="settings-button small"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDisableExtension(ext.name);
+                        }}
+                        disabled={saving}
+                      >
+                        Disable
+                      </button>
+                    ) : ext.state === "disabled" ? (
+                      <button
+                        className="settings-button small primary"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleEnableExtension(ext.name);
+                        }}
+                        disabled={saving}
+                      >
+                        Enable
+                      </button>
+                    ) : null}
                     <button
                       className="settings-button small"
                       onClick={(e) => {
                         e.stopPropagation();
-                        handleDisableExtension(ext.name);
+                        handleReloadExtension(ext.name);
                       }}
                       disabled={saving}
                     >
-                      Disable
+                      Reload
                     </button>
-                  ) : ext.state === "disabled" ? (
-                    <button
-                      className="settings-button small primary"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleEnableExtension(ext.name);
-                      }}
-                      disabled={saving}
-                    >
-                      Enable
-                    </button>
-                  ) : null}
-                  <button
-                    className="settings-button small"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleReloadExtension(ext.name);
-                    }}
-                    disabled={saving}
-                  >
-                    Reload
-                  </button>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
