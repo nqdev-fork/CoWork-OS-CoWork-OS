@@ -31,6 +31,7 @@ import {
 import { getExposureStatus } from "../electron/tailscale";
 import { MCPClientManager } from "../electron/mcp/client/MCPClientManager";
 import { CronService, setCronService, getCronStorePath } from "../electron/cron";
+import { resolveTaskResultText } from "../electron/cron/result-text";
 import {
   TaskEventRepository,
   TaskRepository,
@@ -423,21 +424,11 @@ async function main(): Promise<void> {
       },
       getTaskResultText: async (taskId) => {
         const task = taskRepo.findById(taskId);
-        const summary = typeof task?.resultSummary === "string" ? task.resultSummary.trim() : "";
-        if (summary) return summary;
-
         const events = taskEventRepo.findByTaskId(taskId);
-        for (let i = events.length - 1; i >= 0; i--) {
-          const evt = events[i];
-          if (evt.type !== "assistant_message") continue;
-          const payload = evt.payload || {};
-          const text =
-            (typeof (payload as Any).message === "string" ? (payload as Any).message : "") ||
-            (typeof (payload as Any).content === "string" ? (payload as Any).content : "");
-          const trimmed = String(text).trim();
-          if (trimmed) return trimmed;
-        }
-        return undefined;
+        return resolveTaskResultText({
+          summary: task?.resultSummary,
+          events,
+        });
       },
       deliverToChannel: async (params) => {
         const hasResult =
