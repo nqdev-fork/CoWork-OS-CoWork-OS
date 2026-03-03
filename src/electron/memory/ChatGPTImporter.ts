@@ -259,7 +259,14 @@ export class ChatGPTImporter {
       try {
         const rows = db
           .prepare(
-            `SELECT content FROM memories WHERE workspace_id = ? AND content LIKE '[Imported from ChatGPT %' LIMIT 100000`,
+            `SELECT content
+             FROM memories
+             WHERE workspace_id = ?
+               AND (
+                 content LIKE '[Imported from ChatGPT %'
+                 OR content LIKE '[cowork:prompt_recall=ignore]%[Imported from ChatGPT %'
+               )
+             LIMIT 100000`,
           )
           .all(workspaceId) as Array<{ content: string }>;
         for (const row of rows) {
