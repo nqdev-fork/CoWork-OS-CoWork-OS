@@ -7,6 +7,9 @@ export interface TaskRiskSignals {
   testsExpectedNoEvidence: boolean;
   repeatedToolFailures: boolean;
   maxToolFailureCount: number;
+  requiredContractFailure: boolean;
+  requiredVerificationFailure: boolean;
+  dependencyUnavailable: boolean;
 }
 
 export interface TaskRiskComputation {
@@ -108,6 +111,47 @@ function countToolFailures(events: TaskEvent[]): { repeated: boolean; maxCount: 
   return { repeated: maxCount > 2, maxCount };
 }
 
+function detectReliabilityFailureDomains(events: TaskEvent[]): {
+  requiredContractFailure: boolean;
+  requiredVerificationFailure: boolean;
+  dependencyUnavailable: boolean;
+} {
+  let requiredContractFailure = false;
+  let requiredVerificationFailure = false;
+  let dependencyUnavailable = false;
+
+  for (const event of events) {
+    const eventType = getEffectiveEventType(event);
+    const text = JSON.stringify(event.payload || "").toLowerCase();
+    if (!text) continue;
+
+    if (
+      /contract_unmet_write_required|artifact_write_checkpoint_failed|missing_required_workspace_artifact|required contract/i.test(
+        text,
+      )
+    ) {
+      requiredContractFailure = true;
+    }
+    if (
+      /verification failed|required_verification|platform minimums not met|does \*\*not\*\* pass the completion criteria|missing required/i.test(
+        text,
+      ) &&
+      (eventType === "verification_failed" || eventType === "step_failed" || eventType === "timeline_error")
+    ) {
+      requiredVerificationFailure = true;
+    }
+    if (
+      /dependency_unavailable|external_unknown|getaddrinfo|enotfound|err_network|network changed|handshake has timed out|http 5\d\d|status:\s*408/i.test(
+        text,
+      )
+    ) {
+      dependencyUnavailable = true;
+    }
+  }
+
+  return { requiredContractFailure, requiredVerificationFailure, dependencyUnavailable };
+}
+
 function hasShellOrGitMutation(events: TaskEvent[]): boolean {
   for (const event of events) {
     if (getEffectiveEventType(event) !== "tool_call") continue;
@@ -155,6 +199,20 @@ export function scoreTaskRisk(
     reasons.push("repeated_tool_failures");
   }
 
+  const reliabilityDomains = detectReliabilityFailureDomains(events);
+  if (reliabilityDomains.requiredContractFailure) {
+    score += 2;
+    reasons.push("required_contract_failure");
+  }
+  if (reliabilityDomains.requiredVerificationFailure) {
+    score += 2;
+    reasons.push("required_verification_failure");
+  }
+  if (reliabilityDomains.dependencyUnavailable) {
+    score += 1;
+    reasons.push("dependency_unavailable");
+  }
+
   const level: TaskRiskLevel = score >= 6 ? "high" : score >= 3 ? "medium" : "low";
 
   return {
@@ -167,6 +225,9 @@ export function scoreTaskRisk(
       testsExpectedNoEvidence,
       repeatedToolFailures: toolFailures.repeated,
       maxToolFailureCount: toolFailures.maxCount,
+      requiredContractFailure: reliabilityDomains.requiredContractFailure,
+      requiredVerificationFailure: reliabilityDomains.requiredVerificationFailure,
+      dependencyUnavailable: reliabilityDomains.dependencyUnavailable,
     },
   };
 }
