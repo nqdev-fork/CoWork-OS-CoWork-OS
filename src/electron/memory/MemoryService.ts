@@ -68,6 +68,7 @@ const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 const COMPRESSION_DELAY_MS = 200;
 const MAX_TEXT_IMPORT_ENTRIES = 3000;
 const MAX_TEXT_IMPORT_ENTRY_CHARS = 12000;
+const PROMPT_RECALL_IGNORE_MARKER = "[cowork:prompt_recall=ignore]";
 
 export class MemoryService {
   private static memoryRepo: MemoryRepository;
@@ -605,6 +606,52 @@ export class MemoryService {
     return this.memoryRepo.getRecentForWorkspace(workspaceId, limit, true);
   }
 
+  static getRecentForPromptRecall(workspaceId: string, limit = 20): Memory[] {
+    this.ensureInitialized();
+    return this.memoryRepo
+      .getRecentForWorkspace(workspaceId, limit, true)
+      .filter((memory) => !this.isPromptRecallIgnoredContent(memory.content));
+  }
+
+  static searchForPromptRecall(workspaceId: string, query: string, limit = 20): MemorySearchResult[] {
+    this.ensureInitialized();
+    const results = this.search(workspaceId, query, limit);
+    if (results.length === 0) return results;
+
+    const details = this.memoryRepo.getFullDetails(results.map((result) => result.id));
+    const ignoredIds = new Set(
+      details
+        .filter((memory) => this.isPromptRecallIgnoredContent(memory.content))
+        .map((memory) => memory.id),
+    );
+    if (ignoredIds.size === 0) return results;
+    return results.filter((result) => !ignoredIds.has(result.id));
+  }
+
+  private static isImportedMemoryContent(content: string): boolean {
+    const normalized = this.stripPromptRecallIgnoreMarker(content).trimStart();
+    return normalized.startsWith("[Imported from ");
+  }
+
+  private static isPromptRecallIgnoredContent(content: string): boolean {
+    return content.trimStart().startsWith(PROMPT_RECALL_IGNORE_MARKER);
+  }
+
+  private static stripPromptRecallIgnoreMarker(content: string): string {
+    const trimmed = content.trimStart();
+    if (!trimmed.startsWith(PROMPT_RECALL_IGNORE_MARKER)) return content;
+    let rest = trimmed.slice(PROMPT_RECALL_IGNORE_MARKER.length);
+    if (rest.startsWith("\r\n")) rest = rest.slice(2);
+    else if (rest.startsWith("\n")) rest = rest.slice(1);
+    return rest;
+  }
+
+  private static applyPromptRecallIgnoreMarker(content: string): string {
+    if (this.isPromptRecallIgnoredContent(content)) return content;
+    const stripped = this.stripPromptRecallIgnoreMarker(content);
+    return `${PROMPT_RECALL_IGNORE_MARKER}\n${stripped}`;
+  }
+
   /**
    * Get context for injection at task start
    * Returns a formatted string suitable for system prompt
@@ -619,7 +666,7 @@ export class MemoryService {
 
     // Get recent memories (summaries preferred)
     // Include private memories — they are private from external sharing, not from local agent context
-    const recentMemories = this.memoryRepo.getRecentForWorkspace(workspaceId, 5, true);
+    const recentMemories = this.getRecentForPromptRecall(workspaceId, 5);
 
     // Search for relevant memories based on task prompt
     let relevantMemories: MemorySearchResult[] = [];
@@ -628,7 +675,7 @@ export class MemoryService {
         // Hybrid recall: use local embeddings + lexical search for better matches.
         // Keep the query bounded for performance.
         const query = taskPrompt.slice(0, 2500);
-        relevantMemories = this.search(workspaceId, query, 10);
+        relevantMemories = this.searchForPromptRecall(workspaceId, query, 10);
 
         // Filter out memories that are already in recent
         const recentIds = new Set(recentMemories.map((m) => m.id));
@@ -717,6 +764,66 @@ export class MemoryService {
     return this.memoryRepo.findImported(workspaceId, limit, offset);
   }
 
+  static deleteImportedEntry(workspaceId: string, memoryId: string): boolean {
+    this.ensureInitialized();
+
+    const memory = this.memoryRepo.findById(memoryId);
+    if (!memory || memory.workspaceId !== workspaceId) return false;
+    if (!this.isImportedMemoryContent(memory.content)) return false;
+
+    try {
+      this.embeddingRepo.deleteByMemoryIds([memoryId]);
+    } catch {
+      // ignore
+    }
+
+    const deleted = this.memoryRepo.deleteByIds(workspaceId, [memoryId]);
+    if (deleted <= 0) return false;
+
+    this.importedEmbeddings.delete(memoryId);
+    this.memoryEmbeddingsByWorkspace.delete(workspaceId);
+    this.embeddingsLoadedForWorkspace.delete(workspaceId);
+    this.embeddingBackfillInProgress.delete(workspaceId);
+    memoryEvents.emit("memoryChanged", { type: "importedEntryDeleted", workspaceId });
+    return true;
+  }
+
+  static setImportedPromptRecallIgnored(
+    workspaceId: string,
+    memoryId: string,
+    ignored: boolean,
+  ): Memory | null {
+    this.ensureInitialized();
+
+    const memory = this.memoryRepo.findById(memoryId);
+    if (!memory || memory.workspaceId !== workspaceId) return null;
+    if (!this.isImportedMemoryContent(memory.content)) return null;
+
+    const nextContent = ignored
+      ? this.applyPromptRecallIgnoreMarker(memory.content)
+      : this.stripPromptRecallIgnoreMarker(memory.content);
+    if (nextContent === memory.content) return memory;
+
+    this.memoryRepo.update(memoryId, {
+      content: nextContent,
+      tokens: estimateTokens(nextContent),
+    });
+
+    try {
+      this.embeddingRepo.deleteByMemoryIds([memoryId]);
+    } catch {
+      // ignore
+    }
+
+    this.importedEmbeddings.delete(memoryId);
+    const updated = this.memoryRepo.findById(memoryId);
+    if (updated) {
+      memoryEvents.emit("memoryChanged", { type: "importedEntryUpdated", workspaceId });
+      return updated;
+    }
+    return null;
+  }
+
   /**
    * Delete all imported memories for a workspace
    */
@@ -730,6 +837,11 @@ export class MemoryService {
     }
     const deleted = this.memoryRepo.deleteImported(workspaceId);
     // Clear caches for this workspace (best-effort).
+    for (const [memoryId, entry] of this.importedEmbeddings.entries()) {
+      if (entry.workspaceId === workspaceId) {
+        this.importedEmbeddings.delete(memoryId);
+      }
+    }
     this.memoryEmbeddingsByWorkspace.delete(workspaceId);
     this.embeddingsLoadedForWorkspace.delete(workspaceId);
     this.embeddingBackfillInProgress.delete(workspaceId);
