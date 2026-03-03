@@ -233,6 +233,24 @@ describe("TaskExecutor workspace preflight acknowledgement", () => {
     expect(reason).toBeNull();
   });
 
+  it("does not preflight-fail draft-and-verify artifact steps when the draft file does not exist yet", () => {
+    const fakeThis: Any = Object.create((TaskExecutor as Any).prototype);
+    fakeThis.workspace = { path: process.cwd() };
+    const step = {
+      id: "s3b",
+      description:
+        "Draft `daily-ai-agent-trends-2026-03-03.md` with sections and verify every claim against source timestamps.",
+      kind: "primary",
+      status: "pending",
+    };
+
+    const reason = (TaskExecutor as Any).prototype.getMissingWorkspaceArtifactPreflightReason.call(
+      fakeThis,
+      step,
+    );
+    expect(reason).toBeNull();
+  });
+
   it("ignores command snippets when checking verification artifact preflight", () => {
     const fakeThis: Any = Object.create((TaskExecutor as Any).prototype);
     fakeThis.workspace = { path: process.cwd() };
@@ -279,5 +297,30 @@ describe("TaskExecutor workspace preflight acknowledgement", () => {
     ) as Set<string>;
 
     expect(requiredTools.has("web_search")).toBe(true);
+  });
+
+  it("does not classify setup/naming steps as mutation-required when they only name an output file", () => {
+    const fakeThis: Any = Object.create((TaskExecutor as Any).prototype);
+    fakeThis.agentPolicyConfig = null;
+    const step = {
+      id: "s5",
+      description:
+        "Set research window to the last 24 hours and define output file name `daily-ai-agent-trends-2026-03-03.md`; prepare a short source matrix.",
+      kind: "primary",
+      status: "pending",
+    };
+
+    const contract = (TaskExecutor as Any).prototype.resolveStepExecutionContract.call(fakeThis, step);
+    expect(contract.mode).not.toBe("mutation_required");
+  });
+
+  it("still infers write_file for explicit draft-to-file steps", () => {
+    const fakeThis: Any = Object.create((TaskExecutor as Any).prototype);
+    const requiredTools = (TaskExecutor as Any).prototype.extractRequiredToolsFromStepDescription.call(
+      fakeThis,
+      "Draft daily-ai-agent-trends-2026-03-03.md with sections and citations.",
+    ) as Set<string>;
+
+    expect(requiredTools.has("write_file")).toBe(true);
   });
 });
