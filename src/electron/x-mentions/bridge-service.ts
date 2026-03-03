@@ -111,14 +111,11 @@ export class XMentionBridgeService {
         throw new Error("bird mentions requires JSON support. Upgrade bird CLI to a newer version.");
       }
       const mentions = sortMentionsOldestFirst(parseBirdMentions(result.data ?? result.stdout));
-      let acceptedThisPoll = 0;
-      let ignoredThisPoll = 0;
 
       for (const mention of mentions) {
         const parsed = parseMentionTriggerCommand(mention, trigger);
         if (!parsed.accepted || !parsed.mention) {
           this.statusStore.incrementIgnored();
-          ignoredThisPoll += 1;
           continue;
         }
 
@@ -131,14 +128,7 @@ export class XMentionBridgeService {
           tempWorkspaceKey: `x-${parsed.mention.author}`,
         });
         this.statusStore.incrementAccepted();
-        acceptedThisPoll += 1;
         this.statusStore.setLastTaskId(created.taskId);
-      }
-
-      if (mentions.length > 0) {
-        console.log(
-          `[X Mentions] Bridge poll processed ${mentions.length} mentions (${acceptedThisPoll} accepted, ${ignoredThisPoll} ignored)`,
-        );
       }
 
       this.statusStore.markSuccess();
