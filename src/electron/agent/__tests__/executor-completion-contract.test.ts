@@ -8,6 +8,7 @@ type HarnessOptions = {
   lastOutput: string;
   createdFiles?: string[];
   planStepDescription?: string;
+  source?: "manual" | "cron" | "hook" | "api";
 };
 
 function createExecuteHarness(options: HarnessOptions) {
@@ -22,6 +23,7 @@ function createExecuteHarness(options: HarnessOptions) {
     createdAt: Date.now() - 1000,
     currentAttempt: 0,
     maxAttempts: 1,
+    ...(options.source ? { source: options.source } : {}),
   };
   executor.workspace = {
     id: "workspace-1",
@@ -56,6 +58,7 @@ function createExecuteHarness(options: HarnessOptions) {
   executor.waitingForUserInput = false;
   executor.requiresTestRun = false;
   executor.testRunObserved = false;
+  executor.partialSuccessForCronEnabled = true;
   executor.taskCompleted = false;
   executor.lastAssistantOutput = options.lastOutput;
   executor.lastNonVerificationOutput = options.lastOutput;
@@ -409,6 +412,233 @@ DOCUMENT CREATION BEST PRACTICES:
         status: "failed",
         error: expect.stringContaining("missing source validation"),
       }),
+    );
+  });
+
+  it("downgrades source-validation guard failures to partial success for cron best-effort runs", async () => {
+    const executor = createExecuteHarness({
+      title: "Daily AI Agent Trends Research",
+      prompt:
+        "Research the latest AI agent trends from the last day and summarize key launches and funding updates.\n\n[AGENT_STRATEGY_CONTEXT_V1]\ntimeout_finalize_bias=true\n[/AGENT_STRATEGY_CONTEXT_V1]",
+      lastOutput:
+        "Major releases include Gemini 2.0 and Copilot Marketplace. Funding surged to $2.5B this quarter.",
+      planStepDescription: "Summarize latest AI agent releases and funding trends",
+      source: "cron",
+    });
+
+    (executor as Any).toolResultMemory = [
+      {
+        tool: "web_search",
+        summary: "query \"AI agent trends\" returned sources",
+        timestamp: Date.now(),
+      },
+    ];
+    (executor as Any).webEvidenceMemory = [
+      {
+        tool: "web_fetch",
+        url: "https://example.com/ai-news",
+        timestamp: Date.now(),
+      },
+    ];
+
+    await (executor as Any).execute();
+
+    expect(executor.daemon.completeTask).toHaveBeenCalledTimes(1);
+    expect(executor.daemon.completeTask).toHaveBeenCalledWith(
+      "task-1",
+      expect.stringContaining("could not be fully validated"),
+      expect.objectContaining({
+        terminalStatus: "partial_success",
+        failureClass: "contract_error",
+      }),
+    );
+    expect(executor.daemon.updateTask).not.toHaveBeenCalledWith(
+      "task-1",
+      expect.objectContaining({
+        status: "failed",
+      }),
+    );
+  });
+
+  it("does not downgrade source-validation failures when no fetched source evidence exists", async () => {
+    const executor = createExecuteHarness({
+      title: "Daily AI Agent Trends Research",
+      prompt:
+        "Research the latest AI agent trends from the last day and summarize key launches and funding updates.\n\n[AGENT_STRATEGY_CONTEXT_V1]\ntimeout_finalize_bias=true\n[/AGENT_STRATEGY_CONTEXT_V1]",
+      lastOutput:
+        "Major releases include Gemini 2.0 and Copilot Marketplace. Funding surged to $2.5B this quarter.",
+      planStepDescription: "Summarize latest AI agent releases and funding trends",
+      source: "cron",
+    });
+
+    (executor as Any).toolResultMemory = [
+      {
+        tool: "web_search",
+        summary: "query \"AI agent trends\" returned sources",
+        timestamp: Date.now(),
+      },
+    ];
+    (executor as Any).webEvidenceMemory = [];
+
+    await (executor as Any).execute();
+
+    expect(executor.daemon.completeTask).not.toHaveBeenCalled();
+    expect(executor.daemon.updateTask).toHaveBeenCalledWith(
+      "task-1",
+      expect.objectContaining({
+        status: "failed",
+        error: expect.stringContaining("missing source validation"),
+      }),
+    );
+  });
+
+  it("extracts dated evidence from relative publish-time phrases", () => {
+    const executor = createExecuteHarness({
+      title: "Daily AI Agent Trends Research",
+      prompt: "Research the latest AI agent trends and summarize key launches.",
+      lastOutput: "Summary",
+      planStepDescription: "Fetch and summarize sources",
+    });
+
+    (executor as Any).recordWebEvidence("web_fetch", {
+      url: "https://example.com/ai-news",
+      title: "AI launch updates",
+      content: "Published 3 hours ago",
+    });
+
+    const evidence = (executor as Any).webEvidenceMemory || [];
+    expect(evidence.length).toBeGreaterThan(0);
+    expect(evidence[0].publishDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect((executor as Any).hasDatedFetchedWebEvidence(1)).toBe(true);
+  });
+
+  it("ignores generic relative time phrases without publication context cues", () => {
+    const executor = createExecuteHarness({
+      title: "Daily AI Agent Trends Research",
+      prompt: "Research the latest AI agent trends and summarize key launches.",
+      lastOutput: "Summary",
+      planStepDescription: "Fetch and summarize sources",
+    });
+
+    (executor as Any).recordWebEvidence("web_fetch", {
+      url: "https://example.com/ai-news",
+      title: "AI launch updates",
+      content: "Top discussion: 3 hours ago in comments.",
+    });
+
+    expect((executor as Any).hasDatedFetchedWebEvidence(1)).toBe(false);
+  });
+
+  it("applies source-validation fallback during interruption-resume finalization", async () => {
+    const executor = createExecuteHarness({
+      title: "Daily AI Agent Trends Research",
+      prompt:
+        "Research the latest AI agent trends from the last day and summarize key launches and funding updates.\n\n[AGENT_STRATEGY_CONTEXT_V1]\ntimeout_finalize_bias=true\n[/AGENT_STRATEGY_CONTEXT_V1]",
+      lastOutput:
+        "Major releases include Gemini 2.0 and Copilot Marketplace. Funding surged to $2.5B this quarter.",
+      planStepDescription: "Summarize latest AI agent releases and funding trends",
+      source: "cron",
+    });
+    executor.plan = {
+      description: "Plan",
+      steps: [{ id: "1", description: "Done", status: "completed" }],
+    };
+    (executor as Any).webEvidenceMemory = [
+      {
+        tool: "web_fetch",
+        url: "https://example.com/ai-news",
+        timestamp: Date.now(),
+      },
+    ];
+
+    await (executor as Any).resumeAfterInterruptionUnlocked();
+
+    expect(executor.daemon.completeTask).toHaveBeenCalledTimes(1);
+    expect(executor.daemon.completeTask).toHaveBeenCalledWith(
+      "task-1",
+      expect.stringContaining("could not be fully validated"),
+      expect.objectContaining({
+        terminalStatus: "partial_success",
+        failureClass: "contract_error",
+      }),
+    );
+    expect(executor.daemon.updateTask).not.toHaveBeenCalledWith(
+      "task-1",
+      expect.objectContaining({ status: "failed" }),
+    );
+  });
+
+  it("applies source-validation fallback during manual continuation finalization", async () => {
+    const executor = createExecuteHarness({
+      title: "Daily AI Agent Trends Research",
+      prompt:
+        "Research the latest AI agent trends from the last day and summarize key launches and funding updates.\n\n[AGENT_STRATEGY_CONTEXT_V1]\ntimeout_finalize_bias=true\n[/AGENT_STRATEGY_CONTEXT_V1]",
+      lastOutput:
+        "Major releases include Gemini 2.0 and Copilot Marketplace. Funding surged to $2.5B this quarter.",
+      planStepDescription: "Summarize latest AI agent releases and funding trends",
+      source: "cron",
+    });
+
+    executor.continuationCount = 0;
+    executor.continuationWindow = 1;
+    executor.continuationStrategy = "adaptive_progress";
+    executor.maxAutoContinuations = 3;
+    executor.minProgressScoreForAutoContinue = 0.25;
+    executor.maxLifetimeTurns = 320;
+    executor.lifetimeTurnCount = 10;
+    executor.globalTurnCount = 60;
+    executor.iterationCount = 2;
+    executor.totalInputTokens = 0;
+    executor.totalOutputTokens = 0;
+    executor.totalCost = 0;
+    executor.usageOffsetInputTokens = 0;
+    executor.usageOffsetOutputTokens = 0;
+    executor.usageOffsetCost = 0;
+    executor.windowStartEventCount = 0;
+    executor.noProgressStreak = 0;
+    executor.pendingLoopStrategySwitchMessage = "";
+    executor.appendConversationHistory = vi.fn();
+    executor.executePlan = vi.fn(async () => undefined);
+    executor.maybeCompactBeforeContinuation = vi.fn(async () => undefined);
+    executor.assessContinuationWindow = vi.fn(() => ({
+      progressScore: 0.6,
+      loopRiskIndex: 0.2,
+      repeatedFingerprintCount: 0,
+      dominantFingerprint: "tool::input::ok",
+      windowSummary: {
+        stepCompleted: 1,
+        writeMutations: 0,
+        resolvedErrorRecoveries: 0,
+        repeatedErrorPenalty: 0,
+        emptyNoOpTurns: 0,
+      },
+    }));
+    executor.plan = {
+      description: "Plan",
+      steps: [{ id: "1", description: "Done", status: "completed" }],
+    };
+    (executor as Any).webEvidenceMemory = [
+      {
+        tool: "web_fetch",
+        url: "https://example.com/ai-news",
+        timestamp: Date.now(),
+      },
+    ];
+
+    await (executor as Any).continueAfterBudgetExhaustedUnlocked({ mode: "manual" });
+
+    expect(executor.daemon.completeTask).toHaveBeenCalledTimes(1);
+    expect(executor.daemon.completeTask).toHaveBeenCalledWith(
+      "task-1",
+      expect.stringContaining("could not be fully validated"),
+      expect.objectContaining({
+        terminalStatus: "partial_success",
+        failureClass: "contract_error",
+      }),
+    );
+    expect(executor.daemon.updateTask).not.toHaveBeenCalledWith(
+      "task-1",
+      expect.objectContaining({ status: "failed" }),
     );
   });
 
