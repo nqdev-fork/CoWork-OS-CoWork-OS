@@ -143,7 +143,7 @@ export function resolveTimelineIndicator(event: TaskEvent): TimelineIndicatorSpe
   }
 
   if (event.type === "timeline_artifact_emitted" || effectiveType === "artifact_created") {
-    return { icon: FileOutput, tone: "success", label: "Artifact emitted" };
+    return { icon: FileOutput, tone: "success", label: "Output ready" };
   }
 
   if (
