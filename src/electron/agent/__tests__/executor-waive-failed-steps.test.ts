@@ -6,6 +6,7 @@ function getWaivableStepIds(
   opts?: {
     budgetConstrainedFailedStepIds?: string[];
     blockingVerificationFailedStepIds?: string[];
+    planCompletedEffectively?: boolean;
   },
 ): string[] {
   const executor = Object.create(TaskExecutor.prototype) as Any;
@@ -13,6 +14,7 @@ function getWaivableStepIds(
   executor.budgetConstrainedFailedStepIds = new Set(opts?.budgetConstrainedFailedStepIds || []);
   executor.blockingVerificationFailedStepIds = new Set(opts?.blockingVerificationFailedStepIds || []);
   executor.nonBlockingVerificationFailedStepIds = new Set();
+  executor.planCompletedEffectively = !!opts?.planCompletedEffectively;
   return (TaskExecutor as Any).prototype.getWaivableFailedStepIdsAtCompletion.call(executor);
 }
 
@@ -109,6 +111,49 @@ describe("TaskExecutor getWaivableFailedStepIdsAtCompletion", () => {
       ],
       {
         budgetConstrainedFailedStepIds: [],
+      },
+    );
+
+    expect(result).toEqual([]);
+  });
+
+  it("waives non-mutation failed steps when executePlan marked completion-with-warnings", () => {
+    const result = getWaivableStepIds(
+      [
+        { id: "1", description: "Collect Reddit findings", status: "failed", kind: "primary" },
+        { id: "2", description: "Collect X findings", status: "completed", kind: "primary" },
+        { id: "3", description: "Draft report", status: "completed", kind: "primary" },
+        { id: "5", description: "Collect tech news findings", status: "completed", kind: "primary" },
+        {
+          id: "4",
+          description: "Verify completeness and accuracy before marking complete",
+          status: "failed",
+          kind: "verification",
+        },
+      ],
+      {
+        planCompletedEffectively: true,
+      },
+    );
+
+    expect(result).toEqual(expect.arrayContaining(["1", "4"]));
+    expect(result).toHaveLength(2);
+  });
+
+  it("does not waive mutation-required failures even in completion-with-warnings mode", () => {
+    const result = getWaivableStepIds(
+      [
+        {
+          id: "1",
+          description: "Create findings.md with full sections and citations",
+          status: "failed",
+          kind: "primary",
+        },
+        { id: "2", description: "Normalize findings", status: "completed", kind: "primary" },
+        { id: "3", description: "Finalize answer", status: "completed", kind: "primary" },
+      ],
+      {
+        planCompletedEffectively: true,
       },
     );
 
