@@ -243,7 +243,7 @@ export class EvalService {
     const taskRow = this.db
       .prepare(
         `
-        SELECT id, title, prompt, raw_prompt, user_prompt, status, workspace_id, terminal_status, result_summary
+        SELECT id, title, prompt, raw_prompt, user_prompt, status, workspace_id, terminal_status, failure_class, error, result_summary
         FROM tasks
         WHERE id = ?
       `,
@@ -259,6 +259,49 @@ export class EvalService {
     const now = Date.now();
     const id = uuidv4();
     const terminalStatus = normalizeTerminalStatus(taskRow);
+    const eventRows = this.db
+      .prepare(
+        `
+        SELECT type, payload
+        FROM task_events
+        WHERE task_id = ?
+      `,
+      )
+      .all(taskId) as Array<{ type: string; payload: string }>;
+    const eventText = eventRows
+      .map((row) => `${row.type} ${String(row.payload || "")}`)
+      .join("\n")
+      .toLowerCase();
+    const reliabilityTags = new Set<string>();
+    const failureClass = String(taskRow.failure_class || "").toLowerCase();
+    const errorText = String(taskRow.error || "").toLowerCase();
+    const summaryText = String(taskRow.result_summary || "").toLowerCase();
+    const combined = `${failureClass}\n${errorText}\n${summaryText}\n${eventText}`;
+    if (
+      /contract_unmet_write_required|artifact_write_checkpoint_failed|required artifact mutation/.test(
+        combined,
+      )
+    ) {
+      reliabilityTags.add("contract_unmet_write_required");
+    }
+    if (/missing_required_workspace_artifact/.test(combined)) {
+      reliabilityTags.add("missing_required_workspace_artifact");
+    }
+    if (
+      /verification failed|does \*\*not\*\* pass the completion criteria|required verification|platform minimums not met/.test(
+        combined,
+      )
+    ) {
+      reliabilityTags.add("verification_required_fail");
+    }
+    if (
+      /dependency_unavailable|external_unknown|getaddrinfo|enotfound|err_network|opening handshake has timed out|status:\s*408/.test(
+        combined,
+      )
+    ) {
+      reliabilityTags.add("dependency_unavailable");
+    }
+    const reliabilityTagList = Array.from(reliabilityTags.values());
 
     const evalCase: EvalCase = {
       id,
@@ -269,10 +312,13 @@ export class EvalService {
       sanitizedPrompt,
       assertions: {
         expectedTerminalStatus: "ok",
+        mustContainAll: reliabilityTagList.length > 0 ? reliabilityTagList : undefined,
       },
       metadata: {
         extractedFromTaskStatus: taskRow.status,
         extractedFromTerminalStatus: terminalStatus,
+        extractedFromFailureClass: taskRow.failure_class || null,
+        reliabilityTags: reliabilityTagList,
         extractedAt: new Date(now).toISOString(),
       },
       createdAt: now,
@@ -508,7 +554,7 @@ export class EvalService {
     const taskRows = this.db
       .prepare(
         `
-        SELECT id, status, terminal_status, current_attempt
+        SELECT id, status, terminal_status, failure_class, current_attempt
         FROM tasks
         WHERE created_at >= ?
           AND (parent_task_id IS NULL OR parent_task_id = '')
@@ -556,6 +602,34 @@ export class EvalService {
     const verificationPassRate =
       verificationDenominator > 0 ? verificationPassed / verificationDenominator : 0;
 
+    const terminalTasks = taskRows.filter(
+      (task) => task.status === "completed" || task.status === "failed" || task.status === "cancelled",
+    );
+    const terminalTotal = terminalTasks.length;
+    const coreOkCount = terminalTasks.filter((task) => normalizeTerminalStatus(task) === "ok").length;
+    const corePartialCount = terminalTasks.filter(
+      (task) => normalizeTerminalStatus(task) === "partial_success" || normalizeTerminalStatus(task) === "needs_user_action",
+    ).length;
+    const dependencyIssueCount = terminalTasks.filter((task) =>
+      /dependency_unavailable|external_unknown|tool_error|provider_quota/i.test(
+        String(task.failure_class || ""),
+      ),
+    ).length;
+    const verificationBlockCount = terminalTasks.filter((task) =>
+      /required_verification/i.test(String(task.failure_class || "")),
+    ).length;
+    const artifactContractFailureCount = terminalTasks.filter((task) =>
+      /contract_unmet_write_required|required_contract|contract_error/i.test(
+        String(task.failure_class || ""),
+      ),
+    ).length;
+    const agentCoreSuccessRate = terminalTotal > 0 ? (coreOkCount + corePartialCount) / terminalTotal : 0;
+    const dependencyAvailabilityRate =
+      terminalTotal > 0 ? (terminalTotal - dependencyIssueCount) / terminalTotal : 0;
+    const verificationBlockRate = terminalTotal > 0 ? verificationBlockCount / terminalTotal : 0;
+    const artifactContractFailureRate =
+      terminalTotal > 0 ? artifactContractFailureCount / terminalTotal : 0;
+
     const toolCallRows = this.db
       .prepare(
         `
@@ -591,6 +665,10 @@ export class EvalService {
       taskSuccessRate,
       approvalDeadEndRate,
       verificationPassRate,
+      agentCoreSuccessRate,
+      dependencyAvailabilityRate,
+      verificationBlockRate,
+      artifactContractFailureRate,
       retriesPerTask,
       toolFailureRateByTool,
     };
