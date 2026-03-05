@@ -7,6 +7,7 @@ import {
   Artifact,
   Workspace,
   ApprovalRequest,
+  InputRequest,
   Skill,
   WorkspacePermissions,
   isTempWorkspaceId,
@@ -485,6 +486,9 @@ export class TaskRepository {
 
       const deleteApprovals = this.db.prepare("DELETE FROM approvals WHERE task_id = ?");
       deleteApprovals.run(taskId);
+
+      const deleteInputRequests = this.db.prepare("DELETE FROM input_requests WHERE task_id = ?");
+      deleteInputRequests.run(taskId);
 
       // Delete activity feed entries for this task
       const deleteActivities = this.db.prepare("DELETE FROM activity_feed WHERE task_id = ?");
@@ -1238,6 +1242,137 @@ export class ApprovalRepository {
       status: row.status,
       requestedAt: row.requested_at,
       resolvedAt: row.resolved_at || undefined,
+    };
+  }
+}
+
+export class InputRequestRepository {
+  constructor(private db: Database.Database) {}
+
+  create(request: {
+    taskId: string;
+    questions: InputRequest["questions"];
+    requestedAt: number;
+    status?: InputRequest["status"];
+  }): InputRequest {
+    const newRequest: InputRequest = {
+      id: uuidv4(),
+      taskId: request.taskId,
+      questions: request.questions,
+      status: request.status || "pending",
+      requestedAt: request.requestedAt,
+    };
+
+    const stmt = this.db.prepare(`
+      INSERT INTO input_requests (id, task_id, questions, status, answers, requested_at, resolved_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    stmt.run(
+      newRequest.id,
+      newRequest.taskId,
+      JSON.stringify(newRequest.questions),
+      newRequest.status,
+      null,
+      newRequest.requestedAt,
+      null,
+    );
+
+    return newRequest;
+  }
+
+  resolve(
+    id: string,
+    status: Extract<InputRequest["status"], "submitted" | "dismissed">,
+    answers?: InputRequest["answers"],
+  ): void {
+    const stmt = this.db.prepare(`
+      UPDATE input_requests
+      SET status = ?, answers = ?, resolved_at = ?
+      WHERE id = ? AND status = 'pending'
+    `);
+    stmt.run(status, answers ? JSON.stringify(answers) : null, Date.now(), id);
+  }
+
+  findById(id: string): InputRequest | undefined {
+    const stmt = this.db.prepare("SELECT * FROM input_requests WHERE id = ?");
+    const row = stmt.get(id) as Any;
+    return row ? this.mapRowToInputRequest(row) : undefined;
+  }
+
+  findPendingByTaskId(taskId: string): InputRequest[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM input_requests
+      WHERE task_id = ? AND status = 'pending'
+      ORDER BY requested_at ASC
+    `);
+    const rows = stmt.all(taskId) as Any[];
+    return rows.map((row) => this.mapRowToInputRequest(row));
+  }
+
+  list(params: {
+    limit: number;
+    offset: number;
+    taskId?: string;
+    status?: InputRequest["status"];
+  }): InputRequest[] {
+    if (params.taskId && params.status) {
+      const stmt = this.db.prepare(`
+        SELECT * FROM input_requests
+        WHERE task_id = ? AND status = ?
+        ORDER BY requested_at DESC
+        LIMIT ? OFFSET ?
+      `);
+      const rows = stmt.all(params.taskId, params.status, params.limit, params.offset) as Any[];
+      return rows.map((row) => this.mapRowToInputRequest(row));
+    }
+
+    if (params.taskId) {
+      const stmt = this.db.prepare(`
+        SELECT * FROM input_requests
+        WHERE task_id = ?
+        ORDER BY requested_at DESC
+        LIMIT ? OFFSET ?
+      `);
+      const rows = stmt.all(params.taskId, params.limit, params.offset) as Any[];
+      return rows.map((row) => this.mapRowToInputRequest(row));
+    }
+
+    if (params.status) {
+      const stmt = this.db.prepare(`
+        SELECT * FROM input_requests
+        WHERE status = ?
+        ORDER BY requested_at DESC
+        LIMIT ? OFFSET ?
+      `);
+      const rows = stmt.all(params.status, params.limit, params.offset) as Any[];
+      return rows.map((row) => this.mapRowToInputRequest(row));
+    }
+
+    const stmt = this.db.prepare(`
+      SELECT * FROM input_requests
+      ORDER BY requested_at DESC
+      LIMIT ? OFFSET ?
+    `);
+    const rows = stmt.all(params.limit, params.offset) as Any[];
+    return rows.map((row) => this.mapRowToInputRequest(row));
+  }
+
+  private mapRowToInputRequest(row: Any): InputRequest {
+    return {
+      id: String(row.id ?? ""),
+      taskId: String(row.task_id ?? ""),
+      questions: safeJsonParse<InputRequest["questions"]>(
+        row.questions,
+        [],
+        "inputRequest.questions",
+      ),
+      status: String(row.status ?? "pending") as InputRequest["status"],
+      answers: row.answers
+        ? safeJsonParse<InputRequest["answers"]>(row.answers, undefined, "inputRequest.answers")
+        : undefined,
+      requestedAt: Number(row.requested_at ?? 0),
+      resolvedAt: row.resolved_at ? Number(row.resolved_at) : undefined,
     };
   }
 }
