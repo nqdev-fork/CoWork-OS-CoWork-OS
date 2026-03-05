@@ -151,7 +151,7 @@ export class TaskStrategyService {
       },
       execution: {
         conversationMode: "task",
-        maxTurns: 60,
+        maxTurns: 100,
         qualityPasses: 2,
         answerFirst: false,
         boundedResearch: true,
@@ -216,6 +216,11 @@ export class TaskStrategyService {
       /\b(then|after that|after this|next|and then|finally|once done|once that's done|step \d)\b/.test(
         taskText,
       ) && executionVerbCount >= 3;
+    const artifactCreationSignal =
+      /\b(create|build|make|implement|scaffold|generate|start building|start build)\b/.test(taskText) &&
+      /\b(website|web page|webapp|frontend|landing page|app|application|project|repo|repository|codebase|distro|distribution|iso|image|artifact|file|files|workspace|requirements\.md|config)\b/.test(
+        taskText,
+      );
     const buildVerifyRenderArtifactRequested =
       /\b(build|create|implement|scaffold|generate)\b/.test(taskText) &&
       /\b(verify|validate|test|check)\b/.test(taskText) &&
@@ -243,7 +248,7 @@ export class TaskStrategyService {
       route.intent === "execution" ||
       route.intent === "workflow" ||
       route.intent === "deep_work" ||
-      (route.intent === "mixed" && hasHardExecutionSignal) ||
+      (route.intent === "mixed" && (hasHardExecutionSignal || artifactCreationSignal)) ||
       buildVerifyRenderArtifactRequested ||
       buildRenderArtifactRequested
         ? "execute"
@@ -339,20 +344,53 @@ export class TaskStrategyService {
     strategy: DerivedTaskStrategy,
   ): AgentConfig {
     const next: AgentConfig = existing ? { ...existing } : {};
+    const existingExecutionMode = existing?.executionMode;
+    const inferredExistingExecutionModeSource =
+      existing?.executionModeSource ||
+      (existingExecutionMode
+        ? existingExecutionMode === "execute"
+          ? "strategy"
+          : "user"
+        : undefined);
     if (!next.conversationMode || next.conversationMode === "hybrid") {
       next.conversationMode = strategy.conversationMode;
     }
     if (!next.executionMode) {
       next.executionMode = strategy.executionMode;
+      next.executionModeSource = "strategy";
     } else if (next.executionMode === "execute" && strategy.executionMode !== "execute") {
       // Downshift stale execute defaults for non-execution intents (advice/chat/planning/thinking).
       next.executionMode = strategy.executionMode;
+      next.executionModeSource = "strategy";
+    } else if (!next.executionModeSource && inferredExistingExecutionModeSource) {
+      next.executionModeSource = inferredExistingExecutionModeSource;
     }
     if (!next.taskDomain || next.taskDomain === "auto") {
       next.taskDomain = strategy.taskDomain;
     }
     if (typeof next.maxTurns !== "number") {
       next.maxTurns = strategy.maxTurns;
+    }
+    if (!next.turnBudgetPolicy) {
+      next.turnBudgetPolicy = strategy.executionMode === "execute" ? "adaptive_unbounded" : "hard_window";
+    }
+    if (!next.workspacePathAliasPolicy) {
+      next.workspacePathAliasPolicy = "rewrite_and_retry";
+    }
+    if (!next.taskPathRootPolicy) {
+      next.taskPathRootPolicy = "pin_and_rewrite";
+    }
+    if (typeof next.pathDriftRetryBudget !== "number") {
+      next.pathDriftRetryBudget = 3;
+    }
+    if (typeof next.suppressToolDisableOnRecoverablePathDrift !== "boolean") {
+      next.suppressToolDisableOnRecoverablePathDrift = true;
+    }
+    if (typeof next.mutationCheckpointRetryBudget !== "number") {
+      next.mutationCheckpointRetryBudget = 1;
+    }
+    if (typeof next.followUpAutoRecovery !== "boolean") {
+      next.followUpAutoRecovery = true;
     }
     if (!next.qualityPasses) {
       next.qualityPasses = strategy.qualityPasses;
@@ -498,6 +536,7 @@ export class TaskStrategyService {
       "scratchpad_read",
       // Meta tools
       "revise_plan",
+      "request_user_input",
       "task_history",
       "set_personality",
       "set_agent_name",
