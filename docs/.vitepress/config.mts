@@ -2,21 +2,21 @@ import { defineConfig } from 'vitepress';
 
 export default defineConfig({
   title: 'CoWork OS',
-  description: 'CoWork OS is a local-first, security-hardened OpenClaw alternative for operating AI agents in production.',
+  description: 'CoWork OS is a local-first, security-hardened runtime for operating AI agents in production.',
   base: '/CoWork-OS/',
 
   ignoreDeadLinks: true,
 
   head: [
     ['meta', { name: 'theme-color', content: '#646cff' }],
-    ['meta', { name: 'description', content: 'Looking for an OpenClaw alternative? CoWork OS helps teams run local-first AI workflows with approvals, guardrails, and multi-channel operations.' }],
-    ['meta', { name: 'keywords', content: 'OpenClaw alternative, alternative to OpenClaw, OpenClaw vs CoWork OS, local-first AI agent OS' }],
+    ['meta', { name: 'description', content: 'CoWork OS helps teams run local-first AI workflows with approvals, guardrails, and multi-channel operations.' }],
+    ['meta', { name: 'keywords', content: 'local-first AI agent OS, approvals, guardrails, production AI workflows' }],
   ],
 
   themeConfig: {
     nav: [
       { text: 'Guide', link: '/getting-started' },
-      { text: 'OpenClaw Alternative', link: '/openclaw-comparison' },
+      { text: 'Platform Updates', link: '/integration-skill-bootstrap-lifecycle' },
       { text: 'Architecture', link: '/architecture' },
       { text: 'Security', link: '/security/' },
       { text: 'GitHub', link: 'https://github.com/CoWork-OS/CoWork-OS' },
@@ -28,7 +28,7 @@ export default defineConfig({
         items: [
           { text: 'Introduction', link: '/' },
           { text: 'Getting Started', link: '/getting-started' },
-          { text: 'OpenClaw Alternative Guide', link: '/openclaw-comparison' },
+          { text: 'Platform Updates', link: '/integration-skill-bootstrap-lifecycle' },
           { text: 'Migration Guide', link: '/migration' },
         ],
       },
@@ -40,6 +40,7 @@ export default defineConfig({
           { text: 'Live Canvas', link: '/live-canvas' },
           { text: 'Agent Teams', link: '/agent-teams-contract' },
           { text: 'Enterprise Connectors', link: '/enterprise-connectors' },
+          { text: 'Integration + Skill Lifecycle', link: '/integration-skill-bootstrap-lifecycle' },
           { text: 'Node Daemon', link: '/node-daemon' },
           { text: 'Placeholder Engine', link: '/placeholder-engine' },
           { text: 'Context Compaction', link: '/context-compaction' },
