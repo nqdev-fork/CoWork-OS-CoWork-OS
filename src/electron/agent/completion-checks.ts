@@ -25,8 +25,8 @@ const CODE_LOOP_GUARDRAIL: LoopGuardrailConfig = {
   stopReasonMaxTokenStreak: 3,
   lowProgressWindowSize: 10,
   lowProgressSameTargetMinCalls: 7,
-  followUpLockMinStreak: 12,
-  followUpLockMinToolCalls: 12,
+  followUpLockMinStreak: 6,
+  followUpLockMinToolCalls: 6,
   skippedToolOnlyTurnThreshold: 3,
 };
 
