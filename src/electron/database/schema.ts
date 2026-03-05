@@ -380,6 +380,17 @@ export class DatabaseManager {
         FOREIGN KEY (task_id) REFERENCES tasks(id)
       );
 
+      CREATE TABLE IF NOT EXISTS input_requests (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        questions TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        answers TEXT,
+        requested_at INTEGER NOT NULL,
+        resolved_at INTEGER,
+        FOREIGN KEY (task_id) REFERENCES tasks(id)
+      );
+
       CREATE TABLE IF NOT EXISTS skills (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL UNIQUE,
@@ -412,6 +423,8 @@ export class DatabaseManager {
       CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(task_id);
       CREATE INDEX IF NOT EXISTS idx_approvals_task ON approvals(task_id);
       CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
+      CREATE INDEX IF NOT EXISTS idx_input_requests_task_status ON input_requests(task_id, status);
+      CREATE INDEX IF NOT EXISTS idx_input_requests_requested ON input_requests(requested_at);
       CREATE INDEX IF NOT EXISTS idx_llm_models_active ON llm_models(is_active);
       CREATE INDEX IF NOT EXISTS idx_eval_cases_workspace ON eval_cases(workspace_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_eval_cases_source_task ON eval_cases(source_task_id);
