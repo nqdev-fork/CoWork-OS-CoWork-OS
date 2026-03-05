@@ -189,6 +189,9 @@ export type EventType =
   | "approval_requested"
   | "approval_granted"
   | "approval_denied"
+  | "input_request_created"
+  | "input_request_resolved"
+  | "input_request_dismissed"
   | "file_created"
   | "file_modified"
   | "file_deleted"
@@ -220,6 +223,36 @@ export type EventType =
   | "step_timeout"
   | "tool_blocked"
   | "mode_gate_blocked"
+  | "execution_mode_auto_promoted"
+  | "plan_contract_conflict"
+  | "workspace_boundary_recovery"
+  | "workspace_path_alias_normalized"
+  | "workspace_path_alias_recovery_attempted"
+  | "workspace_path_alias_recovery_failed"
+  | "task_path_root_pinned"
+  | "task_path_rewrite_applied"
+  | "task_path_recovery_attempted"
+  | "task_path_recovery_failed"
+  | "tool_disable_suppressed_recoverable_path_drift"
+  | "mutation_checkpoint_retry_applied"
+  | "step_contract_satisfied_by_prior_mutation"
+  | "required_tool_inference_decision"
+  | "mutation_duplicate_bypass_applied"
+  | "step_contract_reconciled_posthoc"
+  | "verification_checklist_evaluated"
+  | "verification_mode_selected"
+  | "follow_up_tool_lock_forced_finalization"
+  | "tool_protocol_violation"
+  | "turn_window_soft_exhausted"
+  | "follow_up_turn_recovery_started"
+  | "follow_up_turn_recovery_completed"
+  | "follow_up_turn_recovery_blocked"
+  | "safety_stop_triggered"
+  | "turn_policy_selected"
+  | "verification_preflight_policy_applied"
+  | "verification_artifact_output_downgraded"
+  | "verification_missing_artifact_ignored"
+  | "verification_text_checklist_evaluated"
   | "progress_update"
   | "llm_retry"
   | "follow_up_completed"
@@ -394,6 +427,7 @@ export type ToolType =
   | "orchestrate_agents"
   // Meta tools
   | "revise_plan"
+  | "request_user_input"
   | "task_history"
   | "task_events";
 
@@ -522,7 +556,7 @@ export const TOOL_GROUPS = {
   // Image generation - requires API access
   "group:image": ["generate_image"],
   // Meta/control tools
-  "group:meta": ["revise_plan"],
+  "group:meta": ["revise_plan", "request_user_input"],
 } as const;
 
 export type ToolGroupName = keyof typeof TOOL_GROUPS;
@@ -603,6 +637,7 @@ export const TOOL_RISK_LEVELS: Record<ToolType, ToolRiskLevel> = {
   orchestrate_agents: "write",
   // Meta
   revise_plan: "read",
+  request_user_input: "read",
   task_history: "read",
   task_events: "read",
 };
@@ -661,6 +696,14 @@ export interface SuccessCriteria {
 export type AgentType = "main" | "sub" | "parallel";
 export type ConversationMode = "task" | "chat" | "hybrid" | "think";
 export type ExecutionMode = "execute" | "propose" | "analyze";
+export type ExecutionModeSource = "user" | "strategy" | "auto_promote";
+export type TurnBudgetPolicy = "hard_window" | "adaptive_unbounded";
+export type VerificationArtifactPathPolicy =
+  | "require_existing"
+  | "inline_if_missing"
+  | "always_inline";
+export type WorkspacePathAliasPolicy = "rewrite_and_retry" | "strict_fail" | "disabled";
+export type TaskPathRootPolicy = "pin_and_rewrite" | "strict_fail" | "disabled";
 export type TaskDomain = "auto" | "code" | "research" | "operations" | "writing" | "general";
 export type ToolDecision = "allow" | "deny" | "ask";
 export type LlmProfile = "strong" | "cheap";
@@ -701,6 +744,26 @@ export interface AgentConfig {
   originChannel?: ChannelType;
   /** Maximum number of LLM turns before forcing completion (for sub-agents) */
   maxTurns?: number;
+  /** Turn-window policy: strict hard cap or adaptive unbounded mode with safety stops. */
+  turnBudgetPolicy?: TurnBudgetPolicy;
+  /** Verification-path artifact policy for checklist/report outputs. */
+  verificationArtifactPathPolicy?: VerificationArtifactPathPolicy;
+  /** Workspace alias path policy for absolute model aliases like `/workspace/...`. */
+  workspacePathAliasPolicy?: WorkspacePathAliasPolicy;
+  /** Task path-root policy for relative root drift (for example mixed `project/...` and `app/...`). */
+  taskPathRootPolicy?: TaskPathRootPolicy;
+  /** Retry budget for recoverable path-drift rewrites per step. */
+  pathDriftRetryBudget?: number;
+  /** Suppress tool disablement while recoverable path-drift retries remain. */
+  suppressToolDisableOnRecoverablePathDrift?: boolean;
+  /** Guarded retry budget for mutation checkpoints after recoverable path failures. */
+  mutationCheckpointRetryBudget?: number;
+  /** Optional explicit turn-window cap. `null` disables hard per-window cap enforcement. */
+  windowTurnCap?: number | null;
+  /** Auto-recover follow-up loops when the turn window is exhausted. */
+  followUpAutoRecovery?: boolean;
+  /** High emergency safeguard for runaway loops in adaptive-unbounded mode. */
+  emergencyFuseMaxTurns?: number;
   /** Web search mode override for this task. */
   webSearchMode?: WebSearchMode;
   /** Per-task web_search usage cap override (Claude-style max_uses). */
@@ -750,6 +813,8 @@ export interface AgentConfig {
    * - analyze: strict analysis/read-only mode
    */
   executionMode?: ExecutionMode;
+  /** Source of the current execution mode selection. */
+  executionModeSource?: ExecutionModeSource;
   /**
    * Task domain hint used for orchestration strategy and completion checks.
    * "auto" means inferred from intent router.
@@ -1338,6 +1403,43 @@ export interface ApprovalRequest {
   status: "pending" | "approved" | "denied";
   requestedAt: number;
   resolvedAt?: number;
+}
+
+export interface RequestUserInputOption {
+  label: string;
+  description: string;
+}
+
+export interface RequestUserInputQuestion {
+  header: string; // <= 12 chars
+  id: string; // snake_case
+  question: string;
+  options: RequestUserInputOption[]; // 2..3 options
+}
+
+export interface RequestUserInputArgs {
+  questions: RequestUserInputQuestion[]; // 1..3 questions
+}
+
+export interface InputRequestAnswer {
+  optionLabel?: string;
+  otherText?: string;
+}
+
+export interface InputRequestResponse {
+  requestId: string;
+  status: "submitted" | "dismissed";
+  answers?: Record<string, InputRequestAnswer>;
+}
+
+export interface InputRequest {
+  id: string;
+  taskId: string;
+  questions: RequestUserInputQuestion[];
+  status: "pending" | "submitted" | "dismissed";
+  requestedAt: number;
+  resolvedAt?: number;
+  answers?: Record<string, InputRequestAnswer>;
 }
 
 export interface Skill {
@@ -2638,6 +2740,8 @@ export const IPC_CHANNELS = {
   APPROVAL_RESPOND: "approval:respond",
   APPROVAL_SESSION_AUTO_APPROVE_SET: "approval:sessionAutoApprove:set",
   APPROVAL_SESSION_AUTO_APPROVE_GET: "approval:sessionAutoApprove:get",
+  INPUT_REQUEST_LIST: "inputRequest:list",
+  INPUT_REQUEST_RESPOND: "inputRequest:respond",
 
   // Artifact operations
   ARTIFACT_LIST: "artifact:list",
