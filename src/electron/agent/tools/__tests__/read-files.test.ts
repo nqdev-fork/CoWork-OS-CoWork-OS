@@ -144,6 +144,22 @@ describe("readFilesByPatterns", () => {
     expect(out.content).toContain(expectedContent);
   });
 
+  it("remaps /workspace alias paths into the active workspace for writes", async () => {
+    const out = await fileTools.writeFile("/workspace/influencer-chat-app/src/data/influencers.ts", "ok");
+    expect(out.success).toBe(true);
+    expect(out.path).toBe("influencer-chat-app/src/data/influencers.ts");
+    expect(
+      fs.readFileSync(path.join(tmpDir, "influencer-chat-app", "src", "data", "influencers.ts"), "utf-8"),
+    ).toBe("ok");
+  });
+
+  it("blocks /workspace alias paths when strict alias policy is enabled", async () => {
+    fileTools.setWorkspacePathAliasPolicy("strict_fail");
+    await expect(fileTools.writeFile("/workspace/influencer-chat-app/src/data/influencers.ts", "x")).rejects.toThrow(
+      /alias policy/i,
+    );
+  });
+
   it("returns canonical resolved path after case-insensitive fallback", async () => {
     writeFile(path.join(tmpDir, "docs", "spec.md"), "# Spec\n");
 
