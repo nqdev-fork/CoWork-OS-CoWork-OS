@@ -71,6 +71,7 @@ import { GuardrailManager } from "../guardrails/guardrail-manager";
 import { PlaybookService } from "../memory/PlaybookService";
 import { UserProfileService } from "../memory/UserProfileService";
 import { RelationshipMemoryService } from "../memory/RelationshipMemoryService";
+import { AdaptiveStyleEngine } from "../memory/AdaptiveStyleEngine";
 import { PersonalityManager } from "../settings/personality-manager";
 import { IntentRoute, IntentRouter } from "./strategy/IntentRouter";
 import { DerivedTaskStrategy, TaskStrategyService } from "./strategy/TaskStrategyService";
@@ -3112,6 +3113,8 @@ export class AgentDaemon extends EventEmitter {
           (typeof payload?.content === "string" ? payload.content : "");
         if (text) {
           UserProfileService.ingestUserMessage(text, taskId);
+          // Adaptive style observation — learns communication patterns from user messages
+          AdaptiveStyleEngine.observe(text);
 
           // Mid-conversation correction detection: capture when the user corrects the agent.
           if (taskId && task.workspaceId && detectsCorrection(text)) {
@@ -3141,11 +3144,11 @@ export class AgentDaemon extends EventEmitter {
           }
         }
       } else if (type === "user_feedback") {
-        UserProfileService.ingestUserFeedback(
-          typeof payload?.decision === "string" ? payload.decision : undefined,
-          typeof payload?.reason === "string" ? payload.reason : undefined,
-          taskId,
-        );
+        const feedbackDecision = typeof payload?.decision === "string" ? payload.decision : undefined;
+        const feedbackReason = typeof payload?.reason === "string" ? payload.reason : undefined;
+        UserProfileService.ingestUserFeedback(feedbackDecision, feedbackReason, taskId);
+        // Adaptive style observation — learns from explicit feedback signals
+        AdaptiveStyleEngine.observeFeedback(feedbackDecision, feedbackReason);
       }
     }
     if (isSharedGatewayContext && task.agentConfig?.allowSharedContextMemory !== true) {

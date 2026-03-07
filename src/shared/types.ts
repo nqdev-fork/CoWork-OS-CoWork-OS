@@ -3897,6 +3897,16 @@ export interface GuardrailSettings {
   globalNoProgressCircuitBreaker: number;
   sideChannelDuringExecution: "paused" | "limited" | "enabled";
   sideChannelMaxCallsPerWindow: number;
+
+  // Adaptive Style Engine
+  /** Whether the agent can automatically adjust response style from observed user patterns. Default false. */
+  adaptiveStyleEnabled: boolean;
+  /** Max number of style-level shifts allowed per week (e.g. "balanced" → "terse"). Default 1. */
+  adaptiveStyleMaxDriftPerWeek: number;
+
+  // Cross-Channel Persona Coherence
+  /** Enable channel-specific persona adaptation (Slack, Email, etc. get tailored communication styles). Default false. */
+  channelPersonaEnabled: boolean;
 }
 
 // Default trusted command patterns (glob-like patterns)

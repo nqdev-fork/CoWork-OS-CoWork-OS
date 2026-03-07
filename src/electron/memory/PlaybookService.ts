@@ -1,3 +1,4 @@
+import { EventEmitter } from "events";
 import { MemoryService } from "./MemoryService";
 
 export type ErrorCategory =
@@ -35,6 +36,9 @@ const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
  * - Reinforcement: successful patterns are boosted via reinforcement memories.
  */
 export class PlaybookService {
+  /** Event emitter for playbook events. Emits "pattern-reinforced" when a pattern is reinforced. */
+  static readonly events = new EventEmitter();
+
   /**
    * Capture a playbook entry after task completion or failure.
    */
@@ -154,6 +158,13 @@ export class PlaybookService {
         ].join("\n");
         await MemoryService.capture(workspaceId, undefined, "insight", reinforcement);
       }
+      // Emit event for PlaybookSkillPromoter to pick up
+      this.events.emit("pattern-reinforced", {
+        workspaceId,
+        taskPrompt,
+        toolsUsed,
+        matchCount: matchingEntries.length,
+      });
     } catch {
       // best-effort
     }

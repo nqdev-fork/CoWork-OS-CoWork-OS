@@ -234,11 +234,11 @@ export function maybeInjectToolLoopBreak(opts: {
 
   for (const content of opts.responseContent || []) {
     if (content.type !== "tool_use") continue;
-    const isLoop = opts.detectToolLoop(opts.recentToolCalls, content.name, content.input, 3);
+    const isLoop = opts.detectToolLoop(opts.recentToolCalls, content.name, content.input, 5);
     if (!isLoop) continue;
 
     opts.log(
-      `  │ ⚠ Loop detected: ${content.name} called ${3}+ times on same target — injecting break message`,
+      `  │ ⚠ Loop detected: ${content.name} called ${5}+ times on same target — injecting break message`,
     );
     const messageText =
       opts.mutationRequired && !opts.mutationSatisfied

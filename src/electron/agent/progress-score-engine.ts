@@ -8,6 +8,9 @@ export interface ProgressScoreAssessment {
   windowSummary: {
     stepCompleted: number;
     writeMutations: number;
+    readOperations: number;
+    searchOperations: number;
+    toolSuccesses: number;
     resolvedErrorRecoveries: number;
     repeatedErrorPenalty: number;
     emptyNoOpTurns: number;
@@ -53,6 +56,9 @@ export class ProgressScoreEngine {
   static assessWindow(events: TaskEvent[]): ProgressScoreAssessment {
     let stepCompleted = 0;
     let writeMutations = 0;
+    let readOperations = 0;
+    let searchOperations = 0;
+    let toolSuccesses = 0;
     let resolvedErrorRecoveries = 0;
     let emptyNoOpTurns = 0;
     let repeatedErrorPenalty = 0;
@@ -81,6 +87,25 @@ export class ProgressScoreEngine {
         writeMutations += 1;
       }
 
+      // Track successful tool executions as progress signals
+      if (type === "tool_result" || type === "tool_success") {
+        const payload =
+          event.payload && typeof event.payload === "object"
+            ? (event.payload as Record<string, unknown>)
+            : {};
+        const tool = typeof payload.tool === "string" ? payload.tool : "";
+        const isError = payload.is_error === true || payload.error === true;
+        if (!isError) {
+          toolSuccesses += 1;
+          if (/^(read_file|list_directory|search_files|glob|find_in_file|list_files)$/.test(tool)) {
+            readOperations += 1;
+          }
+          if (/^(web_search|web_fetch|search)/.test(tool)) {
+            searchOperations += 1;
+          }
+        }
+      }
+
       if (type === "tool_error" || type === "error" || type === "llm_error" || type === "step_failed") {
         unresolvedErrorSeen = true;
       }
@@ -103,7 +128,9 @@ export class ProgressScoreEngine {
             : typeof payload.text === "string"
               ? payload.text
               : "";
-        if (!String(message).trim()) {
+        // Only penalize truly empty turns, not thinking/planning turns
+        const trimmed = String(message).trim();
+        if (!trimmed || trimmed.length < 5) {
           emptyNoOpTurns += 1;
         }
       }
@@ -117,16 +144,19 @@ export class ProgressScoreEngine {
         dominantFingerprint = fingerprint;
       }
       if (count > 1) {
-        repeatedErrorPenalty += (count - 1) * 0.8;
+        repeatedErrorPenalty += (count - 1) * 0.4;
       }
     }
 
     const rawScore =
       stepCompleted * 1.0 +
       writeMutations * 0.6 +
+      readOperations * 0.2 +
+      searchOperations * 0.3 +
+      Math.min(toolSuccesses, 5) * 0.1 +
       resolvedErrorRecoveries * 0.4 -
       repeatedErrorPenalty -
-      emptyNoOpTurns * 1.0;
+      emptyNoOpTurns * 0.3;
     const progressScore = clamp(rawScore / 4, -1, 1);
 
     const recentFingerprints = errorFingerprints.slice(-8);
@@ -154,6 +184,9 @@ export class ProgressScoreEngine {
       windowSummary: {
         stepCompleted,
         writeMutations,
+        readOperations,
+        searchOperations,
+        toolSuccesses,
         resolvedErrorRecoveries,
         repeatedErrorPenalty,
         emptyNoOpTurns,
