@@ -67,6 +67,7 @@ export type SettingsCategory =
   | "infra-wallet"
   | "proactive-suggestions-state"
   | "webaccess"
+  | "adaptive-style-engine"
   | `plugin:${string}`;
 
 interface SecureSettingsRow {
