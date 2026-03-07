@@ -49,23 +49,39 @@ const DEFAULT_SETTINGS: GuardrailSettings = {
   webSearchAllowedDomains: [],
   webSearchBlockedDomains: [],
 
-  // Iterations
-  maxIterationsPerTask: 50,
+  // Iterations — raised from 50 → 100.
+  // Complex multi-repo operations and deep-research tasks routinely exceeded 50
+  // without being stuck: each file edit + verify + lint cycle costs ~3 iterations.
+  maxIterationsPerTask: 100,
   iterationLimitEnabled: true,
 
-  // Execution continuation
+  // Execution continuation.
+  // autoContinuations: raised 3 → 5; large tasks often need more than 3 segments.
+  // minProgressScore: lowered 0.25 → 0.15; read/search ops now contribute to score
+  //   (see progress-score-engine.ts), so the bar naturally shifted down.
+  // lifetimeTurnCap: raised 320 → 500; aligns with the new maxIterations ceiling
+  //   and extended loop guardrail windows (see completion-checks.ts).
+  // loopWarning/Critical/CircuitBreaker: raised proportionally so warning/critical
+  //   thresholds remain meaningful relative to the larger cap.
   autoContinuationEnabled: true,
-  defaultMaxAutoContinuations: 3,
-  defaultMinProgressScore: 0.25,
+  defaultMaxAutoContinuations: 5,
+  defaultMinProgressScore: 0.15,
   lifetimeTurnCapEnabled: true,
-  defaultLifetimeTurnCap: 320,
+  defaultLifetimeTurnCap: 500,
   compactOnContinuation: true,
   compactionThresholdRatio: 0.75,
-  loopWarningThreshold: 8,
-  loopCriticalThreshold: 14,
-  globalNoProgressCircuitBreaker: 20,
+  loopWarningThreshold: 12,
+  loopCriticalThreshold: 20,
+  globalNoProgressCircuitBreaker: 30,
   sideChannelDuringExecution: "paused",
   sideChannelMaxCallsPerWindow: 2,
+
+  // Adaptive Style Engine — opt-in, conservative by default
+  adaptiveStyleEnabled: false,
+  adaptiveStyleMaxDriftPerWeek: 1,
+
+  // Cross-Channel Persona Coherence — opt-in
+  channelPersonaEnabled: false,
 };
 
 export class GuardrailManager {
