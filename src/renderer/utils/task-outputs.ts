@@ -1,4 +1,4 @@
-import { TaskEvent, TaskOutputSummary } from "../../shared/types";
+import { Task, TaskEvent, TaskOutputSummary } from "../../shared/types";
 
 function normalizePath(raw: string): string {
   return raw.trim().replace(/\\/g, "/");
@@ -148,6 +148,9 @@ export function resolveTaskOutputSummaryFromCompletionEvent(
   const fromPayload = sanitizeTaskOutputSummary(event.payload?.outputSummary);
   if (fromPayload) return fromPayload;
 
+  const fromBestKnownOutcome = sanitizeTaskOutputSummary(event.payload?.bestKnownOutcome?.outputSummary);
+  if (fromBestKnownOutcome) return fromBestKnownOutcome;
+
   if (Array.isArray(fallbackEvents) && fallbackEvents.length > 0) {
     return deriveTaskOutputSummaryFromEvents(fallbackEvents);
   }
@@ -157,6 +160,25 @@ export function resolveTaskOutputSummaryFromCompletionEvent(
 
 export function hasTaskOutputs(summary: TaskOutputSummary | null | undefined): summary is TaskOutputSummary {
   return !!summary && summary.outputCount > 0;
+}
+
+export function resolveTaskOutputSummaryFromTask(task?: Pick<Task, "bestKnownOutcome"> | null): TaskOutputSummary | null {
+  return sanitizeTaskOutputSummary(task?.bestKnownOutcome?.outputSummary);
+}
+
+export function resolvePreferredTaskOutputSummary(params: {
+  task?: Pick<Task, "bestKnownOutcome"> | null;
+  latestCompletionEvent?: TaskEvent | null;
+  fallbackEvents?: TaskEvent[];
+}): TaskOutputSummary | null {
+  if (params.latestCompletionEvent) {
+    const fromCompletion = resolveTaskOutputSummaryFromCompletionEvent(
+      params.latestCompletionEvent,
+      params.fallbackEvents,
+    );
+    if (fromCompletion) return fromCompletion;
+  }
+  return resolveTaskOutputSummaryFromTask(params.task);
 }
 
 export function getFileName(filePath: string): string {
