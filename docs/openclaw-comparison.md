@@ -1,5 +1,5 @@
 ---
-title: OpenClaw Alternative: CoWork OS
+title: "OpenClaw Alternative: CoWork OS"
 description: Looking for an OpenClaw alternative? CoWork OS is a local-first, security-hardened option for teams that need approvals and multi-channel operations.
 ---
 
