@@ -813,7 +813,28 @@ export class AgentDaemon extends EventEmitter {
     // If worktree isolation is enabled, create an isolated worktree for this task.
     // The executor gets a "virtual workspace" with the path swapped to the worktree directory.
     let effectiveWorkspace = workspace;
-    if (await this.worktreeManager.shouldUseWorktree(workspace.path, workspace.isTemp)) {
+    const requiresWorktree = executionTask.agentConfig?.requireWorktree === true;
+    const canUseWorktree = await this.worktreeManager.shouldUseWorktree(workspace.path, workspace.isTemp);
+    if (requiresWorktree && !canUseWorktree) {
+      const errorMessage =
+        "Task requires git worktree isolation, but worktrees are unavailable for this workspace.";
+      this.taskRepo.update(executionTask.id, {
+        status: "failed",
+        completedAt: Date.now(),
+        error: errorMessage,
+        terminalStatus: "failed",
+        failureClass: "dependency_unavailable",
+      });
+      this.logEvent(executionTask.id, "error", {
+        message: errorMessage,
+      });
+      this.logEvent(executionTask.id, "task_status", {
+        status: "failed",
+        error: errorMessage,
+      });
+      return;
+    }
+    if (canUseWorktree) {
       try {
         const worktreeInfo = await this.worktreeManager.createForTask(
           executionTask.id,
@@ -848,6 +869,24 @@ export class AgentDaemon extends EventEmitter {
           `[AgentDaemon] Worktree created: branch=${worktreeInfo.branchName}, path=${worktreeInfo.worktreePath}`,
         );
       } catch (error: Any) {
+        if (requiresWorktree) {
+          const errorMessage = `Worktree creation failed: ${error.message}`;
+          this.taskRepo.update(executionTask.id, {
+            status: "failed",
+            completedAt: Date.now(),
+            error: errorMessage,
+            terminalStatus: "failed",
+            failureClass: "dependency_unavailable",
+          });
+          this.logEvent(executionTask.id, "error", {
+            message: errorMessage,
+          });
+          this.logEvent(executionTask.id, "task_status", {
+            status: "failed",
+            error: errorMessage,
+          });
+          return;
+        }
         // Non-fatal: fall back to shared workspace
         console.error(
           `[AgentDaemon] Worktree creation failed for task ${executionTask.id}:`,
@@ -2160,7 +2199,14 @@ export class AgentDaemon extends EventEmitter {
     }
 
     const task = this.taskRepo.findById(taskId);
-    if (allowAutoApprove && task?.agentConfig?.autonomousMode) {
+    const autoApproveTypes = task?.agentConfig?.autoApproveTypes;
+    const taskAllowsAutoApprove =
+      allowAutoApprove &&
+      task?.agentConfig?.autonomousMode &&
+      (!Array.isArray(autoApproveTypes) ||
+        autoApproveTypes.length === 0 ||
+        autoApproveTypes.includes(type));
+    if (taskAllowsAutoApprove) {
       const approval = this.approvalRepo.create({
         taskId,
         type: type as Any,
@@ -2177,6 +2223,7 @@ export class AgentDaemon extends EventEmitter {
       this.logEvent(taskId, "approval_granted", {
         approvalId: approval.id,
         autoApproved: true,
+        reason: "task_autonomous_policy",
       });
       return true;
     }
@@ -3530,7 +3577,9 @@ export class AgentDaemon extends EventEmitter {
     // Compatibility bridge: emit legacy aliases for subscribers that still
     // listen on legacy event names (assistant_message/task_completed/etc).
     const legacyAlias = this.resolveLegacyTaskEventAlias(event);
-    if (legacyAlias) {
+    const shouldEmitLegacyAlias =
+      !!legacyAlias && !(legacyAlias.type === "error" && this.listenerCount("error") === 0);
+    if (legacyAlias && shouldEmitLegacyAlias) {
       try {
         this.emit(legacyAlias.type, {
           taskId: event.taskId,
