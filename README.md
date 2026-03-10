@@ -39,6 +39,7 @@
 - **15 messaging channels** — WhatsApp, Telegram, Discord, Slack, Teams, iMessage, Signal, X, and more. Chat with your AI from anywhere.
 - **139 built-in skills** — Documents, code review, web search, image generation, cloud integrations, game development, mobile development, financial analysis, infrastructure-as-code, and more.
 - **Digital Twin Personas** — Pre-built AI twins for every role (engineer, manager, PM, director). Each twin absorbs cognitively draining work — PR triage, meeting prep, status reports, dependency tracking — so the human stays in flow.
+- **Zero-Human Company Ops** — Configure CoWork OS as a founder-directed autonomous company shell with venture workspace kits, a dedicated Companies tab, persistent operator twins, strategic planner loops, and Mission Control ops monitoring.
 - **Plugin Platform** — 17 bundled role-specific packs (including Mobile Development, Game Development, and 5 Financial packs) with 55+ skills, in-app Plugin Store for installing community packs, remote registry, and enterprise admin policies for organization-wide control.
 - **Active Context sidebar** — Always-visible panel showing connected MCP connectors with branded Lucide icons and enabled skills, auto-refreshed every 30 seconds.
 - **Agent teams** — Multi-agent collaboration with shared checklists, collaborative mode, multi-LLM synthesis, and persistent teams.
@@ -132,6 +133,8 @@ See the [Development Guide](docs/development.md) for prerequisites and details.
 
 Task-based execution with dynamic re-planning, four per-task modes (Autonomous, Collaborative, Multi-LLM, Think With Me), agent teams with persistence, agent comparison, git worktree isolation, AI playbook, and performance reviews. [Learn more](docs/features.md#agent-capabilities)
 
+Autonomous self-improvement runs now use the same runtime with stricter safeguards: they start only after memory services are initialized, require isolated git worktrees by default, skip non-git workspaces when worktree isolation is required, and can notify you when runs start, fail, or open a PR. See [Self-Improving Agent Architecture](docs/self-improving-agent.md) and [Troubleshooting](docs/troubleshooting.md#self-improvement-startup-warnings-in-development).
+
 ### Output Completion UX
 
 Completion state and file availability are now explicit:
@@ -156,9 +159,13 @@ Long-running tasks now have clearer operator handoffs and stronger recovery defa
 
 Centralized agent orchestration dashboard with a Kanban task board, real-time activity feed, agent heartbeat monitoring, standup reports, and performance reviews. [Learn more](docs/mission-control.md)
 
+### Zero-Human Company Ops
+
+CoWork OS can be configured as a founder-operated autonomous company shell: venture workspace kit context, a dedicated `Settings > Companies` control surface, persistent company-linked operator agents, heartbeat-driven proactive work, strategic planner issue generation, and Mission Control ops monitoring. Create the company in `Companies`, activate operator twins such as `Company Planner` and `Founder Office Operator`, then run and monitor the company loop from Mission Control. [Learn more](docs/zero-human-company.md)
+
 ### Digital Twin Personas
 
-Role-specific AI twins that proactively handle cognitive overhead. Pick a template (Software Engineer, Engineering Manager, Product Manager, VP, etc.), customize it, and activate — the twin runs on a heartbeat, automatically executing tasks like PR triage, status digests, meeting prep, and dependency scans. 10 built-in templates across engineering, management, product, data, and operations. Scale across an organization by activating one twin per team member. [Learn more](docs/digital-twins.md)
+Role-specific AI twins that proactively handle cognitive overhead. Pick a template (Software Engineer, Engineering Manager, Product Manager, VP, Founder Office Operator, Company Planner, and more), customize it, and activate — the twin runs on a heartbeat, automatically executing tasks like PR triage, status digests, meeting prep, dependency scans, and company-ops follow-up. Built-in templates span engineering, management, product, data, operations, and venture/operator roles, and can now be persistently linked to a company for company-aware operations. [Learn more](docs/digital-twins.md)
 
 ### Live Canvas & Build Mode
 
