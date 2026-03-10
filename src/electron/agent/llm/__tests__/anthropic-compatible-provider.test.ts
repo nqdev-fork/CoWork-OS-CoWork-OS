@@ -75,4 +75,34 @@ describe("AnthropicCompatibleProvider URL resolution", () => {
       expect.objectContaining({ method: "POST" }),
     );
   });
+
+  it("uses /v1/models when refreshing models from an unversioned Anthropic-compatible base URL", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({
+        data: [{ id: "MiniMax-M2.5", display_name: "MiniMax M2.5" }],
+      }),
+    } as unknown as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = new AnthropicCompatibleProvider({
+      type: "minimax-portal",
+      providerName: "MiniMax Portal",
+      apiKey: "minimax-test",
+      baseUrl: "https://api.minimax.io/anthropic",
+      defaultModel: "MiniMax-M2.1",
+    });
+
+    await expect(provider.getAvailableModels()).resolves.toEqual([
+      { id: "MiniMax-M2.5", name: "MiniMax M2.5" },
+    ]);
+
+    expect(fetchMock).toHaveBeenCalledWith("https://api.minimax.io/anthropic/v1/models", {
+      headers: {
+        "anthropic-version": "2023-06-01",
+        "x-api-key": "minimax-test",
+        Authorization: "Bearer minimax-test",
+      },
+    });
+  });
 });
