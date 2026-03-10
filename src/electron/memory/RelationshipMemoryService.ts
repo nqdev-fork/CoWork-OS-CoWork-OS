@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from "uuid";
 import { SecureSettingsRepository } from "../database/SecureSettingsRepository";
+import type { Task } from "../../shared/types";
 import {
   extractPreferredNameFromMessage,
   sanitizePreferredNameMemoryLine,
@@ -7,7 +8,7 @@ import {
 
 type RelationshipLayer = "identity" | "preferences" | "context" | "history" | "commitments";
 type RelationshipSource = "conversation" | "feedback" | "task";
-type TaskSource = "manual" | "cron" | "hook" | "api";
+type TaskSource = NonNullable<Task["source"]>;
 
 export interface RelationshipMemoryItem {
   id: string;
