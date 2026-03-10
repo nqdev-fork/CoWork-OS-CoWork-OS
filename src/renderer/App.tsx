@@ -164,6 +164,7 @@ export function App() {
     | "scheduled"
     | "voice"
     | "missioncontrol"
+    | "companies"
     | "digitaltwins"
     | "mcp"
   >("appearance");
