@@ -51,6 +51,7 @@ import {
   Pi,
   ChevronDown,
   Plus,
+  Building2,
 } from "lucide-react";
 import {
   LLMSettingsData,
@@ -113,11 +114,14 @@ import { BriefingPanel } from "./BriefingPanel";
 import { WebAccessSettingsPanel } from "./WebAccessSettingsPanel";
 import { InfraSettings } from "./InfraSettings";
 import { DigitalTwinsPanel } from "./DigitalTwinsPanel";
+import { ImprovementSettingsPanel } from "./ImprovementSettingsPanel";
+import { CompaniesPanel } from "./CompaniesPanel";
 
 type SettingsTab =
   | "appearance"
   | "personality"
   | "missioncontrol"
+  | "companies"
   | "tray"
   | "voice"
   | "llm"
@@ -152,6 +156,7 @@ type SettingsTab =
   | "policies"
   | "triggers"
   | "briefing"
+  | "improvement"
   | "webaccess";
 
 // Secondary channels shown inside "More Channels" tab
@@ -430,6 +435,7 @@ const sidebarItems: Array<{
   { tab: "appearance", label: "Appearance", group: "General", icon: <Sun {...I} /> },
   { tab: "personality", label: "Personality", group: "General", icon: <User {...I} /> },
   { tab: "missioncontrol", label: "Mission Control", group: "General", icon: <Users {...I} /> },
+  { tab: "companies", label: "Companies", group: "General", icon: <Building2 {...I} /> },
   { tab: "digitaltwins", label: "Digital Twins", group: "General", icon: <User {...I} /> },
   {
     tab: "tray",
@@ -455,6 +461,7 @@ const sidebarItems: Array<{
   { tab: "guardrails", label: "Safety Limits", group: "AI & Models", icon: <Shield {...I} /> },
   { tab: "memory", label: "Memory", group: "AI & Models", icon: <Brain {...I} /> },
   { tab: "queue", label: "Task Queue", group: "Automation", icon: <ListOrdered {...I} /> },
+  { tab: "improvement", label: "Self-Improve", group: "Automation", icon: <Sparkles {...I} /> },
   { tab: "git", label: "Git", group: "Integrations", icon: <GitBranch {...I} /> },
   { tab: "skills", label: "Custom Skills", group: "Skills & Tools", icon: <Wrench {...I} /> },
   { tab: "skillhub", label: "Skill Store", group: "Skills & Tools", icon: <Store {...I} /> },
@@ -553,6 +560,8 @@ export function Settings({
   onCreateTask,
 }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
+  const [missionControlCompanyId, setMissionControlCompanyId] = useState<string | null>(null);
+  const [digitalTwinsCompanyId, setDigitalTwinsCompanyId] = useState<string | null>(null);
   const [activeSecondaryChannel, setActiveSecondaryChannel] = useState<SecondaryChannel>("discord");
   const [activeIntegration, setActiveIntegration] = useState<IntegrationChannel>("notion");
   const [sidebarSearch, setSidebarSearch] = useState("");
@@ -679,6 +688,7 @@ export function Settings({
 
   // Custom provider state
   const [customProviders, setCustomProviders] = useState<Record<string, CustomProviderConfig>>({});
+  const [loadingCustomProviderModels, setLoadingCustomProviderModels] = useState(false);
 
   // Bedrock state
   const [bedrockModel, setBedrockModel] = useState("");
@@ -720,6 +730,23 @@ export function Settings({
       const apiKey = value.apiKey?.trim();
       const model = value.model?.trim();
       const baseUrl = value.baseUrl?.trim();
+      const cachedModels = Array.isArray(value.cachedModels)
+        ? value.cachedModels
+            .map((entry) => ({
+              key: entry.key?.trim(),
+              displayName: entry.displayName?.trim(),
+              description: entry.description?.trim(),
+            }))
+            .filter(
+              (entry) =>
+                typeof entry.key === "string" &&
+                entry.key.length > 0 &&
+                typeof entry.displayName === "string" &&
+                entry.displayName.length > 0 &&
+                typeof entry.description === "string" &&
+                entry.description.length > 0,
+            )
+        : undefined;
       const strongModelKey = value.strongModelKey?.trim();
       const cheapModelKey = value.cheapModelKey?.trim();
       const profileRoutingEnabled = value.profileRoutingEnabled === true;
@@ -731,6 +758,7 @@ export function Settings({
         apiKey ||
         model ||
         baseUrl ||
+        (cachedModels && cachedModels.length > 0) ||
         strongModelKey ||
         cheapModelKey ||
         profileRoutingEnabled ||
@@ -740,6 +768,7 @@ export function Settings({
           ...(apiKey ? { apiKey } : {}),
           ...(model ? { model } : {}),
           ...(baseUrl ? { baseUrl } : {}),
+          ...(cachedModels && cachedModels.length > 0 ? { cachedModels } : {}),
           ...(strongModelKey ? { strongModelKey } : {}),
           ...(cheapModelKey ? { cheapModelKey } : {}),
           ...(profileRoutingEnabled ? { profileRoutingEnabled: true } : {}),
@@ -1415,6 +1444,55 @@ export function Settings({
     }
   };
 
+  const loadCustomProviderModels = async (providerType: LLMProviderType) => {
+    const resolvedType = resolveCustomProviderId(providerType);
+    const customEntry = CUSTOM_PROVIDER_MAP.get(resolvedType);
+    if (!customEntry) return;
+
+    try {
+      setLoadingCustomProviderModels(true);
+      setTestResult(null);
+      const currentConfig = customProviders[resolvedType] || {};
+      const models = await window.electronAPI.refreshCustomProviderModels(resolvedType, {
+        apiKey: currentConfig.apiKey,
+        baseUrl: currentConfig.baseUrl || customEntry.baseUrl,
+      });
+
+      setCustomProviders((prev) => {
+        const existing = prev[resolvedType] || {};
+        const nextModel =
+          existing.model && models.some((entry) => entry.key === existing.model)
+            ? existing.model
+            : models[0]?.key || existing.model;
+
+        return {
+          ...prev,
+          [resolvedType]: {
+            ...existing,
+            ...(nextModel ? { model: nextModel } : {}),
+            cachedModels: models,
+          },
+        };
+      });
+      setTestResult({
+        success: true,
+        error:
+          models.length > 0
+            ? undefined
+            : `No models returned for ${customEntry.name}. Keeping the current/default model list.`,
+      });
+      onSettingsChanged?.();
+    } catch (error) {
+      console.error(`Failed to load models for ${customEntry.name}:`, error);
+      setTestResult({
+        success: false,
+        error: error instanceof Error ? error.message : `Failed to load models for ${customEntry.name}`,
+      });
+    } finally {
+      setLoadingCustomProviderModels(false);
+    }
+  };
+
   const handleProviderSelect = (providerType: LLMProviderType) => {
     setSettings((prev) => ({ ...prev, providerType }));
 
@@ -1956,6 +2034,7 @@ export function Settings({
   const selectedCustomConfig = selectedCustomProvider
     ? customProviders[resolvedProviderType] || {}
     : {};
+  const selectedCustomModels = selectedCustomConfig.cachedModels || [];
   const providerRouting = getProviderRoutingConfig(currentProviderType);
   const routingEnabled = providerRouting.profileRoutingEnabled === true;
   const providerPrimaryModel = getProviderPrimaryModel(currentProviderType);
@@ -2044,6 +2123,7 @@ export function Settings({
                       "appearance",
                       "personality",
                       "missioncontrol",
+                      "companies",
                       "digitaltwins",
                       "voice",
                       "llm",
@@ -2137,9 +2217,21 @@ export function Settings({
             ) : activeTab === "personality" ? (
               <PersonalitySettings onSettingsChanged={onSettingsChanged} />
             ) : activeTab === "missioncontrol" ? (
-              <MissionControlPanel />
+              <MissionControlPanel initialCompanyId={missionControlCompanyId} />
+            ) : activeTab === "companies" ? (
+              <CompaniesPanel
+                onOpenMissionControl={(companyId) => {
+                  setMissionControlCompanyId(companyId);
+                  setActiveTab("missioncontrol");
+                }}
+                onOpenDigitalTwins={(companyId) => {
+                  setMissionControlCompanyId(companyId);
+                  setDigitalTwinsCompanyId(companyId);
+                  setActiveTab("digitaltwins");
+                }}
+              />
             ) : activeTab === "digitaltwins" ? (
-              <DigitalTwinsPanel />
+              <DigitalTwinsPanel initialCompanyId={digitalTwinsCompanyId} />
             ) : activeTab === "tray" ? (
               <TraySettings />
             ) : activeTab === "voice" ? (
@@ -2249,6 +2341,8 @@ export function Settings({
                 initialWorkspaceId={workspaceId}
                 onSettingsChanged={onSettingsChanged}
               />
+            ) : activeTab === "improvement" ? (
+              <ImprovementSettingsPanel initialWorkspaceId={workspaceId} />
             ) : activeTab === "git" ? (
               <WorktreeSettings />
             ) : activeTab === "insights" ? (
@@ -3213,17 +3307,44 @@ export function Settings({
                       <div className="settings-section">
                         <h3>Model</h3>
                         <p className="settings-description">
-                          Enter the model ID to use for {selectedCustomProvider.name}.
+                          Select a model for {selectedCustomProvider.name}.{" "}
+                          <button
+                            className="button-small button-secondary"
+                            onClick={() => loadCustomProviderModels(resolvedProviderType)}
+                            disabled={
+                              loadingCustomProviderModels ||
+                              (selectedCustomProvider.requiresBaseUrl &&
+                                !(selectedCustomConfig.baseUrl || selectedCustomProvider.baseUrl))
+                            }
+                            style={{ marginLeft: "8px" }}
+                          >
+                            {loadingCustomProviderModels ? "Loading..." : "Refresh Models"}
+                          </button>
                         </p>
-                        <input
-                          type="text"
-                          className="settings-input"
-                          placeholder={selectedCustomProvider.defaultModel || "model-id"}
-                          value={selectedCustomConfig.model || ""}
-                          onChange={(e) =>
-                            updateCustomProvider(resolvedProviderType, { model: e.target.value })
-                          }
-                        />
+                        {selectedCustomModels.length > 0 ? (
+                          <SearchableSelect
+                            options={selectedCustomModels.map((model) => ({
+                              value: model.key,
+                              label: model.displayName,
+                              description: model.description,
+                            }))}
+                            value={selectedCustomConfig.model || ""}
+                            onChange={(value) =>
+                              updateCustomProvider(resolvedProviderType, { model: value })
+                            }
+                            placeholder="Select a model..."
+                          />
+                        ) : (
+                          <input
+                            type="text"
+                            className="settings-input"
+                            placeholder={selectedCustomProvider.defaultModel || "model-id"}
+                            value={selectedCustomConfig.model || ""}
+                            onChange={(e) =>
+                              updateCustomProvider(resolvedProviderType, { model: e.target.value })
+                            }
+                          />
+                        )}
                       </div>
                     </>
                   )}
