@@ -92,6 +92,8 @@ export const AgentConfigSchema = z
     retainMemory: z.boolean().optional(),
     bypassQueue: z.boolean().optional(),
     allowUserInput: z.boolean().optional(),
+    requireWorktree: z.boolean().optional(),
+    autoApproveTypes: z.array(z.string().min(1).max(200)).max(50).optional(),
     allowSharedContextMemory: z.boolean().optional(),
     conversationMode: z.enum(["task", "chat", "hybrid"]).optional(),
     executionMode: z.enum(["execute", "propose", "analyze", "verified"]).optional(),
@@ -392,6 +394,17 @@ export const CustomProviderConfigSchema = z.object({
   apiKey: z.string().max(500).optional(),
   model: z.string().max(200).optional(),
   baseUrl: z.string().max(500).optional(),
+  cachedModels: z
+    .array(
+      z.object({
+        key: z.string().max(500),
+        displayName: z.string().max(500),
+        description: z.string().max(1000),
+        contextLength: z.number().optional(),
+        size: z.number().optional(),
+      }),
+    )
+    .optional(),
   ...ProviderRoutingSettingsSchema,
 });
 
