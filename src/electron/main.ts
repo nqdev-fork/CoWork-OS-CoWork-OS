@@ -2,6 +2,7 @@ import path from "path";
 import os from "os";
 import * as fs from "fs/promises";
 import * as fsSync from "fs";
+import { randomUUID } from "crypto";
 import { pathToFileURL } from "url";
 import {
   app,
@@ -43,6 +44,7 @@ import { WorkingStateRepository } from "./agents/WorkingStateRepository";
 import { CrossSignalService } from "./agents/CrossSignalService";
 import { FeedbackService } from "./agents/FeedbackService";
 import { LoreService } from "./agents/LoreService";
+import { ProactiveSuggestionsService } from "./agent/ProactiveSuggestionsService";
 import { AgentDaemon } from "./agent/daemon";
 import {
   ChannelMessageRepository,
@@ -72,6 +74,11 @@ import { InfraManager } from "./infra/infra-manager";
 import { trayManager } from "./tray";
 import { CronService, setCronService, getCronStorePath } from "./cron";
 import { resolveTaskResultText } from "./cron/result-text";
+import {
+  StrategicPlannerService,
+  setStrategicPlannerService,
+} from "./control-plane/StrategicPlannerService";
+import { attachControlPlaneTaskLifecycleSync } from "./control-plane/task-run-sync";
 import {
   buildManagedScheduledWorkspacePath,
   createScheduledRunDirectory,
@@ -106,7 +113,13 @@ import { pruneTempSandboxProfiles } from "./utils/temp-sandbox-profiles";
 import { EventTriggerService } from "./triggers/EventTriggerService";
 import { setupTriggerHandlers } from "./ipc/trigger-handlers";
 import { DailyBriefingService } from "./briefing/DailyBriefingService";
+import { syncDailyBriefingCronJob, DAILY_BRIEFING_MARKER } from "./briefing/briefing-scheduler";
+import {
+  readWorkspaceOpenLoops,
+  readWorkspacePriorities,
+} from "./briefing/workspace-briefing-context";
 import { setupBriefingHandlers } from "./ipc/briefing-handlers";
+import { setupImprovementHandlers } from "./ipc/improvement-handlers";
 import { FileHubService } from "./file-hub/FileHubService";
 import { setupFileHubHandlers } from "./ipc/file-hub-handlers";
 import { WebAccessServer } from "./web-server/WebAccessServer";
@@ -114,6 +127,9 @@ import { DEFAULT_WEB_ACCESS_CONFIG, type WebAccessConfig } from "./web-server/ty
 import { setupWebAccessHandlers } from "./ipc/web-access-handlers";
 import { ManagedAccountManager, type ManagedAccountStatus } from "./accounts/managed-account-manager";
 import { initializeXMentionBridgeService, XMentionBridgeService } from "./x-mentions";
+import { AmbientMonitoringService } from "./monitoring/AmbientMonitoringService";
+import { ImprovementCandidateService } from "./improvement/ImprovementCandidateService";
+import { ImprovementLoopService } from "./improvement/ImprovementLoopService";
 import { createLogger } from "./utils/logger";
 
 let mainWindow: BrowserWindow | null = null;
@@ -121,14 +137,27 @@ let dbManager: DatabaseManager;
 let agentDaemon: AgentDaemon;
 let channelGateway: ChannelGateway;
 let cronService: CronService | null = null;
+let dailyBriefingService: DailyBriefingService | null = null;
+let ambientMonitoringService: AmbientMonitoringService | null = null;
+let improvementLoopService: ImprovementLoopService | null = null;
 let crossSignalService: CrossSignalService | null = null;
 let feedbackService: FeedbackService | null = null;
 let loreService: LoreService | null = null;
 let xMentionBridgeService: XMentionBridgeService | null = null;
+let strategicPlannerService: StrategicPlannerService | null = null;
+let detachTaskLifecycleSync: (() => void) | null = null;
 let tempWorkspacePruneTimer: NodeJS.Timeout | null = null;
 let tempSandboxProfilePruneTimer: NodeJS.Timeout | null = null;
 const TEMP_WORKSPACE_PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const TEMP_SANDBOX_PROFILE_PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const managedBriefingRuns = new Map<
+  string,
+  {
+    text: string;
+    delivered: boolean;
+    generatedAt: number;
+  }
+>();
 
 const HEADLESS = isHeadlessMode();
 const FORCE_ENABLE_CONTROL_PLANE = shouldEnableControlPlaneFromArgsOrEnv();
@@ -465,6 +494,11 @@ if (!gotTheLock) {
     // Initialize agent daemon
     agentDaemon = new AgentDaemon(dbManager);
     await agentDaemon.initialize();
+    detachTaskLifecycleSync = attachControlPlaneTaskLifecycleSync({
+      agentDaemon,
+      db: dbManager.getDatabase(),
+      log: (...args) => logger.warn(...args),
+    });
 
     // Optional: bootstrap a default workspace on startup for headless/server deployments.
     // This makes a fresh VPS instance usable without first opening the desktop UI.
@@ -541,6 +575,38 @@ if (!gotTheLock) {
     } catch (error) {
       logger.error("Failed to initialize Memory Service:", error);
       // Don't fail app startup if memory init fails
+    }
+
+    try {
+      const candidateService = new ImprovementCandidateService(dbManager.getDatabase());
+      await candidateService.start(agentDaemon);
+      improvementLoopService = new ImprovementLoopService(dbManager.getDatabase(), candidateService, {
+        notify: async ({ type, title, message, taskId, workspaceId }) => {
+          const notificationService = getNotificationService();
+          if (notificationService) {
+            try {
+              await notificationService.add({
+                type,
+                title,
+                message,
+                taskId,
+                workspaceId,
+              });
+            } catch (error) {
+              console.error("[Main] Failed to add improvement notification:", error);
+            }
+          }
+          try {
+            trayManager.showNotification(title, message);
+          } catch (error) {
+            console.error("[Main] Failed to show improvement desktop notification:", error);
+          }
+        },
+      });
+      await improvementLoopService.start(agentDaemon);
+      logger.info("ImprovementLoopService initialized");
+    } catch (error) {
+      logger.error("Failed to initialize ImprovementLoopService:", error);
     }
 
     // Initialize Knowledge Graph Service for structured entity/relationship memory
@@ -661,6 +727,20 @@ if (!gotTheLock) {
           };
         },
         createTask: async (params) => {
+          const isManagedBriefing =
+            params.title.startsWith("Daily Briefing:") ||
+            params.prompt.includes(DAILY_BRIEFING_MARKER);
+          if (isManagedBriefing && dailyBriefingService) {
+            const briefing = await dailyBriefingService.generateBriefing(params.workspaceId);
+            const text = dailyBriefingService.renderBriefingAsText(briefing);
+            const syntheticTaskId = `briefing:${randomUUID()}`;
+            managedBriefingRuns.set(syntheticTaskId, {
+              text,
+              delivered: briefing.delivered,
+              generatedAt: briefing.generatedAt,
+            });
+            return { id: syntheticTaskId };
+          }
           const allowUserInput = params.allowUserInput ?? false;
           const mergedAgentConfig = {
             ...(params.agentConfig ? params.agentConfig : {}),
@@ -739,6 +819,17 @@ if (!gotTheLock) {
           };
         },
         getTaskStatus: async (taskId) => {
+          const managedRun = managedBriefingRuns.get(taskId);
+          if (managedRun) {
+            return {
+              status: "completed",
+              error: null,
+              resultSummary: managedRun.text,
+              terminalStatus: "ok",
+              failureClass: null,
+              budgetUsage: null,
+            };
+          }
           const task = taskRepo.findById(taskId);
           if (!task) return null;
           return {
@@ -751,6 +842,10 @@ if (!gotTheLock) {
           };
         },
         getTaskResultText: async (taskId) => {
+          const managedRun = managedBriefingRuns.get(taskId);
+          if (managedRun) {
+            return managedRun.text;
+          }
           const task = taskRepo.findById(taskId);
           const events = taskEventRepo.findByTaskId(taskId);
           return resolveTaskResultText({
@@ -970,6 +1065,9 @@ if (!gotTheLock) {
 
     // Setup IPC handlers
     await setupIpcHandlers(dbManager, agentDaemon, channelGateway);
+    if (improvementLoopService) {
+      setupImprovementHandlers(improvementLoopService);
+    }
     void getCustomSkillLoader()
       .initialize()
       .then(() => {
@@ -1028,14 +1126,16 @@ if (!gotTheLock) {
         mentionRepo,
         activityRepo,
         workingStateRepo,
-        createTask: async (workspaceId, prompt, title, _agentRoleId) => {
+        createTask: async (workspaceId, prompt, title, _agentRoleId, options) => {
           const task = await agentDaemon.createTask({
             title,
             prompt,
             workspaceId,
             agentConfig: {
               allowUserInput: false,
+              ...(options?.agentConfig ?? {}),
             },
+            ...(options?.source ? { source: options.source } : {}),
           });
           if (_agentRoleId) {
             taskRepo.update(task.id, {
@@ -1068,6 +1168,26 @@ if (!gotTheLock) {
           const workspace = workspaceRepo.findById(workspaceId);
           return workspace?.path;
         },
+        recordActivity: ({ workspaceId, agentRoleId, title, description, metadata }) => {
+          activityRepo.create({
+            workspaceId,
+            agentRoleId,
+            actorType: "system",
+            activityType: "info",
+            title,
+            description,
+            metadata,
+          });
+        },
+        listWorkspaceContexts: () =>
+          workspaceRepo
+            .findAll()
+            .filter((workspace) => workspace.path && !workspace.isTemp && !isTempWorkspaceId(workspace.id))
+            .map((workspace) => ({
+              workspaceId: workspace.id,
+              workspacePath: workspace.path,
+            })),
+        getMemoryFeaturesSettings: () => MemoryFeaturesManager.loadSettings(),
       };
 
       heartbeatService = new HeartbeatService(heartbeatDeps);
@@ -1097,10 +1217,12 @@ if (!gotTheLock) {
         const standupService = new StandupReportService(db);
 
         setupMissionControlHandlers({
+          db,
           agentRoleRepo,
           taskSubscriptionRepo,
           standupService,
           heartbeatService,
+          getPlannerService: () => strategicPlannerService,
           getMainWindow: () => mainWindow,
         });
 
@@ -1109,6 +1231,19 @@ if (!gotTheLock) {
     } catch (error) {
       logger.error("Failed to initialize Mission Control:", error);
       // Don't fail app startup if Mission Control init fails
+    }
+
+    try {
+      strategicPlannerService = new StrategicPlannerService({
+        db: dbManager.getDatabase(),
+        agentDaemon,
+        log: (...args) => logger.info(...args),
+      });
+      setStrategicPlannerService(strategicPlannerService);
+      strategicPlannerService.start();
+      logger.info("Strategic Planner initialized");
+    } catch (error) {
+      logger.error("Failed to initialize Strategic Planner:", error);
     }
 
     // Initialize Persona Templates (Digital Twins) service — independent of heartbeat
@@ -1275,6 +1410,15 @@ if (!gotTheLock) {
 
       // ── Gap features: triggers, briefing, file hub, web access ───────
       const db = dbManager.getDatabase();
+      const workspaceRepo = new WorkspaceRepository(db);
+      const activityRepo = new ActivityRepository(db);
+      const resolveDefaultWorkspace = (): ReturnType<typeof workspaceRepo.findById> | undefined => {
+        const workspaces = workspaceRepo.findAll();
+        return (
+          workspaces.find((workspace) => !workspace.isTemp && !isTempWorkspaceId(workspace.id)) ??
+          workspaces[0]
+        );
+      };
 
       // Event Triggers
       const triggerService = new EventTriggerService(
@@ -1306,9 +1450,49 @@ if (!gotTheLock) {
       );
       triggerService.start();
       setupTriggerHandlers(triggerService);
+      ambientMonitoringService = new AmbientMonitoringService({
+        listWorkspaces: () =>
+          workspaceRepo
+            .findAll()
+            .filter(
+              (workspace) =>
+                workspace.path &&
+                !workspace.isTemp &&
+                !isTempWorkspaceId(workspace.id) &&
+                !isManagedScheduledWorkspacePath(workspace.path, getUserDataDir()),
+            )
+            .map((workspace) => ({
+              workspaceId: workspace.id,
+              workspacePath: workspace.path,
+              name: workspace.name,
+            })),
+        getDefaultWorkspaceId: () => resolveDefaultWorkspace()?.id ?? TEMP_WORKSPACE_ID,
+        recordActivity: ({ workspaceId, activityType, title, description, metadata }) => {
+          activityRepo.create({
+            workspaceId,
+            actorType: "system",
+            activityType,
+            title,
+            description,
+            metadata,
+          });
+        },
+        emitTrigger: (event) => {
+          void triggerService.evaluateEvent(event);
+        },
+        wakeHeartbeats: ({ text, mode }) => {
+          heartbeatService?.submitWakeForAll({
+            text,
+            mode,
+            source: "hook",
+          });
+        },
+        log: (...args: unknown[]) => console.log("[AmbientMonitoring]", ...args),
+      });
+      await ambientMonitoringService.start();
 
       // Daily Briefing
-      const briefingService = new DailyBriefingService(
+      dailyBriefingService = new DailyBriefingService(
         {
           getRecentTasks: (_workspaceId, _sinceMs) => {
             try {
@@ -1320,19 +1504,75 @@ if (!gotTheLock) {
               return [];
             }
           },
-          searchMemory: (_workspaceId, _query, _limit) => [],
-          getActiveSuggestions: (_workspaceId) => [],
-          getPriorities: (_workspaceId) => null,
-          getUpcomingJobs: (_limit) => [],
-          getOpenLoops: (_workspaceId) => [],
+          searchMemory: (workspaceId, query, limit) => {
+            try {
+              return MemoryService.search(workspaceId, query, limit).map((memory) => ({
+                summary: memory.snippet,
+                content: memory.snippet,
+                snippet: memory.snippet,
+                type: memory.type,
+              }));
+            } catch {
+              return [];
+            }
+          },
+          refreshSuggestions: async (workspaceId) => {
+            await ProactiveSuggestionsService.generateAll(workspaceId);
+          },
+          getActiveSuggestions: (workspaceId) =>
+            ProactiveSuggestionsService.getTopForBriefing(workspaceId, 5),
+          getPriorities: (workspaceId) => {
+            const workspacePath = workspaceRepo.findById(workspaceId)?.path;
+            return readWorkspacePriorities(workspacePath);
+          },
+          getUpcomingJobs: async (workspaceId, limit) => {
+            if (!cronService) return [];
+            try {
+              const jobs = await cronService.list({ includeDisabled: false });
+              return jobs
+                .filter((job) => job.workspaceId === workspaceId)
+                .sort(
+                  (a, b) =>
+                    (a.state?.nextRunAtMs ?? Number.MAX_SAFE_INTEGER) -
+                    (b.state?.nextRunAtMs ?? Number.MAX_SAFE_INTEGER),
+                )
+                .slice(0, limit);
+            } catch {
+              return [];
+            }
+          },
+          getOpenLoops: (workspaceId) => {
+            const workspacePath = workspaceRepo.findById(workspaceId)?.path;
+            return readWorkspaceOpenLoops(workspacePath);
+          },
           deliverToChannel: async (params) => {
-            console.log("[Briefing] Generated:\n", params.text.slice(0, 200));
+            await channelGateway.sendMessage?.(
+              params.channelType as Any,
+              params.channelId,
+              params.text,
+            );
           },
           log: (...args: unknown[]) => console.log("[Briefing]", ...args),
         },
         db,
       );
-      setupBriefingHandlers(briefingService);
+      setupBriefingHandlers(dailyBriefingService, {
+        onConfigSaved: async (workspaceId, config) => {
+          await syncDailyBriefingCronJob(cronService, workspaceId, config);
+        },
+      });
+      for (const workspace of workspaceRepo.findAll().filter(
+        (entry) =>
+          !entry.isTemp &&
+          !isTempWorkspaceId(entry.id) &&
+          !isManagedScheduledWorkspacePath(entry.path, getUserDataDir()),
+      )) {
+        await syncDailyBriefingCronJob(
+          cronService,
+          workspace.id,
+          dailyBriefingService.getConfig(workspace.id),
+        );
+      }
 
       // File Hub
       const fileHubService = new FileHubService(
@@ -1524,7 +1764,10 @@ if (!gotTheLock) {
               if (!workspaceId) {
                 throw new Error("workspaceId is required.");
               }
-              return briefingService.generateBriefing(workspaceId);
+              if (!dailyBriefingService) {
+                throw new Error("Daily briefing service is not initialized.");
+              }
+              return dailyBriefingService.generateBriefing(workspaceId);
             }
             case "suggestions:list": {
               const workspaceId = typeof args[0] === "string" ? args[0].trim() : "";
@@ -1643,6 +1886,19 @@ if (!gotTheLock) {
       await cronService.stop();
       setCronService(null);
     }
+    if (ambientMonitoringService) {
+      await ambientMonitoringService.stop();
+      ambientMonitoringService = null;
+    }
+    if (strategicPlannerService) {
+      try {
+        strategicPlannerService.stop();
+      } catch (error) {
+        console.error("[Main] Failed to stop Strategic Planner:", error);
+      }
+      strategicPlannerService = null;
+      setStrategicPlannerService(null);
+    }
 
     if (xMentionBridgeService) {
       try {
@@ -1651,6 +1907,15 @@ if (!gotTheLock) {
         console.error("[Main] Failed to stop X mention bridge service:", error);
       }
       xMentionBridgeService = null;
+    }
+
+    if (improvementLoopService) {
+      try {
+        improvementLoopService.stop();
+      } catch (error) {
+        console.error("[Main] Failed to stop ImprovementLoopService:", error);
+      }
+      improvementLoopService = null;
     }
 
     // Cleanup canvas manager (close all windows and watchers)
@@ -1692,6 +1957,14 @@ if (!gotTheLock) {
     }
     if (agentDaemon) {
       agentDaemon.shutdown();
+    }
+    if (detachTaskLifecycleSync) {
+      try {
+        detachTaskLifecycleSync();
+      } catch (error) {
+        console.error("[Main] Failed to detach task lifecycle sync:", error);
+      }
+      detachTaskLifecycleSync = null;
     }
   });
 
