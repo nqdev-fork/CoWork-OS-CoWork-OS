@@ -319,6 +319,12 @@ export const Methods = {
   COMPANY_TEMPLATE_EXPORT: "company.template.export",
   COMPANY_TEMPLATE_IMPORT: "company.template.import",
 
+  // Strategic planner operations
+  PLANNER_CONFIG_GET: "planner.config.get",
+  PLANNER_CONFIG_UPDATE: "planner.config.update",
+  PLANNER_RUN: "planner.run",
+  PLANNER_RUN_LIST: "planner.run.list",
+
   // Goal operations
   GOAL_LIST: "goal.list",
   GOAL_GET: "goal.get",
