@@ -117,12 +117,15 @@ export type WorkspaceKitInitMode = "missing" | "overwrite";
 export interface WorkspaceKitInitRequest {
   workspaceId: string;
   mode?: WorkspaceKitInitMode;
+  templatePreset?: WorkspaceKitTemplatePreset;
 }
 
 export interface WorkspaceKitProjectCreateRequest {
   workspaceId: string;
   projectId: string;
 }
+
+export type WorkspaceKitTemplatePreset = "default" | "venture_operator";
 
 export const ACCENT_COLORS: { id: AccentColor; label: string }[] = [
   { id: "cyan", label: "Cyan" },
@@ -201,6 +204,8 @@ export type EventType =
   | "verification_started"
   | "verification_passed"
   | "verification_failed"
+  | "review_quality_passed"
+  | "review_quality_failed"
   | "verification_pending_user_action"
   | "retry_started"
   | "task_cancelled"
@@ -784,6 +789,13 @@ export interface AgentConfig {
   bypassQueue?: boolean;
   /** Whether this task may pause and wait for user input (default: true) */
   allowUserInput?: boolean;
+  /** Require git worktree isolation for this task and fail fast if unavailable. */
+  requireWorktree?: boolean;
+  /**
+   * Optional allow-list of approval types that may be auto-approved when
+   * autonomousMode is enabled. Omit to preserve legacy "approve all" behavior.
+   */
+  autoApproveTypes?: string[];
   /**
    * Explicitly allow retry loops even when no success criteria are defined.
    * Defaults to false.
@@ -935,7 +947,7 @@ export interface Task {
   // Comparison mode fields
   comparisonSessionId?: string; // If this task is part of a comparison session
   // Origin source for distinguishing how the task was created
-  source?: "manual" | "cron" | "hook" | "api";
+  source?: "manual" | "cron" | "hook" | "api" | "improvement";
   // Strategy/routing controls
   strategyLock?: boolean; // When true, do not re-route intent at runtime
   budgetProfile?: "balanced" | "strict" | "aggressive";
@@ -1045,6 +1057,13 @@ export interface MergeResult {
   error?: string;
 }
 
+export interface PullRequestResult {
+  success: boolean;
+  url?: string;
+  number?: number;
+  error?: string;
+}
+
 export interface WorktreeSettings {
   enabled: boolean; // Master toggle (default: false)
   autoCommitOnComplete: boolean; // Auto-commit when task completes (default: true)
@@ -1060,6 +1079,134 @@ export const DEFAULT_WORKTREE_SETTINGS: WorktreeSettings = {
   branchPrefix: "cowork/",
   commitMessagePrefix: "[cowork] ",
 };
+
+// ============ Self-Improvement Types ============
+
+export type ImprovementCandidateSource =
+  | "task_failure"
+  | "verification_failure"
+  | "user_feedback"
+  | "dev_log";
+
+export type ImprovementCandidateStatus =
+  | "open"
+  | "running"
+  | "review"
+  | "resolved"
+  | "dismissed";
+
+export type ImprovementRunStatus =
+  | "queued"
+  | "running"
+  | "passed"
+  | "failed"
+  | "cancelled";
+
+export type ImprovementReviewStatus = "pending" | "accepted" | "dismissed";
+export type ImprovementPromotionMode = "merge" | "github_pr";
+export type ImprovementPromotionStatus =
+  | "idle"
+  | "promoting"
+  | "merged"
+  | "pr_opened"
+  | "promotion_failed";
+
+export interface ImprovementEvidence {
+  type: ImprovementCandidateSource;
+  taskId?: string;
+  eventType?: string;
+  eventId?: string;
+  summary: string;
+  details?: string;
+  createdAt: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ImprovementCandidate {
+  id: string;
+  workspaceId: string;
+  fingerprint: string;
+  source: ImprovementCandidateSource;
+  status: ImprovementCandidateStatus;
+  title: string;
+  summary: string;
+  severity: number;
+  recurrenceCount: number;
+  fixabilityScore: number;
+  priorityScore: number;
+  evidence: ImprovementEvidence[];
+  lastTaskId?: string;
+  lastEventType?: string;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  lastExperimentAt?: number;
+  resolvedAt?: number;
+}
+
+export interface ImprovementLoopSettings {
+  enabled: boolean;
+  autoRun: boolean;
+  includeDevLogs: boolean;
+  intervalMinutes: number;
+  maxConcurrentExperiments: number;
+  maxOpenCandidatesPerWorkspace: number;
+  requireWorktree: boolean;
+  reviewRequired: boolean;
+  promotionMode: ImprovementPromotionMode;
+  evalWindowDays: number;
+}
+
+export const DEFAULT_IMPROVEMENT_LOOP_SETTINGS: ImprovementLoopSettings = {
+  enabled: false,
+  autoRun: true,
+  includeDevLogs: true,
+  intervalMinutes: 24 * 60,
+  maxConcurrentExperiments: 1,
+  maxOpenCandidatesPerWorkspace: 25,
+  requireWorktree: true,
+  reviewRequired: true,
+  promotionMode: "github_pr",
+  evalWindowDays: 14,
+};
+
+export interface ImprovementExperimentConfig {
+  workspaceId: string;
+  candidateId: string;
+  settingsSnapshot: ImprovementLoopSettings;
+}
+
+export interface ImprovementRun {
+  id: string;
+  candidateId: string;
+  workspaceId: string;
+  status: ImprovementRunStatus;
+  reviewStatus: ImprovementReviewStatus;
+  promotionStatus?: ImprovementPromotionStatus;
+  taskId?: string;
+  branchName?: string;
+  mergeResult?: MergeResult;
+  pullRequest?: PullRequestResult;
+  promotionError?: string;
+  baselineMetrics?: EvalBaselineMetrics;
+  outcomeMetrics?: EvalBaselineMetrics;
+  verdictSummary?: string;
+  evaluationNotes?: string;
+  createdAt: number;
+  startedAt?: number;
+  completedAt?: number;
+  promotedAt?: number;
+}
+
+export interface ImprovementRunEvaluation {
+  runId: string;
+  passed: boolean;
+  summary: string;
+  notes: string[];
+  targetedVerificationPassed: boolean;
+  verificationPassed: boolean;
+  baselineMetrics: EvalBaselineMetrics;
+  outcomeMetrics: EvalBaselineMetrics;
+}
 
 // ============ Agent Comparison Types ============
 
@@ -1580,6 +1727,7 @@ export interface AgentToolRestrictions {
 export interface AgentRole {
   id: string;
   name: string; // Unique identifier (e.g., 'code-reviewer')
+  companyId?: string; // Optional company assignment for company operators
   displayName: string; // Human-readable name (e.g., 'Code Reviewer')
   description?: string; // What this agent does
   icon: string; // Emoji or icon
@@ -1613,6 +1761,7 @@ export interface AgentRole {
  */
 export interface CreateAgentRoleRequest {
   name: string;
+  companyId?: string;
   displayName: string;
   description?: string;
   icon?: string;
@@ -1637,6 +1786,7 @@ export interface CreateAgentRoleRequest {
  */
 export interface UpdateAgentRoleRequest {
   id: string;
+  companyId?: string | null;
   displayName?: string;
   description?: string;
   icon?: string;
@@ -2146,6 +2296,7 @@ export interface PersonaTemplateActivationResult {
 export interface ActivatePersonaTemplateRequest {
   templateId: string;
   customization?: {
+    companyId?: string;
     displayName?: string;
     icon?: string;
     color?: string;
@@ -2194,6 +2345,9 @@ export interface HeartbeatResult {
   pendingMentions: number;
   assignedTasks: number;
   relevantActivities: number;
+  maintenanceChecks?: number;
+  maintenanceWorkspaceId?: string;
+  silent?: boolean;
   taskCreated?: string; // ID of task created if work was done
   error?: string;
 }
@@ -2667,6 +2821,31 @@ export const IPC_CHANNELS = {
   STANDUP_LIST: "standup:list",
   STANDUP_DELIVER: "standup:deliver",
 
+  // Mission Control - Company Ops / Planner
+  MC_COMPANY_LIST: "missionControl:companyList",
+  MC_COMPANY_GET: "missionControl:companyGet",
+  MC_COMPANY_CREATE: "missionControl:companyCreate",
+  MC_COMPANY_UPDATE: "missionControl:companyUpdate",
+  MC_GOAL_LIST: "missionControl:goalList",
+  MC_GOAL_GET: "missionControl:goalGet",
+  MC_GOAL_CREATE: "missionControl:goalCreate",
+  MC_GOAL_UPDATE: "missionControl:goalUpdate",
+  MC_PROJECT_LIST: "missionControl:projectList",
+  MC_PROJECT_GET: "missionControl:projectGet",
+  MC_PROJECT_CREATE: "missionControl:projectCreate",
+  MC_PROJECT_UPDATE: "missionControl:projectUpdate",
+  MC_ISSUE_LIST: "missionControl:issueList",
+  MC_ISSUE_GET: "missionControl:issueGet",
+  MC_ISSUE_CREATE: "missionControl:issueCreate",
+  MC_ISSUE_UPDATE: "missionControl:issueUpdate",
+  MC_ISSUE_COMMENT_LIST: "missionControl:issueCommentList",
+  MC_RUN_LIST: "missionControl:runList",
+  MC_RUN_EVENT_LIST: "missionControl:runEventList",
+  MC_PLANNER_GET_CONFIG: "missionControl:plannerGetConfig",
+  MC_PLANNER_UPDATE_CONFIG: "missionControl:plannerUpdateConfig",
+  MC_PLANNER_RUN: "missionControl:plannerRun",
+  MC_PLANNER_LIST_RUNS: "missionControl:plannerListRuns",
+
   // Mission Control - Agent Performance Reviews
   REVIEW_GENERATE: "review:generate",
   REVIEW_GET_LATEST: "review:getLatest",
@@ -2847,6 +3026,7 @@ export const IPC_CHANNELS = {
   LLM_GET_PI_MODELS: "llm:getPiModels",
   LLM_GET_PI_PROVIDERS: "llm:getPiProviders",
   LLM_GET_OPENAI_COMPATIBLE_MODELS: "llm:getOpenAICompatibleModels",
+  LLM_REFRESH_CUSTOM_PROVIDER_MODELS: "llm:refreshCustomProviderModels",
   LLM_OPENAI_OAUTH_START: "llm:openaiOAuthStart",
   LLM_OPENAI_OAUTH_LOGOUT: "llm:openaiOAuthLogout",
   LLM_GET_BEDROCK_MODELS: "llm:getBedrockModels",
@@ -3215,6 +3395,16 @@ export const IPC_CHANNELS = {
   SUGGESTIONS_DISMISS: "suggestions:dismiss",
   SUGGESTIONS_ACT: "suggestions:act",
 
+  // Self-improvement loop
+  IMPROVEMENT_GET_SETTINGS: "improvement:getSettings",
+  IMPROVEMENT_SAVE_SETTINGS: "improvement:saveSettings",
+  IMPROVEMENT_LIST_CANDIDATES: "improvement:listCandidates",
+  IMPROVEMENT_LIST_RUNS: "improvement:listRuns",
+  IMPROVEMENT_REFRESH: "improvement:refresh",
+  IMPROVEMENT_RUN_NEXT: "improvement:runNext",
+  IMPROVEMENT_DISMISS_CANDIDATE: "improvement:dismissCandidate",
+  IMPROVEMENT_REVIEW_RUN: "improvement:reviewRun",
+
   // Citation Engine
   CITATION_GET_FOR_TASK: "citation:getForTask",
 
@@ -3319,6 +3509,7 @@ export interface CustomProviderConfig {
   apiKey?: string;
   model?: string;
   baseUrl?: string;
+  cachedModels?: CachedModelInfo[];
   profileRoutingEnabled?: boolean;
   strongModelKey?: string;
   cheapModelKey?: string;
@@ -5859,6 +6050,16 @@ export interface CompanyUpdate {
   budgetPausedAt?: number | null;
 }
 
+export interface CompanyCreateInput {
+  name: string;
+  slug?: string;
+  description?: string;
+  status?: Company["status"];
+  isDefault?: boolean;
+  monthlyBudgetCost?: number | null;
+  budgetPausedAt?: number | null;
+}
+
 export interface Goal {
   id: string;
   companyId: string;
@@ -5873,6 +6074,14 @@ export interface Goal {
 export interface GoalUpdate {
   companyId?: string;
   title?: string;
+  description?: string;
+  status?: Goal["status"];
+  targetDate?: number | null;
+}
+
+export interface GoalCreateInput {
+  companyId?: string;
+  title: string;
   description?: string;
   status?: Goal["status"];
   targetDate?: number | null;
@@ -5903,7 +6112,7 @@ export interface ProjectCreateInput {
 
 export interface ProjectUpdate {
   companyId?: string;
-  goalId?: string;
+  goalId?: string | null;
   name?: string;
   description?: string;
   status?: Project["status"];
@@ -5955,13 +6164,33 @@ export interface IssueFilters {
 }
 
 export interface IssueUpdate {
+  goalId?: string | null;
+  projectId?: string | null;
+  parentIssueId?: string | null;
+  workspaceId?: string | null;
+  taskId?: string | null;
+  activeRunId?: string | null;
+  title?: string;
+  description?: string;
+  status?: Issue["status"];
+  priority?: number;
+  assigneeAgentRoleId?: string | null;
+  reporterAgentRoleId?: string | null;
+  requestDepth?: number | null;
+  billingCode?: string;
+  metadata?: Record<string, unknown> | null;
+  completedAt?: number | null;
+}
+
+export interface IssueCreateInput {
+  companyId?: string;
   goalId?: string;
   projectId?: string;
   parentIssueId?: string;
   workspaceId?: string;
   taskId?: string;
   activeRunId?: string;
-  title?: string;
+  title: string;
   description?: string;
   status?: Issue["status"];
   priority?: number;
@@ -6049,4 +6278,63 @@ export interface CompanyImportResult {
   goalCount: number;
   projectCount: number;
   issueCount: number;
+}
+
+export type AutonomyPolicyPreset = "manual" | "safe_autonomy" | "founder_edge";
+
+export interface OperationalAutonomyPolicy {
+  preset: AutonomyPolicyPreset;
+  autonomousMode?: boolean;
+  autoApproveTypes?: ApprovalType[];
+  allowUserInput?: boolean;
+  pauseForRequiredDecision?: boolean;
+  requireWorktree?: boolean;
+}
+
+export interface StrategicPlannerConfig {
+  companyId: string;
+  enabled: boolean;
+  intervalMinutes: number;
+  planningWorkspaceId?: string;
+  plannerAgentRoleId?: string;
+  autoDispatch: boolean;
+  approvalPreset: AutonomyPolicyPreset;
+  maxIssuesPerRun: number;
+  staleIssueDays: number;
+  createdAt: number;
+  updatedAt: number;
+  lastRunAt?: number;
+}
+
+export interface StrategicPlannerConfigUpdate {
+  enabled?: boolean;
+  intervalMinutes?: number;
+  planningWorkspaceId?: string | null;
+  plannerAgentRoleId?: string | null;
+  autoDispatch?: boolean;
+  approvalPreset?: AutonomyPolicyPreset;
+  maxIssuesPerRun?: number;
+  staleIssueDays?: number;
+  lastRunAt?: number | null;
+}
+
+export interface StrategicPlannerRun {
+  id: string;
+  companyId: string;
+  status: "queued" | "running" | "completed" | "failed";
+  trigger: "manual" | "schedule" | "startup";
+  summary?: string;
+  error?: string;
+  createdIssueCount: number;
+  updatedIssueCount: number;
+  dispatchedTaskCount: number;
+  metadata?: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+  completedAt?: number;
+}
+
+export interface StrategicPlannerRunRequest {
+  companyId: string;
+  trigger?: StrategicPlannerRun["trigger"];
 }
