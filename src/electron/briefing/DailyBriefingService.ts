@@ -39,12 +39,18 @@ export class DailyBriefingService {
     const config = { ...this.getConfig(workspaceId), ...configOverride };
     const sections: BriefingSection[] = [];
 
+    try {
+      await this.deps.refreshSuggestions?.(workspaceId);
+    } catch (err) {
+      this.log("[DailyBriefing] refreshSuggestions skipped:", err);
+    }
+
     const sectionGenerators: Record<BriefingSectionType, () => BriefingSection | Promise<BriefingSection>> = {
       task_summary: () => this.buildTaskSummary(workspaceId),
       memory_highlights: () => this.buildMemoryHighlights(workspaceId),
       active_suggestions: () => this.buildSuggestions(workspaceId),
       priority_review: () => this.buildPriorities(workspaceId),
-      upcoming_jobs: () => this.buildUpcomingJobs(),
+      upcoming_jobs: () => this.buildUpcomingJobs(workspaceId),
       open_loops: () => this.buildOpenLoops(workspaceId),
       channel_digest: () => this.buildChannelDigest(workspaceId),
       evolution_metrics: () => this.buildEvolutionMetrics(workspaceId),
@@ -91,6 +97,10 @@ export class DailyBriefingService {
     }
 
     return briefing;
+  }
+
+  renderBriefingAsText(briefing: Briefing): string {
+    return this.formatBriefingAsText(briefing);
   }
 
   getLatestBriefing(workspaceId: string): Briefing | undefined {
@@ -159,8 +169,8 @@ export class DailyBriefingService {
     return { type: "priority_review", title: "Priorities", items, enabled: true };
   }
 
-  private buildUpcomingJobs(): BriefingSection {
-    const jobs = this.deps.getUpcomingJobs(5);
+  private async buildUpcomingJobs(workspaceId: string): Promise<BriefingSection> {
+    const jobs = await this.deps.getUpcomingJobs(workspaceId, 5);
     const items: BriefingItem[] = jobs.map((j: Any) => {
       const nextRun = j.state?.nextRunAtMs
         ? new Date(j.state.nextRunAtMs).toLocaleTimeString()
