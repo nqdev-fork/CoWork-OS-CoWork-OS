@@ -1701,8 +1701,10 @@ export async function setupIpcHandlers(
     return taskRepo.findById(id);
   });
 
-  ipcMain.handle(IPC_CHANNELS.TASK_LIST, async () => {
-    return taskRepo.findAll();
+  ipcMain.handle(IPC_CHANNELS.TASK_LIST, async (_, opts?: { limit?: number; offset?: number }) => {
+    const limit = typeof opts?.limit === "number" && opts.limit > 0 ? opts.limit : 100;
+    const offset = typeof opts?.offset === "number" && opts.offset >= 0 ? opts.offset : 0;
+    return taskRepo.findAll(limit, offset);
   });
 
   // Export task summaries as a structured JSON blob (prompt-free by design)
