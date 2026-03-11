@@ -10,6 +10,7 @@ import type {
   ImprovementEvidence,
 } from "../../shared/types";
 import { ImprovementCandidateRepository } from "./ImprovementRepositories";
+import { ImprovementRunRepository } from "./ImprovementRepositories";
 import { ImprovementSettingsManager } from "./ImprovementSettingsManager";
 
 const RECENT_WINDOW_DAYS = 14;
@@ -17,12 +18,14 @@ const MAX_EVIDENCE_ITEMS = 8;
 
 export class ImprovementCandidateService {
   private readonly candidateRepo: ImprovementCandidateRepository;
+  private readonly runRepo: ImprovementRunRepository;
   private readonly taskRepo: TaskRepository;
   private readonly workspaceRepo: WorkspaceRepository;
   private started = false;
 
   constructor(private readonly db: Database.Database) {
     this.candidateRepo = new ImprovementCandidateRepository(db);
+    this.runRepo = new ImprovementRunRepository(db);
     this.taskRepo = new TaskRepository(db);
     this.workspaceRepo = new WorkspaceRepository(db);
   }
@@ -61,6 +64,7 @@ export class ImprovementCandidateService {
   async refresh(): Promise<{ candidateCount: number }> {
     await this.rebuildFromRecentSignals();
     await this.ingestDevLogs();
+    this.reconcileExistingCandidates();
     return {
       candidateCount: this.listCandidates().length,
     };
@@ -173,9 +177,6 @@ export class ImprovementCandidateService {
   private async ingestTaskFailureCandidate(taskId: string): Promise<void> {
     const task = this.taskRepo.findById(taskId);
     if (!task || task.source === "improvement") return;
-    if (task.status !== "failed" && task.terminalStatus !== "failed" && task.terminalStatus !== "partial_success") {
-      return;
-    }
 
     const failureClass = String(task.failureClass || "unknown");
     const summary =
@@ -184,6 +185,9 @@ export class ImprovementCandidateService {
         : task.error
           ? String(task.error)
           : `Task ended with ${failureClass}`;
+    if (!this.shouldIngestTaskFailure(task.status, task.terminalStatus, summary, failureClass)) {
+      return;
+    }
     const evidence: ImprovementEvidence = {
       type: "task_failure",
       taskId: task.id,
@@ -197,6 +201,14 @@ export class ImprovementCandidateService {
       },
     };
 
+    // Build a stable fingerprint key from structured metadata so all failures
+    // of the same class (e.g. contract_unmet_write_required) within a workspace
+    // merge into one candidate, rather than creating a new entry for every task
+    // whose LLM result-summary happens to be phrased differently.
+    const normalizedTitle = this.normalizeTaskTitleForFingerprint(task.title);
+    const blockerSignature = this.extractFailureSignature(summary, failureClass);
+    const fingerprintKey = `${failureClass}:${normalizedTitle}:${blockerSignature}`;
+
     this.upsertCandidate(task.workspaceId, {
       source: "task_failure",
       title: `Fix repeated ${failureClass.replace(/_/g, " ")} failures`,
@@ -206,6 +218,7 @@ export class ImprovementCandidateService {
       lastEventType: "task_completed",
       severity: this.inferTaskSeverity(task.failureClass, task.terminalStatus),
       fixabilityScore: this.inferFixabilityScore("task_failure", summary),
+      fingerprintKey,
     });
   }
 
@@ -241,6 +254,10 @@ export class ImprovementCandidateService {
       },
     };
 
+    // The title for each event source is always one of two fixed strings, so
+    // using `source` alone as the fingerprint key groups all events of the same
+    // type into a single candidate per workspace (they are already workspace-
+    // scoped by workspaceId, so no cross-workspace merging occurs).
     this.upsertCandidate(task.workspaceId, {
       source,
       title:
@@ -253,6 +270,10 @@ export class ImprovementCandidateService {
       lastEventType: evidence.eventType,
       severity: source === "verification_failure" ? 0.95 : 0.72,
       fixabilityScore: this.inferFixabilityScore(source, summary),
+      fingerprintKey:
+        source === "verification_failure"
+          ? "verification_failure"
+          : this.extractFailureSignature(summary, source),
     });
   }
 
@@ -326,6 +347,7 @@ export class ImprovementCandidateService {
         evidence,
         severity: 0.78,
         fixabilityScore: this.inferFixabilityScore("dev_log", summary),
+        fingerprintKey: this.normalizeDevLogSignature(summary),
       });
     }
   }
@@ -341,9 +363,14 @@ export class ImprovementCandidateService {
       lastEventType?: string;
       severity: number;
       fixabilityScore: number;
+      /** When provided, used as the hash input instead of `summary`.
+       *  Pass stable structured data (e.g. `failureClass:normalizedTitle`) so
+       *  that semantically identical failures always map to the same candidate
+       *  regardless of how the LLM words its result summary each time. */
+      fingerprintKey?: string;
     },
   ): ImprovementCandidate {
-    const fingerprint = this.buildFingerprint(input.source, input.summary);
+    const fingerprint = this.buildFingerprint(input.source, input.fingerprintKey ?? input.summary);
     const existing = this.candidateRepo.findByFingerprint(workspaceId, fingerprint);
     const nextPriority = this.computePriorityScore(
       input.severity,
@@ -412,6 +439,10 @@ export class ImprovementCandidateService {
 
   private inferFixabilityScore(source: ImprovementCandidateSource, summary: string): number {
     const normalized = summary.toLowerCase();
+    if (/provider quota|quota|429|rate limit|budget exhausted/.test(normalized)) return 0.35;
+    if (/timed out|timeout|request cancelled|fetch failed|server_error|application crashed/.test(normalized)) {
+      return 0.5;
+    }
     if (/test|repro|stack|trace|contract|verification|assert/.test(normalized)) return 0.95;
     if (source === "user_feedback") return 0.72;
     if (source === "dev_log") return 0.8;
@@ -428,6 +459,146 @@ export class ImprovementCandidateService {
     if (terminalStatus === "failed") return 0.82;
     if (terminalStatus === "partial_success") return 0.62;
     return 0.7;
+  }
+
+  private shouldIngestTaskFailure(
+    status: string | null | undefined,
+    terminalStatus: string | null | undefined,
+    summary: string,
+    failureClass: string,
+  ): boolean {
+    if (status === "failed" || terminalStatus === "failed") {
+      return true;
+    }
+    if (terminalStatus !== "partial_success") {
+      return false;
+    }
+    const normalizedSummary = summary.toLowerCase();
+    if (
+      /(^|\s)(##\s*)?(✅|step complete|task complete|heartbeat complete|verification result|execution summary|status:\s*linked)/.test(
+        normalizedSummary,
+      )
+    ) {
+      return false;
+    }
+    const normalized = `${failureClass} ${summary}`.toLowerCase();
+    if (
+      /blocked|failed|failure|timed out|timeout|incomplete|unresolved|budget exhausted|quota|rate limit|mutation-required|cannot|unable|missing|error/.test(
+        normalized,
+      )
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  private reconcileExistingCandidates(): void {
+    const candidates = this.candidateRepo.list();
+    for (const candidate of candidates) {
+      if (candidate.status !== "open") continue;
+
+      if (this.isLikelySuccessOnlyCandidate(candidate)) {
+        this.candidateRepo.update(candidate.id, {
+          status: "resolved",
+          resolvedAt: Date.now(),
+        });
+        continue;
+      }
+
+      if (candidate.source !== "dev_log") continue;
+      const normalizedFingerprint = this.buildFingerprint(
+        "dev_log",
+        this.normalizeDevLogSignature(candidate.summary),
+      );
+      if (normalizedFingerprint === candidate.fingerprint) continue;
+
+      const existing = this.candidateRepo.findByFingerprint(candidate.workspaceId, normalizedFingerprint);
+      if (existing && existing.id !== candidate.id) {
+        this.db.transaction(() => {
+          this.runRepo.reassignCandidate(candidate.id, existing.id);
+          this.candidateRepo.update(existing.id, {
+            recurrenceCount: existing.recurrenceCount + candidate.recurrenceCount,
+            severity: Math.max(existing.severity, candidate.severity),
+            fixabilityScore: Math.max(existing.fixabilityScore, candidate.fixabilityScore),
+            priorityScore: Math.max(existing.priorityScore, candidate.priorityScore),
+            evidence: [...existing.evidence, ...candidate.evidence]
+              .sort((a, b) => a.createdAt - b.createdAt)
+              .slice(-MAX_EVIDENCE_ITEMS),
+            lastSeenAt: Math.max(existing.lastSeenAt, candidate.lastSeenAt),
+          });
+          this.candidateRepo.delete(candidate.id);
+        })();
+        continue;
+      }
+
+      this.candidateRepo.update(candidate.id, {
+        fingerprint: normalizedFingerprint,
+      });
+    }
+  }
+
+  private isLikelySuccessOnlyCandidate(candidate: ImprovementCandidate): boolean {
+    if (!this.looksLikeSuccessCheckpoint(candidate.summary)) return false;
+    if (candidate.evidence.length === 0) return true;
+    return candidate.evidence.every((evidence) => {
+      const terminalStatus = String(evidence.metadata?.terminalStatus || "");
+      return terminalStatus === "partial_success" || this.looksLikeSuccessCheckpoint(evidence.summary);
+    });
+  }
+
+  private looksLikeSuccessCheckpoint(summary: string): boolean {
+    return /(^|\s)(##\s*)?(✅|step complete|task complete|heartbeat complete|verification result|execution summary|status:\s*linked)/i.test(
+      summary.toLowerCase(),
+    );
+  }
+
+  private normalizeTaskTitleForFingerprint(title: unknown): string {
+    if (typeof title !== "string") return "";
+    return title
+      .toLowerCase()
+      .replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/g, "<id>")
+      .replace(/\b\d{4}-\d{2}-\d{2}\b/g, "<date>")
+      .replace(/\b\d+\b/g, "<n>")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 160);
+  }
+
+  private extractFailureSignature(summary: string, failureClass: string): string {
+    const normalized = `${failureClass} ${summary}`
+      .toLowerCase()
+      .replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/g, "<id>")
+      .replace(/\b\d+\b/g, "<n>");
+    const patterns = [
+      /unresolved [^.:\n;]*/g,
+      /mutation-required[^.:\n;]*/g,
+      /budget exhausted[^.:\n;]*/g,
+      /timed out[^.:\n;]*/g,
+      /request cancelled[^.:\n;]*/g,
+      /fetch failed[^.:\n;]*/g,
+      /provider quota[^.:\n;]*/g,
+      /rate limit[^.:\n;]*/g,
+      /verification[^.:\n;]*/g,
+      /missing [^.:\n;]*/g,
+      /workspace linkage does not exist[^.:\n;]*/g,
+    ];
+    for (const pattern of patterns) {
+      const match = normalized.match(pattern);
+      if (match?.[0]) return match[0].trim().slice(0, 160);
+    }
+    return normalized.replace(/\s+/g, " ").trim().slice(0, 160);
+  }
+
+  private normalizeDevLogSignature(line: string): string {
+    return line
+      .toLowerCase()
+      .replace(/\[[^\]]+\]/g, " ")
+      .replace(/\bat [^(]+\([^)]*\)/g, "stack-frame")
+      .replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/g, "<id>")
+      .replace(/\b\d+\b/g, "<n>")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 180);
   }
 
   private parsePayload(payload: unknown): Record<string, unknown> {
