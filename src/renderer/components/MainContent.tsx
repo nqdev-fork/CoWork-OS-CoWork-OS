@@ -3,6 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
 import hljs from "highlight.js";
+import mermaid from "mermaid";
 import {
   Task,
   TaskEvent,
@@ -51,6 +52,7 @@ import {
   stripPptxBubbleContent,
   truncateTextForTaskPrompt,
 } from "./utils/attachment-content";
+import { sanitizeToolCallTextFromAssistant } from "../../shared/tool-call-text-sanitizer";
 
 const CODE_PREVIEWS_EXPANDED_KEY = "cowork:codePreviewsExpanded";
 const TASK_TITLE_MAX_LENGTH = 50;
@@ -254,6 +256,106 @@ import {
 } from "./timeline/timeline-indicators";
 import { getStepCompletionPreviewPath } from "../utils/step-document-preview";
 
+// Mermaid diagram component
+let mermaidInitialized = false;
+function initMermaid() {
+  if (!mermaidInitialized) {
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: "dark",
+      securityLevel: "strict",
+      fontFamily: "inherit",
+    });
+    mermaidInitialized = true;
+  }
+}
+
+function sanitizeMermaidSvg(svgMarkup: string): SVGSVGElement | null {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(svgMarkup, "image/svg+xml");
+  const root = doc.documentElement;
+  if (!root || root.tagName.toLowerCase() !== "svg") {
+    return null;
+  }
+
+  for (const element of Array.from(root.querySelectorAll("*"))) {
+    const tagName = element.tagName.toLowerCase();
+    if (tagName === "script" || tagName === "foreignobject") {
+      element.remove();
+      continue;
+    }
+    for (const attr of Array.from(element.attributes)) {
+      const name = attr.name.toLowerCase();
+      const value = attr.value.trim();
+      if (name.startsWith("on")) {
+        element.removeAttribute(attr.name);
+        continue;
+      }
+      if ((name === "href" || name === "xlink:href") && /^javascript:/i.test(value)) {
+        element.removeAttribute(attr.name);
+      }
+    }
+  }
+
+  return root as unknown as SVGSVGElement;
+}
+
+function MermaidDiagram({ chart }: { chart: string }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [svg, setSvg] = useState<string | null>(null);
+  const idRef = useRef(`mermaid-${Math.random().toString(36).slice(2)}`);
+
+  useEffect(() => {
+    initMermaid();
+    let cancelled = false;
+    setError(null);
+    setSvg(null);
+    mermaid
+      .render(idRef.current, chart)
+      .then(({ svg: rendered }) => {
+        if (!cancelled) setSvg(rendered);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err?.message || "Failed to render diagram");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [chart]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    container.replaceChildren();
+    if (!svg) return;
+    const sanitizedSvg = sanitizeMermaidSvg(svg);
+    if (!sanitizedSvg) {
+      setError("Failed to render diagram");
+      return;
+    }
+    container.appendChild(document.importNode(sanitizedSvg, true));
+  }, [svg]);
+
+  if (error) {
+    return (
+      <div className="mermaid-error">
+        <span>Diagram error: {error}</span>
+      </div>
+    );
+  }
+
+  return (
+    svg ? (
+      <div className="mermaid-diagram" ref={containerRef} />
+    ) : (
+      <div className="mermaid-diagram">
+        <span className="mermaid-loading">Rendering diagram…</span>
+      </div>
+    )
+  );
+}
+
 // Code block component with copy button
 interface CodeBlockProps {
   children?: React.ReactNode;
@@ -298,8 +400,13 @@ function CodeBlock({ children, className, ...props }: CodeBlockProps) {
     );
   }
 
-  // Compute highlighted HTML
+  // Render mermaid diagrams inline
   const codeText = getTextContent(children);
+  if (language === "mermaid") {
+    return <MermaidDiagram chart={codeText} />;
+  }
+
+  // Compute highlighted HTML
   const highlightedHtml = useMemo(() => highlightCode(codeText, language), [codeText, language]);
 
   // For code blocks, wrap with copy button
@@ -1023,7 +1130,8 @@ function normalizeSourcesSection(text: string): string {
 }
 
 function normalizeMarkdownForDisplay(text: string): string {
-  return normalizeSourcesSection(autolinkJsonPathPayloadLines(protectGlobTokens(text)));
+  const sanitized = sanitizeToolCallTextFromAssistant(text).text;
+  return normalizeSourcesSection(autolinkJsonPathPayloadLines(protectGlobTokens(sanitized)));
 }
 
 function normalizeTimelineTitleMarkdownForDisplay(text: string): string {
@@ -3791,6 +3899,7 @@ export function MainContent({
     ) {
       return true;
     }
+    if (effectiveType === "diagram_created") return true;
     if (
       (event.type === "timeline_artifact_emitted" || effectiveType === "artifact_created") &&
       typeof event.payload?.path === "string"
@@ -3828,6 +3937,7 @@ export function MainContent({
     if (effectiveType === "task_completed") return hasEventDetails(event);
     if (
       effectiveType === "artifact_created" ||
+      effectiveType === "diagram_created" ||
       event.type === "timeline_evidence_attached" ||
       event.type === "timeline_error"
     )
@@ -7513,13 +7623,14 @@ function renderEventTitle(
       return getMessage(
         "stepStarted",
         msgCtx,
-        event.payload.step?.description || "Getting started...",
+        sanitizeToolCallTextFromAssistant(event.payload.step?.description || "Getting started...").text ||
+          "Getting started...",
       );
     case "step_completed":
       return getMessage(
         "stepCompleted",
         msgCtx,
-        event.payload.step?.description || event.payload.message,
+        sanitizeToolCallTextFromAssistant(event.payload.step?.description || event.payload.message || "").text,
       );
     case "step_failed":
       return `Step failed: ${event.payload.step?.description || "Unknown step"}`;
@@ -7736,6 +7847,15 @@ function renderEventTitle(
         </span>
       ) : `Output ready (${acType})`;
     }
+    case "diagram_created": {
+      const title = typeof event.payload?.title === "string" ? event.payload.title : "Diagram";
+      return (
+        <span>
+          Diagram:{" "}
+          <span className="event-title-meta">{title}</span>
+        </span>
+      );
+    }
     case "error":
       return getMessage("error", msgCtx);
     case "approval_requested": {
@@ -7860,6 +7980,16 @@ function renderEventDetails(
         style={{ background: "rgba(239, 68, 68, 0.1)", borderColor: "rgba(239, 68, 68, 0.2)" }}
       >
         {event.payload?.message || "Timeline error"}
+      </div>
+    );
+  }
+
+  if (effectiveType === "diagram_created") {
+    const diagram = typeof event.payload?.diagram === "string" ? event.payload.diagram : "";
+    if (!diagram.trim()) return null;
+    return (
+      <div className="diagram-event-details">
+        <MermaidDiagram chart={diagram} />
       </div>
     );
   }
