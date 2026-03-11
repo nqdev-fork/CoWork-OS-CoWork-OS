@@ -167,6 +167,33 @@ describeWithSqlite("ControlPlaneCoreService", () => {
     expect(importedIssues[0].title).toBe(issue.title);
   });
 
+  it("provisions a default workspace for companies and auto-links projects to it", () => {
+    const company = service.createCompany({
+      name: "Workspace Co",
+      slug: "workspace-co",
+    });
+
+    expect(company.defaultWorkspaceId).toBeTruthy();
+
+    const reloaded = service.getCompany(company.id);
+    expect(reloaded?.defaultWorkspaceId).toBe(company.defaultWorkspaceId);
+
+    const workspace = reloaded?.defaultWorkspaceId ? db.prepare("SELECT * FROM workspaces WHERE id = ?").get(reloaded.defaultWorkspaceId) as Any : null;
+    expect(workspace?.path).toContain(path.join("company-workspaces", "workspace-co"));
+    expect(fs.existsSync(path.join(workspace.path, ".cowork"))).toBe(true);
+    expect(fs.existsSync(path.join(workspace.path, "projects"))).toBe(true);
+
+    const project = service.createProject({
+      companyId: company.id,
+      name: "Default Workspace Project",
+    });
+
+    const links = service.listProjectWorkspaces(project.id);
+    expect(links).toHaveLength(1);
+    expect(links[0]?.workspaceId).toBe(company.defaultWorkspaceId);
+    expect(links[0]?.isPrimary).toBe(true);
+  });
+
   it("creates companies directly with collision-safe names and a single default", () => {
     const seededCompany = service.getDefaultCompany();
 
@@ -220,8 +247,11 @@ describeWithSqlite("ControlPlaneCoreService", () => {
     });
 
     const attached = service.attachTaskToRun(checkout.run.id, task.id);
+    const hydratedTask = taskRepo.findById(task.id);
     expect(attached.task.issueId).toBe(issue.id);
     expect(attached.task.heartbeatRunId).toBe(checkout.run.id);
+    expect(hydratedTask?.issueId).toBe(issue.id);
+    expect(hydratedTask?.heartbeatRunId).toBe(checkout.run.id);
     expect(attached.run.status).toBe("running");
 
     taskRepo.update(task.id, {
