@@ -3,6 +3,7 @@ import * as fs from "fs";
 import * as crypto from "crypto";
 import * as path from "path";
 import { DatabaseManager } from "../database/schema";
+import { ControlPlaneCoreService } from "../control-plane/ControlPlaneCoreService";
 import type Database from "better-sqlite3";
 import {
   TaskRepository,
@@ -55,6 +56,11 @@ import {
   InputRequest,
   InputRequestResponse,
   RequestUserInputArgs,
+  Project,
+  ProjectWorkspaceLink,
+  Goal,
+  Issue,
+  IssueFilters,
 } from "../../shared/types";
 import {
   extractTimelineEvidenceRefs,
@@ -4290,6 +4296,67 @@ export class AgentDaemon extends EventEmitter {
         typeof workspace.path === "string" &&
         workspace.path.trim().length > 0,
     );
+  }
+
+  /**
+   * List all workspaces known to this daemon.
+   */
+  listWorkspaces(): Workspace[] {
+    return this.workspaceRepo.findAll();
+  }
+
+  /**
+   * List projects from the control-plane database.
+   * Optionally filter to only active projects.
+   */
+  listProjects(opts?: { includeArchived?: boolean }): Project[] {
+    const core = new ControlPlaneCoreService(this.dbManager.getDatabase());
+    return core.listProjects({ includeArchived: opts?.includeArchived ?? false });
+  }
+
+  /**
+   * Link a workspace to a project in the control-plane database.
+   * Creates the link if it doesn't exist; updates isPrimary if it does.
+   */
+  linkProjectWorkspace(input: {
+    projectId: string;
+    workspaceId: string;
+    isPrimary?: boolean;
+  }): ProjectWorkspaceLink {
+    const core = new ControlPlaneCoreService(this.dbManager.getDatabase());
+    return core.linkProjectWorkspace(input);
+  }
+
+  /**
+   * List workspace links for a project.
+   */
+  listProjectWorkspaces(projectId: string): ProjectWorkspaceLink[] {
+    const core = new ControlPlaneCoreService(this.dbManager.getDatabase());
+    return core.listProjectWorkspaces(projectId);
+  }
+
+  /**
+   * List goals from the control-plane database.
+   */
+  listGoals(companyId?: string): Goal[] {
+    const core = new ControlPlaneCoreService(this.dbManager.getDatabase());
+    return core.listGoals(companyId);
+  }
+
+  /**
+   * List issues from the control-plane database with optional filters.
+   */
+  listIssues(filters?: IssueFilters): Issue[] {
+    const core = new ControlPlaneCoreService(this.dbManager.getDatabase());
+    return core.listIssues(filters);
+  }
+
+  /**
+   * Create an issue in the control-plane database.
+   */
+  createIssue(input: Partial<Issue> & Pick<Issue, "title">): Issue {
+    const core = new ControlPlaneCoreService(this.dbManager.getDatabase());
+    return core.createIssue(input);
   }
 
   /**
