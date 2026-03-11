@@ -1453,11 +1453,11 @@ a,
 }
 
 .task-item {
-  padding: 10px 12px;
+  padding: 7px 12px;
   cursor: pointer;
   border-radius: var(--radius-md);
   transition: all 0.15s ease;
-  margin-bottom: 2px;
+  margin-bottom: 1px;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -4322,6 +4322,46 @@ a,
 
 .theme-light .markdown-content pre code {
   color: #383a42;
+}
+
+/* Mermaid diagram rendering */
+.mermaid-diagram {
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 16px 12px;
+  background: #1e1e2e;
+  border-radius: var(--radius-md);
+  margin: 8px 0;
+  overflow-x: auto;
+}
+
+.mermaid-diagram svg,
+.mermaid-diagram img,
+.mermaid-diagram-image {
+  max-width: 100%;
+  height: auto;
+}
+
+.mermaid-loading {
+  color: var(--color-text-secondary, #888);
+  font-size: 0.85em;
+  font-style: italic;
+  padding: 12px;
+}
+
+.mermaid-error {
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+  color: #f87171;
+  font-size: 0.85em;
+  margin: 8px 0;
+}
+
+.diagram-event-details {
+  padding: 4px 0;
 }
 
 /* Code block with copy button */
@@ -9160,6 +9200,7 @@ button {
   padding-left: 24px;
 }
 
+
 .test-result {
   display: flex;
   align-items: flex-start;
@@ -10661,7 +10702,7 @@ button {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 16px !important;
+  padding: 5px 16px !important;
   border-radius: 0 !important;
   background: transparent !important;
   border-left: 2px solid transparent;
@@ -22133,8 +22174,8 @@ button {
 
 .visual-oblivion .cli-task-item {
   border-left: none;
-  margin: 6px 10px;
-  padding: 10px 12px !important;
+  margin: 2px 8px;
+  padding: 6px 10px !important;
 }
 
 .visual-oblivion .cli-task-title,
@@ -23066,6 +23107,95 @@ button {
   color: var(--color-accent, #22d3ee);
 }
 
+/* ── Automated sessions folder ─────────────────────────────────────────────
+   Groups auto-created sessions (improvement, heartbeat, cron, etc.) into a
+   collapsible folder at the bottom of the sidebar so they don't crowd out
+   user-created sessions.
+───────────────────────────────────────────────────────────────────────────── */
+.automated-sessions-folder {
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--color-border-subtle, rgba(255,255,255,0.06));
+}
+
+.automated-folder-header {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 7px 10px 7px 12px;
+  color: var(--color-text-muted, #6b7280);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  text-align: left;
+  transition: color 0.15s ease, background 0.15s ease;
+  font-family: var(--font-ui);
+}
+
+.automated-folder-header:hover {
+  color: var(--color-text-secondary, #9ca3af);
+  background: var(--color-bg-hover, rgba(255,255,255,0.04));
+}
+
+.automated-folder-chevron {
+  font-size: 10px;
+  flex-shrink: 0;
+  width: 12px;
+  text-align: center;
+  opacity: 0.7;
+}
+
+.automated-folder-label {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.automated-folder-count {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 5px;
+  border-radius: 8px;
+  background: var(--color-bg-elevated, rgba(255,255,255,0.07));
+  color: var(--color-text-muted, #6b7280);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.automated-folder-active {
+  flex-shrink: 0;
+  margin-left: 2px;
+}
+
+.automated-folder-body {
+  padding-bottom: 4px;
+}
+
+/* In focused density mode, tighten up the folder header a bit */
+.density-focused .automated-folder-header {
+  padding: 6px 10px 6px 12px;
+  font-size: 10px;
+}
+
+/* Pagination load-more hint shown at the bottom of the task list */
+.task-list-load-more {
+  padding: 8px 12px 10px;
+  font-size: 11px;
+  color: var(--color-text-muted, #6b7280);
+  text-align: center;
+  font-family: var(--font-ui);
+  opacity: 0.6;
+  pointer-events: none;
+  user-select: none;
+}
+
 .cli-sidebar-error {
   margin: 6px 12px;
   padding: 6px 8px;
@@ -23726,7 +23856,7 @@ button {
 
 /* Task items: tight, clean, text-only feel */
 .density-focused .task-item {
-  padding: 6px 12px;
+  padding: 4px 12px;
   gap: 6px;
   font-family: var(--font-ui);
   border-radius: 8px;
@@ -23822,12 +23952,12 @@ button {
   font-size: 10px;
   color: var(--color-text-muted);
   letter-spacing: 0.05em;
-  padding: 14px 12px 4px;
+  padding: 8px 12px 2px;
   opacity: 0.6;
 }
 /* First date group needs less top padding */
 .density-focused .sidebar-date-group:first-child {
-  padding-top: 6px;
+  padding-top: 4px;
 }
 
 /* Sidebar footer: compact */
