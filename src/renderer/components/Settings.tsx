@@ -199,6 +199,7 @@ interface SettingsProps {
   onboardingCompletedAt?: string;
   workspaceId?: string;
   onCreateTask?: (title: string, prompt: string) => void;
+  onOpenTask?: (taskId: string) => void;
 }
 
 interface ModelOption {
@@ -558,6 +559,7 @@ export function Settings({
   onboardingCompletedAt,
   workspaceId,
   onCreateTask,
+  onOpenTask,
 }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
   const [missionControlCompanyId, setMissionControlCompanyId] = useState<string | null>(null);
@@ -2141,7 +2143,6 @@ export function Settings({
                     ];
                     if (!focusedTabs.includes(item.tab)) return false;
                   } else if (uiDensity !== "power") {
-                    // "full" mode: hide power-only tabs (developer/infra)
                     const powerOnlyTabs: SettingsTab[] = [
                       "nodes",
                       "extensions",
@@ -2342,7 +2343,7 @@ export function Settings({
                 onSettingsChanged={onSettingsChanged}
               />
             ) : activeTab === "improvement" ? (
-              <ImprovementSettingsPanel initialWorkspaceId={workspaceId} />
+              <ImprovementSettingsPanel initialWorkspaceId={workspaceId} onOpenTask={onOpenTask} />
             ) : activeTab === "git" ? (
               <WorktreeSettings />
             ) : activeTab === "insights" ? (
