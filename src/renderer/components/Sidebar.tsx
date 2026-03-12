@@ -149,6 +149,10 @@ export function isAwaitingSessionStatus(status: Task["status"]): boolean {
   return AWAITING_SESSION_STATUSES.has(status);
 }
 
+export function shouldShowTaskInSidebarSessions(task: Task): boolean {
+  return !task.targetNodeId;
+}
+
 export function compareTasksByPinAndRecency(a: Task, b: Task): number {
   const pinnedDiff = Number(Boolean(b.pinned)) - Number(Boolean(a.pinned));
   if (pinnedDiff !== 0) return pinnedDiff;
@@ -203,6 +207,7 @@ export function countHiddenFailedSessions(tasks: Task[], uiDensity: UiDensity): 
   if (uiDensity !== "focused") return 0;
   return tasks.filter(
     (task) =>
+      shouldShowTaskInSidebarSessions(task) &&
       !task.parentTaskId &&
       !task.pinned &&
       !hasPinnedDescendant(task.id) &&
@@ -325,7 +330,7 @@ export function Sidebar({
 
     // Get root tasks (no parent) and sort by creation time (newest first)
     let rootTasks = tasks
-      .filter((t) => !t.parentTaskId)
+      .filter((t) => !t.parentTaskId && shouldShowTaskInSidebarSessions(t))
       .filter((t) =>
         shouldShowRootTaskInSidebar(t, uiDensity, showFailedSessions, hasPinnedDescendant(t.id)),
       )

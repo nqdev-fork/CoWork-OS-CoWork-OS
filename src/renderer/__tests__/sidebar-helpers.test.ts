@@ -9,6 +9,7 @@ import {
   countHiddenFailedSessions,
   isActiveSessionStatus,
   isAwaitingSessionStatus,
+  shouldShowTaskInSidebarSessions,
   shouldShowRootTaskInSidebar,
 } from "../components/Sidebar";
 
@@ -82,6 +83,16 @@ describe("shouldShowRootTaskInSidebar", () => {
 });
 
 describe("countHiddenFailedSessions", () => {
+  it("ignores remote-device shadow tasks", () => {
+    const tasks = [
+      createTask({ id: "remote-failed", status: "failed", targetNodeId: "node-1" }),
+      createTask({ id: "local-failed", status: "failed" }),
+    ];
+
+    const count = countHiddenFailedSessions(tasks, "focused");
+    expect(count).toBe(1);
+  });
+
   it("counts only hidden root failed/cancelled unpinned sessions", () => {
     const tasks = [
       createTask({ id: "pinned-failed-root", status: "failed", pinned: true }),
@@ -124,6 +135,16 @@ describe("countHiddenFailedSessions", () => {
     const tasks = [createTask({ id: "failed-root", status: "failed" })];
     const count = countHiddenFailedSessions(tasks, "full");
     expect(count).toBe(0);
+  });
+});
+
+describe("shouldShowTaskInSidebarSessions", () => {
+  it("hides remote-device shadow tasks from the sidebar", () => {
+    expect(shouldShowTaskInSidebarSessions(createTask({ targetNodeId: "node-1" }))).toBe(false);
+  });
+
+  it("keeps local tasks visible in the sidebar", () => {
+    expect(shouldShowTaskInSidebarSessions(createTask({}))).toBe(true);
   });
 });
 

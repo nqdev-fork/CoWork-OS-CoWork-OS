@@ -2260,7 +2260,6 @@ export function App() {
               />
             ) : currentView === "devices" ? (
               <DevicesPanel
-                tasks={tasks}
                 onOpenTask={(taskId) => {
                   setSelectedTaskId(taskId);
                   setCurrentView("main");

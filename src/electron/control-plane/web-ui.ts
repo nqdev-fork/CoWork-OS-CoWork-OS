@@ -1071,6 +1071,9 @@ export function getControlPlaneWebUIHtml(): string {
                 refreshApprovals().catch(() => {});
               }
             }
+            if (type === 'approval_granted' || type === 'approval_denied') {
+              refreshApprovals().catch(() => {});
+            }
             if (
               type === 'input_request_created' ||
               type === 'input_request_resolved' ||

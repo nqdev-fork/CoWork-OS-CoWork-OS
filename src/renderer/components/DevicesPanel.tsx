@@ -8,13 +8,16 @@ import {
   SlidersHorizontal,
   CheckCircle2,
   Circle,
+  PauseCircle,
+  AlertCircle,
+  Clock3,
+  XCircle,
 } from "lucide-react";
 import type { NodeInfo, Task } from "../../shared/types";
-import { isActiveSessionStatus } from "./Sidebar";
+import { isActiveSessionStatus, isAwaitingSessionStatus } from "./Sidebar";
 import { getPlatformVisualIcon } from "./DeviceIcons";
 
 interface DevicesPanelProps {
-  tasks: Task[];
   onOpenTask: (taskId: string) => void;
   onNewTaskForDevice?: (nodeId: string, prompt: string) => Promise<void>;
 }
@@ -32,11 +35,11 @@ function formatRelativeTime(timestamp?: number): string {
 }
 
 export function DevicesPanel({
-  tasks,
   onOpenTask,
   onNewTaskForDevice,
 }: DevicesPanelProps) {
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
+  const [deviceTasks, setDeviceTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(false);
@@ -88,22 +91,115 @@ export function DevicesPanel({
     [nodes, activeNodeId]
   );
 
-  const deviceTasks = useMemo(() => {
-    if (!activeNodeId) return [];
-    return tasks.filter((t: Task) => t.targetNodeId === activeNodeId);
-  }, [tasks, activeNodeId]);
+  const loadDeviceTasks = useCallback(async (nodeId: string | null) => {
+    if (!nodeId || !window.electronAPI?.deviceListTasks) {
+      setDeviceTasks([]);
+      return;
+    }
+    try {
+      const result = await window.electronAPI.deviceListTasks(nodeId);
+      if (result?.ok && Array.isArray(result.tasks)) {
+        setDeviceTasks(result.tasks as Task[]);
+      } else {
+        setDeviceTasks([]);
+      }
+    } catch (error) {
+      console.error("Failed to load device tasks:", error);
+      setDeviceTasks([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!activeNodeId) {
+      setDeviceTasks([]);
+      return;
+    }
+
+    void loadDeviceTasks(activeNodeId);
+    const interval = window.setInterval(() => {
+      void loadDeviceTasks(activeNodeId);
+    }, 3000);
+
+    return () => window.clearInterval(interval);
+  }, [activeNodeId, loadDeviceTasks]);
+
+  const visibleDeviceTasks = useMemo(() => deviceTasks.slice(0, 4), [deviceTasks]);
 
   const handleAssignTask = async () => {
     if (!activeNodeId || !taskPrompt.trim() || submittingTask) return;
     setSubmittingTask(true);
     try {
       await onNewTaskForDevice?.(activeNodeId, taskPrompt.trim());
+      await loadDeviceTasks(activeNodeId);
       setTaskPrompt("");
     } catch (error) {
       console.error("Failed to assign task:", error);
     } finally {
       setSubmittingTask(false);
     }
+  };
+
+  const getTaskBadge = (task: Task) => {
+    if (task.status === "completed") {
+      return {
+        className: "done",
+        label: "Completed",
+        icon: <CheckCircle2 size={12} />,
+      };
+    }
+
+    if (task.status === "failed" || task.status === "cancelled") {
+      return {
+        className: "failed",
+        label: task.status === "failed" ? "Failed" : "Cancelled",
+        icon: <XCircle size={12} />,
+      };
+    }
+
+    if (
+      task.status === "blocked" ||
+      task.terminalStatus === "needs_user_action" ||
+      task.terminalStatus === "awaiting_approval"
+    ) {
+      return {
+        className: "attention",
+        label:
+          task.terminalStatus === "awaiting_approval"
+            ? "Waiting for approval"
+            : "Waiting for input",
+        icon: <AlertCircle size={12} />,
+      };
+    }
+
+    if (task.status === "paused" || isAwaitingSessionStatus(task.status)) {
+      return {
+        className: "paused",
+        label: "Paused",
+        icon: <PauseCircle size={12} />,
+      };
+    }
+
+    if (task.status === "queued" || task.status === "pending" || task.status === "planning") {
+      return {
+        className: "pending",
+        label: task.status === "planning" ? "Planning" : task.status === "queued" ? "Queued" : "Pending",
+        icon: <Clock3 size={12} />,
+      };
+    }
+
+    if (isActiveSessionStatus(task.status) || task.status === "interrupted") {
+      return {
+        className: "running",
+        label: "Running",
+        icon: <Circle size={12} className="dp-pulse" />,
+      };
+    }
+
+    return {
+      className: "pending",
+      label: task.status,
+      icon: <Clock3 size={12} />,
+    };
   };
 
   if (loading) {
@@ -166,26 +262,27 @@ export function DevicesPanel({
               <span className="dp-section-label">Running Tasks</span>
               <button className="dp-section-link">View all tasks &gt;</button>
             </div>
-            {deviceTasks.length > 0 ? (
+            {visibleDeviceTasks.length > 0 ? (
               <div className="dp-tasks-grid">
-                {deviceTasks.slice(0, 4).map((task: Task) => (
-                  <button
-                    key={task.id}
-                    className="dp-task-card"
-                    onClick={() => onOpenTask(task.id)}
-                  >
-                    <span className="dp-task-title">{task.title || task.prompt}</span>
-                    <div className="dp-task-meta">
-                      <span className={`dp-task-badge ${isActiveSessionStatus(task.status) ? "running" : "done"}`}>
-                        {isActiveSessionStatus(task.status)
-                          ? <><Circle size={12} className="dp-pulse" /> Running</>
-                          : <><CheckCircle2 size={12} /> Complete</>
-                        }
-                      </span>
-                      <span className="dp-task-time">{formatRelativeTime(task.updatedAt)}</span>
-                    </div>
-                  </button>
-                ))}
+                {visibleDeviceTasks.map((task: Task) => {
+                  const badge = getTaskBadge(task);
+                  return (
+                    <button
+                      key={task.id}
+                      className="dp-task-card"
+                      onClick={() => onOpenTask(task.id)}
+                    >
+                      <span className="dp-task-title">{task.title || task.prompt}</span>
+                      <div className="dp-task-meta">
+                        <span className={`dp-task-badge ${badge.className}`}>
+                          {badge.icon}
+                          {badge.label}
+                        </span>
+                        <span className="dp-task-time">{formatRelativeTime(task.updatedAt)}</span>
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
             ) : (
               <div className="dp-placeholder">

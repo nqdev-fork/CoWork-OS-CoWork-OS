@@ -117,9 +117,15 @@ async function getRemoteGatewayNodeInfo():
       return undefined;
     }
   })();
+  const stableRemoteNodeId =
+    hostname && hostname.length > 0
+      ? `remote-gateway:${hostname}`
+      : status.url
+        ? `remote-gateway:${status.url}`
+        : "remote-gateway";
 
   return {
-    id: status.clientId || status.url || "remote-gateway",
+    id: stableRemoteNodeId,
     displayName:
       hostname && hostname !== "127.0.0.1" && hostname !== "localhost"
         ? `CoWork Remote (${hostname})`
@@ -137,6 +143,22 @@ async function getRemoteGatewayNodeInfo():
   };
 }
 
+async function getRemoteGatewayNodeAliases(nodeId?: string): Promise<string[]> {
+  const aliases = new Set<string>();
+  if (typeof nodeId === "string" && nodeId.trim()) {
+    aliases.add(nodeId.trim());
+  }
+
+  const remoteNode = await getRemoteGatewayNodeInfo();
+  if (remoteNode) {
+    aliases.add(remoteNode.id);
+    if (remoteNode.deviceId) aliases.add(remoteNode.deviceId);
+    if (remoteNode.displayName) aliases.add(remoteNode.displayName);
+  }
+
+  return Array.from(aliases);
+}
+
 /**
  * Get the current control plane server instance
  */
@@ -148,6 +170,85 @@ function requireScope(client: any, scope: "admin" | "read" | "write" | "operator
   if (!client?.hasScope?.(scope)) {
     throw { code: ErrorCodes.UNAUTHORIZED, message: `Missing required scope: ${scope}` };
   }
+}
+
+async function syncRemoteShadowTasksForNode(nodeId: string): Promise<void> {
+  if (!controlPlaneDeps?.dbManager) return;
+  const remoteClient = getRemoteGatewayClient();
+  if (!remoteClient || remoteClient.getStatus().state !== "connected") return;
+
+  const db = controlPlaneDeps.dbManager.getDatabase();
+  const { TaskRepository } = require("../database/repositories");
+  const repo = new TaskRepository(db);
+  const aliases = await getRemoteGatewayNodeAliases(nodeId);
+  const localTasks = repo.findByTargetNodeIds(aliases, 50);
+  if (localTasks.length === 0) return;
+
+  await Promise.all(
+    localTasks.map(async (task: Any) => {
+      try {
+        const remoteRes = (await remoteClient.request("task.get", { taskId: task.id })) as Any;
+        const remoteTask = remoteRes?.task;
+        if (!remoteTask) return;
+        const nextTitle = remoteTask.title || task.title;
+        const nextStatus = remoteTask.status || task.status;
+        const nextCompletedAt =
+          typeof remoteTask.completedAt === "number" ? remoteTask.completedAt : null;
+        const nextError = remoteTask.error ?? null;
+        const nextTerminalStatus = remoteTask.terminalStatus ?? null;
+        const nextFailureClass = remoteTask.failureClass ?? null;
+        const nextBestKnownOutcome = remoteTask.bestKnownOutcome
+          ? JSON.stringify(remoteTask.bestKnownOutcome)
+          : null;
+        const nextResultSummary = remoteTask.resultSummary ?? null;
+        const nextUpdatedAt =
+          typeof remoteTask.updatedAt === "number" && Number.isFinite(remoteTask.updatedAt)
+            ? remoteTask.updatedAt
+            : task.updatedAt;
+
+        const hasMeaningfulChange =
+          nextTitle !== task.title ||
+          nextStatus !== task.status ||
+          nextCompletedAt !== (task.completedAt ?? null) ||
+          nextError !== (task.error ?? null) ||
+          nextTerminalStatus !== (task.terminalStatus ?? null) ||
+          nextFailureClass !== (task.failureClass ?? null) ||
+          nextBestKnownOutcome !==
+            (task.bestKnownOutcome ? JSON.stringify(task.bestKnownOutcome) : null) ||
+          nextResultSummary !== (task.resultSummary ?? null) ||
+          nextUpdatedAt !== task.updatedAt;
+
+        if (!hasMeaningfulChange) return;
+
+        db.prepare(
+          `UPDATE tasks
+           SET title = ?,
+               status = ?,
+               completed_at = ?,
+               error = ?,
+               terminal_status = ?,
+               failure_class = ?,
+               best_known_outcome = ?,
+               result_summary = ?,
+               updated_at = ?
+           WHERE id = ?`
+        ).run(
+          nextTitle,
+          nextStatus,
+          nextCompletedAt,
+          nextError,
+          nextTerminalStatus,
+          nextFailureClass,
+          nextBestKnownOutcome,
+          nextResultSummary,
+          nextUpdatedAt,
+          task.id,
+        );
+      } catch (error) {
+        console.warn(`[ControlPlane] Failed to sync remote shadow task ${task.id}:`, error);
+      }
+    }),
+  );
 }
 
 function sanitizeTaskCreateParams(params: unknown): {
@@ -2462,13 +2563,12 @@ export function setupControlPlaneHandlers(
   ipcMain.handle(IPC_CHANNELS.DEVICE_LIST_TASKS, async (_, nodeId: string) => {
     try {
       if (!controlPlaneDeps?.dbManager) return { ok: false, error: "No database" };
+      await syncRemoteShadowTasksForNode(nodeId);
       const db = controlPlaneDeps.dbManager.getDatabase();
-      const rows = db
-        .prepare(
-          "SELECT * FROM tasks WHERE target_node_id = ? ORDER BY updated_at DESC LIMIT 50",
-        )
-        .all(nodeId);
-      return { ok: true, tasks: rows };
+      const { TaskRepository } = require("../database/repositories");
+      const repo = new TaskRepository(db);
+      const aliases = await getRemoteGatewayNodeAliases(nodeId);
+      return { ok: true, tasks: repo.findByTargetNodeIds(aliases, 50) };
     } catch (error: any) {
       return { ok: false, error: error.message || String(error) };
     }
@@ -2480,6 +2580,15 @@ export function setupControlPlaneHandlers(
       try {
         if (!controlPlaneDeps?.dbManager) return { ok: false, error: "No database" };
         const db = controlPlaneDeps.dbManager.getDatabase();
+        const workspaceRepo = new WorkspaceRepository(db);
+        const requestedLocalWorkspace = params.workspaceId
+          ? workspaceRepo.findById(params.workspaceId)
+          : undefined;
+        const fallbackLocalWorkspace = workspaceRepo.findAll()[0];
+        const localWorkspaceId = requestedLocalWorkspace?.id || fallbackLocalWorkspace?.id;
+        if (!localWorkspaceId) {
+          return { ok: false, error: "No local workspace available for remote task shadow record" };
+        }
         
         // Forward to remote gateway if active
         const remoteClient = getRemoteGatewayClient();
@@ -2515,12 +2624,44 @@ export function setupControlPlaneHandlers(
           }
         }
         
-        const id = remoteTaskRes?.taskId || crypto.randomUUID();
+        const remoteTask = remoteTaskRes?.task;
+        const id = remoteTaskRes?.taskId || remoteTask?.id || crypto.randomUUID();
         const now = Date.now();
+        const initialUpdatedAt =
+          typeof remoteTask?.updatedAt === "number" && Number.isFinite(remoteTask.updatedAt)
+            ? remoteTask.updatedAt
+            : now;
         db.prepare(
-          `INSERT INTO tasks (id, title, prompt, status, workspace_id, target_node_id, created_at, updated_at)
-           VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)`
-        ).run(id, params.prompt.slice(0, 80), params.prompt, params.workspaceId || "", params.nodeId, now, now);
+          `INSERT INTO tasks (id, title, prompt, status, workspace_id, target_node_id, terminal_status, error, completed_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).run(
+          id,
+          remoteTask?.title || params.prompt.slice(0, 80),
+          params.prompt,
+          remoteTask?.status || "pending",
+          localWorkspaceId,
+          params.nodeId,
+          remoteTask?.terminalStatus || null,
+          remoteTask?.error || null,
+          remoteTask?.completedAt || null,
+          now,
+          initialUpdatedAt,
+        );
+        
+        db.prepare(
+          `UPDATE tasks
+           SET title = ?, status = ?, workspace_id = ?, terminal_status = ?, error = ?, completed_at = ?, updated_at = ?
+           WHERE id = ?`
+        ).run(
+          remoteTask?.title || params.prompt.slice(0, 80),
+          remoteTask?.status || "pending",
+          localWorkspaceId,
+          remoteTask?.terminalStatus || null,
+          remoteTask?.error || null,
+          remoteTask?.completedAt || null,
+          initialUpdatedAt,
+          id,
+        );
         
         return { ok: true, taskId: id };
       } catch (error: any) {

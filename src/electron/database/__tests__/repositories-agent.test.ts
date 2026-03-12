@@ -44,6 +44,7 @@ class MockTaskRepository {
     "projectId",
     "requestDepth",
     "billingCode",
+    "targetNodeId",
     "pinned",
     "worktreePath",
     "worktreeBranch",
@@ -161,6 +162,7 @@ class MockTaskRepository {
       requestDepth:
         typeof stored.requestDepth === "number" ? stored.requestDepth : undefined,
       billingCode: stored.billingCode || undefined,
+      targetNodeId: stored.targetNodeId || undefined,
       worktreePath: stored.worktreePath || undefined,
       worktreeBranch: stored.worktreeBranch || undefined,
       worktreeStatus: stored.worktreeStatus || undefined,
@@ -179,6 +181,19 @@ describe("TaskRepository - Agent Fields", () => {
   });
 
   describe("create", () => {
+    it("preserves target node metadata on device-shadow tasks", () => {
+      const task = repository.create({
+        title: "Remote Task",
+        prompt: "Run this elsewhere",
+        status: "pending",
+        workspaceId: "workspace-1",
+        targetNodeId: "node-42",
+      });
+
+      const retrieved = repository.findById(task.id);
+      expect(retrieved?.targetNodeId).toBe("node-42");
+    });
+
     it("should create task with default agent fields", () => {
       const task = repository.create({
         title: "Test Task",

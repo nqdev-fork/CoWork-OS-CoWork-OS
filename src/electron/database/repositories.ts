@@ -292,6 +292,7 @@ export class TaskRepository {
     "projectId",
     "requestDepth",
     "billingCode",
+    "targetNodeId",
     // Git Worktree fields
     "worktreePath",
     "worktreeBranch",
@@ -631,7 +632,40 @@ export class TaskRepository {
       requestDepth:
         typeof row.request_depth === "number" ? row.request_depth : undefined,
       billingCode: row.billing_code || undefined,
+      targetNodeId: row.target_node_id || undefined,
     };
+  }
+
+  findByTargetNodeId(nodeId: string, limit = 50): Task[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM tasks
+      WHERE target_node_id = ?
+      ORDER BY updated_at DESC
+      LIMIT ?
+    `);
+    const rows = stmt.all(nodeId, limit) as Any[];
+    return rows.map((row) => this.mapRowToTask(row));
+  }
+
+  findByTargetNodeIds(nodeIds: string[], limit = 50): Task[] {
+    const normalized = Array.from(
+      new Set(
+        nodeIds
+          .map((value) => (typeof value === "string" ? value.trim() : ""))
+          .filter((value) => value.length > 0),
+      ),
+    );
+    if (normalized.length === 0) return [];
+
+    const placeholders = normalized.map(() => "?").join(", ");
+    const stmt = this.db.prepare(`
+      SELECT * FROM tasks
+      WHERE target_node_id IN (${placeholders})
+      ORDER BY updated_at DESC
+      LIMIT ?
+    `);
+    const rows = stmt.all(...normalized, limit) as Any[];
+    return rows.map((row) => this.mapRowToTask(row));
   }
 
   /**
