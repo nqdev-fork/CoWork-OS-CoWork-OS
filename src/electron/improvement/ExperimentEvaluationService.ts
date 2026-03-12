@@ -48,9 +48,11 @@ export class ExperimentEvaluationService {
     const targetedVerificationPassed =
       !!task &&
       task.status === "completed" &&
-      task.terminalStatus !== "failed" &&
+      task.terminalStatus === "ok" &&
+      verificationPassed &&
       !verificationFailed &&
-      !reviewFailed;
+      !reviewFailed &&
+      hasPromotionEvidence(task);
     const failureClassResolved =
       !!task && task.failureClass !== "required_verification" && task.failureClass !== "contract_error";
     const regressionSignals = collectRegressionSignals(task, verificationFailed, reviewFailed);
@@ -114,6 +116,7 @@ export class ExperimentEvaluationService {
     const winner = evaluations.find(
       (candidate) =>
         candidate.targetedVerificationPassed &&
+        candidate.verificationPassed &&
         candidate.replayPassRate >= 0.5 &&
         candidate.regressionSignals.length === 0,
     );
@@ -159,9 +162,10 @@ function collectRegressionSignals(
     return signals;
   }
   if (task.status !== "completed") signals.push("Task did not complete successfully.");
-  if (task.terminalStatus === "failed") signals.push("Task terminal status is failed.");
+  if (task.terminalStatus !== "ok") signals.push(`Task terminal status is ${task.terminalStatus || "missing"}.`);
   if (verificationFailed) signals.push("Verification failed event recorded.");
   if (reviewFailed) signals.push("Review quality failure recorded.");
+  if (!hasPromotionEvidence(task)) signals.push("Task did not report PR-ready reproduction and verification evidence.");
   if (/regress|broke|still failing|unable|cannot/i.test(String(task.resultSummary || ""))) {
     signals.push("Result summary suggests unresolved or regressed behavior.");
   }
@@ -194,4 +198,27 @@ function estimateDiffSizePenalty(task: Task | undefined): number {
   if (len <= 240) return 0.02;
   if (len <= 700) return 0.06;
   return 0.12;
+}
+
+function hasPromotionEvidence(task: Task | undefined): boolean {
+  if (!task) return false;
+  const text = `${task.resultSummary || ""} ${task.error || ""} ${task.bestKnownOutcome || ""}`;
+  const hasReproduction =
+    /reproduction\s*(method|:|\s)/i.test(text) ||
+    /reproduce[d]?\s/i.test(text) ||
+    /reproduced\s+(the\s+)?(failure|issue|bug)/i.test(text);
+  const hasVerification =
+    /verification/i.test(text) ||
+    /\bverified\b/i.test(text) ||
+    /verifies?\s/i.test(text) ||
+    /(test|check)s?\s+(pass|passed)/i.test(text) ||
+    /(npm\s+)?test\s+passes/i.test(text);
+  const hasPrReadiness =
+    /pr\s*readiness/i.test(text) ||
+    /pr\s*ready/i.test(text) ||
+    /ready\s*for\s*pr/i.test(text) ||
+    /ready\s*to\s*(open|create|submit)\s*(a\s*)?pr/i.test(text) ||
+    /ready\s*for\s*review/i.test(text) ||
+    /draft\s*pr\s*(ready|can\s+be\s+opened)/i.test(text);
+  return hasReproduction && hasVerification && hasPrReadiness;
 }
