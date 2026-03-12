@@ -13,12 +13,12 @@ import {
   Plus,
   Sparkles,
   TimerReset,
-  Wand2,
+  Zap,
 } from "lucide-react";
 import type { FileViewerResult } from "../../electron/preload";
-import { Task, Workspace, NodeInfo } from "../../shared/types";
+import { Task, Workspace } from "../../shared/types";
 import { getFileName, resolveTaskOutputSummaryFromTask } from "../utils/task-outputs";
-import { isActiveSessionStatus, isAutomatedSession } from "./Sidebar";
+import { isActiveSessionStatus, isAutomatedSession, shouldShowTaskInSidebarSessions } from "./Sidebar";
 
 interface RecentHubFile {
   id: string;
@@ -46,9 +46,8 @@ interface HomeDashboardProps {
   onNewSession: () => void;
   onOpenScheduledTasks: () => void;
   onOpenMissionControl: () => void;
-  onOpenSkills: () => void;
-  onOpenConnectedTools: () => void;
-  onOpenDevices?: () => void;
+  onOpenEventTriggers: () => void;
+  onOpenSelfImprove: () => void;
 }
 
 function formatRelativeTime(timestamp?: number): string {
@@ -281,12 +280,18 @@ export function HomeDashboard({
   onNewSession,
   onOpenScheduledTasks,
   onOpenMissionControl,
-  onOpenSkills,
-  onOpenConnectedTools,
-  onOpenDevices,
+  onOpenEventTriggers,
+  onOpenSelfImprove,
 }: HomeDashboardProps) {
+  const AUTOMATION_VISIBLE_ROWS = 4;
+  const AUTOMATION_ROW_HEIGHT = 72;
+  const AUTOMATION_ROW_GAP = 8;
+  const AUTOMATION_ROW_PITCH = AUTOMATION_ROW_HEIGHT + AUTOMATION_ROW_GAP;
+  const AUTOMATION_OVERSCAN = 2;
+  const AUTOMATION_BATCH_SIZE = 10;
   const [recentHubFiles, setRecentHubFiles] = useState<RecentHubFile[]>([]);
-  const [connectedNodes, setConnectedNodes] = useState<NodeInfo[]>([]);
+  const [automationLoadedCount, setAutomationLoadedCount] = useState(AUTOMATION_BATCH_SIZE);
+  const [automationScrollTop, setAutomationScrollTop] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -303,35 +308,16 @@ export function HomeDashboard({
       }
     })();
 
-    // Load connected nodes
-    (async () => {
-      try {
-        const result = await window.electronAPI?.nodeList?.();
-        if (cancelled) return;
-        if (result?.ok && result.nodes) {
-          setConnectedNodes(result.nodes);
-        }
-      } catch {
-        /* ignore */
-      }
-    })();
-
-    const unsubscribeNodes = window.electronAPI?.onNodeEvent?.((event) => {
-      if (event.type === "connected" || event.type === "disconnected") {
-        window.electronAPI?.nodeList?.().then((result) => {
-          if (result?.ok && result.nodes) setConnectedNodes(result.nodes);
-        });
-      }
-    });
-
     return () => {
       cancelled = true;
-      unsubscribeNodes?.();
     };
   }, []);
 
   const rootTasks = useMemo(
-    () => tasks.filter((task) => !task.parentTaskId).sort((a, b) => b.updatedAt - a.updatedAt),
+    () =>
+      tasks
+        .filter((task) => !task.parentTaskId && shouldShowTaskInSidebarSessions(task))
+        .sort((a, b) => b.updatedAt - a.updatedAt),
     [tasks],
   );
 
@@ -345,13 +331,26 @@ export function HomeDashboard({
   );
 
   const automatedTasks = useMemo(
-    () => rootTasks.filter((task) => isAutomatedSession(task)).slice(0, 6),
+    () => rootTasks.filter((task) => isAutomatedSession(task)),
     [rootTasks],
   );
 
-  const recentSessions = useMemo(
-    () => rootTasks.filter((task) => !isAutomatedSession(task)).slice(0, 5),
-    [rootTasks],
+  useEffect(() => {
+    setAutomationLoadedCount(Math.min(automatedTasks.length, AUTOMATION_BATCH_SIZE));
+    setAutomationScrollTop(0);
+  }, [AUTOMATION_BATCH_SIZE, automatedTasks.length]);
+
+  const automationVisibleStart = Math.max(0, Math.floor(automationScrollTop / AUTOMATION_ROW_PITCH));
+  const automationRenderStart = Math.max(0, automationVisibleStart - AUTOMATION_OVERSCAN);
+  const automationRenderEnd = Math.min(
+    automationLoadedCount,
+    automationVisibleStart + AUTOMATION_VISIBLE_ROWS + AUTOMATION_OVERSCAN,
+  );
+  const visibleAutomatedTasks = automatedTasks.slice(automationRenderStart, automationRenderEnd);
+  const automationTopSpacer = automationRenderStart * AUTOMATION_ROW_PITCH;
+  const automationBottomSpacer = Math.max(
+    0,
+    (automationLoadedCount - automationRenderEnd) * AUTOMATION_ROW_PITCH,
   );
 
   const recentOutputs = useMemo(() => {
@@ -398,7 +397,23 @@ export function HomeDashboard({
     return counts;
   }, [rootTasks]);
 
-  const displayTasks = activeTasks.length > 0 ? activeTasks.slice(0, 4) : recentSessions.slice(0, 4);
+  const displayTasks = activeTasks.slice(0, 4);
+
+  const loadMoreAutomationTasks = (element?: HTMLDivElement | null) => {
+    if (automationLoadedCount >= automatedTasks.length) return;
+    if (element) {
+      const hasOverflow = element.scrollHeight > element.clientHeight + 1;
+      const remaining = element.scrollHeight - element.scrollTop - element.clientHeight;
+      if (hasOverflow && remaining > 120) return;
+    }
+    setAutomationLoadedCount((count) => Math.min(automatedTasks.length, count + AUTOMATION_BATCH_SIZE));
+  };
+
+  const handleAutomationListScroll = (event: React.UIEvent<HTMLDivElement>) => {
+    const element = event.currentTarget;
+    setAutomationScrollTop(element.scrollTop);
+    loadMoreAutomationTasks(element);
+  };
 
 
   return (
@@ -448,7 +463,7 @@ export function HomeDashboard({
             {displayTasks.length === 0 && (
               <div className="home-empty-state home-empty-wide">
                 <FileText size={18} />
-                <span>No tasks yet. Start one above to get going.</span>
+                <span>No running tasks right now.</span>
               </div>
             )}
           </div>
@@ -457,10 +472,7 @@ export function HomeDashboard({
         {/* Automation */}
         <section className="home-section">
           <div className="home-section-header">
-            <h2>Automation</h2>
-            <button type="button" className="home-section-link" onClick={onOpenScheduledTasks}>
-              Manage automations <ArrowRight size={14} />
-            </button>
+            <h2>Automations</h2>
           </div>
           <div className="home-automation-strip">
             <button type="button" className="home-auto-card" onClick={onOpenScheduledTasks}>
@@ -478,88 +490,69 @@ export function HomeDashboard({
               </div>
               <div className="home-auto-card-copy">
                 <strong>Mission Control</strong>
-                <span>{automationGroups.improvement + automationGroups.heartbeat} active</span>
+                <span>{automationGroups.heartbeat} active</span>
               </div>
             </button>
-            <button type="button" className="home-auto-card" onClick={onOpenConnectedTools}>
+            <button type="button" className="home-auto-card" onClick={onOpenEventTriggers}>
               <div className="home-auto-card-icon">
-                <Wand2 size={20} />
+                <Zap size={20} />
               </div>
               <div className="home-auto-card-copy">
-                <strong>Connected tools</strong>
+                <strong>Event triggers</strong>
                 <span>{automationGroups.hook + automationGroups.api} triggers</span>
               </div>
             </button>
-            <button type="button" className="home-auto-card" onClick={onOpenSkills}>
+            <button type="button" className="home-auto-card" onClick={onOpenSelfImprove}>
               <div className="home-auto-card-icon">
                 <Sparkles size={20} />
               </div>
               <div className="home-auto-card-copy">
-                <strong>Skill store</strong>
-                <span>Browse skills</span>
+                <strong>Self-improve</strong>
+                <span>{automationGroups.improvement} active</span>
               </div>
             </button>
           </div>
           {automatedTasks.length > 0 && (
-            <div className="home-automation-list">
-              {automatedTasks.slice(0, 3).map((task) => {
-                const status = getTaskStatusInfo(task);
-                return (
-                  <button
-                    type="button"
-                    key={task.id}
-                    className="home-automation-row"
-                    onClick={() => onOpenTask(task.id)}
-                  >
-                    <div className="home-automation-row-left">
-                      <strong>{task.title}</strong>
-                      <span>{status.label}</span>
-                    </div>
-                    <small>{formatRelativeTime(task.updatedAt || task.createdAt)}</small>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </section>
-
-        {/* Devices */}
-        <section className="home-section">
-          <div className="home-section-header">
-            <h2>Devices</h2>
-            {onOpenDevices && (
-              <button type="button" className="home-section-link" onClick={onOpenDevices}>
-                Manage devices <ArrowRight size={14} />
-              </button>
-            )}
-          </div>
-          {connectedNodes.length > 0 ? (
-            <div className="home-automation-strip">
-              {connectedNodes.slice(0, 4).map((node) => (
-                <button
-                  key={node.id}
-                  type="button"
-                  className="home-auto-card"
-                  onClick={onOpenDevices}
-                >
-                  <span className="home-auto-card-icon">
-                    {node.platform === "ios" || node.platform === "android" ? "\u{1F4F1}" : "\u{1F5A5}"}
-                  </span>
-                  <span className="home-auto-card-label">{node.displayName}</span>
-                  <span className="home-auto-card-description">
-                    {node.isForeground ? "Connected" : "Background"}
-                  </span>
-                </button>
-              ))}
-            </div>
-          ) : (
-            <div className="home-auto-empty">
-              <p>No devices connected</p>
-              {onOpenDevices && (
-                <button type="button" className="home-section-link" onClick={onOpenDevices}>
-                  Add a device <ArrowRight size={14} />
-                </button>
-              )}
+            <div className="home-automation-panel">
+              <div className="home-automation-panel-header">
+                <span>
+                  {automatedTasks.length} automated task{automatedTasks.length === 1 ? "" : "s"}
+                </span>
+              </div>
+              <div
+                className="home-automation-list"
+                onScroll={handleAutomationListScroll}
+              >
+                {automationTopSpacer > 0 && (
+                  <div
+                    aria-hidden="true"
+                    style={{ height: `${automationTopSpacer}px`, flexShrink: 0 }}
+                  />
+                )}
+                {visibleAutomatedTasks.map((task) => {
+                  const status = getTaskStatusInfo(task);
+                  return (
+                    <button
+                      type="button"
+                      key={task.id}
+                      className="home-automation-row"
+                      onClick={() => onOpenTask(task.id)}
+                    >
+                      <div className="home-automation-row-left">
+                        <strong>{task.title}</strong>
+                        <span>{status.label}</span>
+                      </div>
+                      <small>{formatRelativeTime(task.updatedAt || task.createdAt)}</small>
+                    </button>
+                  );
+                })}
+                {automationBottomSpacer > 0 && (
+                  <div
+                    aria-hidden="true"
+                    style={{ height: `${automationBottomSpacer}px`, flexShrink: 0 }}
+                  />
+                )}
+              </div>
             </div>
           )}
         </section>
