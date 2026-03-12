@@ -581,7 +581,7 @@ export async function startControlPlaneFromSettings(
       ? ControlPlaneSettingsManager.enable()
       : ControlPlaneSettingsManager.loadSettings();
 
-    if (!settings.enabled) {
+    if (!settings.enabled && settings.connectionMode !== "remote") {
       return { ok: true, skipped: true };
     }
 
@@ -2412,12 +2412,35 @@ export function setupControlPlaneHandlers(
       try {
         if (!controlPlaneDeps?.dbManager) return { ok: false, error: "No database" };
         const db = controlPlaneDeps.dbManager.getDatabase();
-        const id = crypto.randomUUID();
+        
+        // Forward to remote gateway if active
+        const remoteClient = getRemoteGatewayClient();
+        let remoteTaskRes: Any;
+        
+        if (remoteClient && remoteClient.getStatus().state === "connected") {
+          console.log(`[ControlPlane] Forwarding task creation to remote device: ${params.nodeId}`);
+          try {
+            remoteTaskRes = await remoteClient.request("task.create", {
+              title: params.prompt.slice(0, 50) + (params.prompt.length > 50 ? "..." : ""),
+              prompt: params.prompt,
+              // Use default workspace if none provided, or map if we had a workspace mapping strategy
+              // Since it's a remote machine, it might not have the exact same workspaceId.
+              // Letting the remote side handle default mapping if undefined.
+              workspaceId: params.workspaceId, 
+            });
+          } catch (e: Any) {
+             console.error(`[ControlPlane] Remote task execution failed:`, e);
+             return { ok: false, error: e?.message || "Remote execution failed" };
+          }
+        }
+        
+        const id = remoteTaskRes?.taskId || crypto.randomUUID();
         const now = Date.now();
         db.prepare(
           `INSERT INTO tasks (id, title, prompt, status, workspace_id, target_node_id, created_at, updated_at)
-           VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)`
         ).run(id, params.prompt.slice(0, 80), params.prompt, params.workspaceId || "", params.nodeId, now, now);
+        
         return { ok: true, taskId: id };
       } catch (error: Any) {
         return { ok: false, error: error.message || String(error) };
