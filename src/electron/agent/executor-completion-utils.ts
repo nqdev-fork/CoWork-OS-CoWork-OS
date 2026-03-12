@@ -322,12 +322,16 @@ export function fallbackContainsDirectAnswer(opts: {
 export function hasArtifactEvidence(opts: {
   contract: CompletionContract;
   createdFiles: string[];
+  /** When createdFiles is empty, modified files can satisfy artifact evidence (e.g. task edited existing file). */
+  modifiedFiles?: string[];
 }): boolean {
   if (!opts.contract.requiresArtifactEvidence) return true;
-  if (opts.createdFiles.length === 0) return false;
+  const evidenceFiles =
+    opts.createdFiles.length > 0 ? opts.createdFiles : (opts.modifiedFiles || []).map((file) => String(file));
+  if (evidenceFiles.length === 0) return false;
   if (!opts.contract.requiredArtifactExtensions.length) return true;
 
-  const lowered = opts.createdFiles.map((file) => String(file).toLowerCase());
+  const lowered = evidenceFiles.map((file) => String(file).toLowerCase());
   return opts.contract.requiredArtifactExtensions.some((ext: string) =>
     lowered.some((file: string) => file.endsWith(ext)),
   );
