@@ -14,15 +14,20 @@ const DEFAULT_SETTINGS: ImprovementLoopSettings = {
   autoRun: true,
   includeDevLogs: true,
   intervalMinutes: 24 * 60,
-  variantsPerCampaign: 4,
+  variantsPerCampaign: 1,
   maxConcurrentCampaigns: 1,
+  maxConcurrentImprovementExecutors: 1,
+  maxQueuedImprovementCampaigns: 1,
   maxOpenCandidatesPerWorkspace: 25,
   requireWorktree: true,
-  reviewRequired: true,
-  judgeRequired: true,
+  reviewRequired: false,
+  judgeRequired: false,
   promotionMode: "github_pr",
   evalWindowDays: 14,
   replaySetSize: 3,
+  campaignTimeoutMinutes: 30,
+  campaignTokenBudget: 60000,
+  campaignCostBudget: 15,
 };
 
 const SCROLL_PANEL_STYLE = {
@@ -48,15 +53,78 @@ function getWorkspaceModeMeta(workspace: Workspace | undefined) {
   }
   if (workspace.isTemp) {
     return {
-      label: "Direct Apply",
+      label: "Non-Promotable",
       tone: "#b7791f",
-      description: "Temporary workspaces can still run campaigns, but successful winners apply directly instead of opening a PR.",
+      description: "Temporary workspaces are not suitable for PR-first self-improvement campaigns.",
     };
   }
   return {
     label: "Promotable If Git-Backed",
     tone: "#2f855a",
-    description: "Git-backed workspaces can promote the judge-selected winner into a PR or merge.",
+    description: "Git-backed workspaces can produce draft PR candidates when promotion gates pass.",
+  };
+}
+
+function formatPercent(value: number): string {
+  return `${Math.round(value * 100)}%`;
+}
+
+function formatTimestamp(value?: number): string {
+  if (!value) return "Never";
+  return new Date(value).toLocaleString();
+}
+
+function isProviderFailure(value?: string): boolean {
+  return typeof value === "string" && value.startsWith("provider_");
+}
+
+function getProviderHealthSummary(
+  campaigns: ImprovementCampaign[],
+  candidates: ImprovementCandidate[],
+): {
+  status: "healthy" | "degraded" | "blocked";
+  label: string;
+  details: string;
+  incidents: Array<{ id: string; title: string; detail: string; at?: number }>;
+} {
+  const incidents = [
+    ...campaigns
+      .filter((campaign) => isProviderFailure(campaign.stopReason))
+      .map((campaign) => ({
+        id: campaign.id,
+        title: campaign.stopReason || "provider_failure",
+        detail: campaign.promotionError || campaign.verdictSummary || "Provider-related campaign failure.",
+        at: campaign.completedAt || campaign.startedAt || campaign.createdAt,
+      })),
+    ...candidates
+      .filter((candidate) => isProviderFailure(candidate.lastFailureClass))
+      .map((candidate) => ({
+        id: candidate.id,
+        title: candidate.lastFailureClass || "provider_failure",
+        detail: candidate.parkReason || candidate.summary,
+        at: candidate.cooldownUntil || candidate.parkedAt || candidate.lastExperimentAt,
+      })),
+  ].sort((a, b) => (b.at || 0) - (a.at || 0));
+
+  if (incidents.length === 0) {
+    return {
+      status: "healthy",
+      label: "Healthy",
+      details: "No provider-related campaign failures are visible in the current workspace scope.",
+      incidents: [],
+    };
+  }
+
+  const blocked = candidates.some(
+    (candidate) => candidate.status === "parked" && isProviderFailure(candidate.lastFailureClass),
+  );
+  return {
+    status: blocked ? "blocked" : "degraded",
+    label: blocked ? "Blocked" : "Degraded",
+    details: blocked
+      ? "Provider failures are currently parking candidates and blocking PR generation."
+      : "Provider-related failures have occurred recently and may reduce PR yield.",
+    incidents: incidents.slice(0, 6),
   };
 }
 
@@ -116,6 +184,54 @@ export function ImprovementSettingsPanel(props?: {
         return statusMatches && sourceMatches;
       }),
     [candidateStatusFilter, candidateSourceFilter, candidates],
+  );
+  const overviewMetrics = useMemo(() => {
+    const prOpened = campaigns.filter((campaign) => campaign.promotionStatus === "pr_opened").length;
+    const terminalCampaigns = campaigns.filter((campaign) =>
+      ["pr_opened", "failed", "parked", "promoted"].includes(campaign.status),
+    );
+    const failedCampaigns = campaigns.filter((campaign) => campaign.status === "failed").length;
+    const parkedCampaigns = campaigns.filter((campaign) => campaign.status === "parked").length;
+    const activeCampaigns = campaigns.filter((campaign) =>
+      ["queued", "preflight", "reproducing", "implementing", "verifying"].includes(campaign.status),
+    ).length;
+    const parkedCandidates = candidates.filter((candidate) => candidate.status === "parked").length;
+    const coolingDownCandidates = candidates.filter(
+      (candidate) => typeof candidate.cooldownUntil === "number" && candidate.cooldownUntil > Date.now(),
+    ).length;
+    const prYield = terminalCampaigns.length > 0 ? prOpened / terminalCampaigns.length : 0;
+    const stageCounts = campaigns.reduce<Record<string, number>>((acc, campaign) => {
+      const key = campaign.stage || campaign.status;
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+    return {
+      totalCampaigns: campaigns.length,
+      prOpened,
+      failedCampaigns,
+      parkedCampaigns,
+      activeCampaigns,
+      parkedCandidates,
+      coolingDownCandidates,
+      prYield,
+      stageCounts,
+    };
+  }, [campaigns, candidates]);
+  const providerHealth = useMemo(
+    () => getProviderHealthSummary(campaigns, candidates),
+    [campaigns, candidates],
+  );
+  const topParkedCandidates = useMemo(
+    () =>
+      [...candidates]
+        .filter((candidate) => candidate.status === "parked" || candidate.cooldownUntil)
+        .sort(
+          (a, b) =>
+            (b.failureStreak || 0) - (a.failureStreak || 0) ||
+            (b.cooldownUntil || b.parkedAt || 0) - (a.cooldownUntil || a.parkedAt || 0),
+        )
+        .slice(0, 5),
+    [candidates],
   );
 
   useEffect(() => {
@@ -255,8 +371,7 @@ export function ImprovementSettingsPanel(props?: {
     <div className="settings-section">
       <h2 className="settings-section-title">Self-Improvement</h2>
       <p className="settings-section-description">
-        Mine recurring failures, spawn parallel repair variants, judge them against a held-out replay set,
-        and only promote the winning branch.
+        Mine recurring failures, run a bounded scout-then-implement pipeline, and only succeed when a draft PR is opened.
       </p>
 
       <div className="settings-subsection">
@@ -265,13 +380,13 @@ export function ImprovementSettingsPanel(props?: {
           Cowork watches failed tasks, verification failures, user feedback, and optional dev logs to build a backlog of recurring issues.
         </HintBlock>
         <HintBlock title="2. Campaign">
-          For the top candidate, Cowork creates one campaign and launches four strategy lanes by default: <code>minimal_patch</code>, <code>test_first</code>, <code>root_cause</code>, and <code>guardrail_hardening</code>.
+          For the top candidate, Cowork creates one campaign, runs a scout stage to reproduce the problem, then runs one implementation stage with bounded budgets.
         </HintBlock>
         <HintBlock title="3. Judge">
-          Variants only see training evidence. A separate judge verdict ranks them using targeted verification, replay-set generalization, and regression signals.
+          Campaigns fail closed if reproduction, verification, or PR-readiness evidence is missing. Provider failures park the candidate with cooldown instead of retrying immediately.
         </HintBlock>
         <HintBlock title="4. Promotion">
-          Only the judge-selected winner can enter review and open a PR or merge.
+          The only automated success outcome is a draft PR candidate with verification evidence and stored PR metadata.
         </HintBlock>
       </div>
 
@@ -307,14 +422,14 @@ export function ImprovementSettingsPanel(props?: {
         />
         <ToggleRow
           label="Manual Review Required"
-          description="Keep winning campaigns in a review queue until you accept or dismiss them."
+          description="Legacy toggle. PR-first self-improvement opens a draft PR automatically when promotion gates pass."
           checked={settings.reviewRequired}
           disabled={busy || !settings.enabled}
           onChange={(checked) => void saveSettings({ reviewRequired: checked })}
         />
         <ToggleRow
           label="Require Judge Verdict"
-          description="Do not promote a campaign until the internal judge compares all completed variants."
+          description="Legacy toggle. The new staged pipeline does not fan out multiple variants by default."
           checked={settings.judgeRequired}
           disabled={busy || !settings.enabled}
           onChange={(checked) => void saveSettings({ judgeRequired: checked })}
@@ -341,8 +456,8 @@ export function ImprovementSettingsPanel(props?: {
           label="Variants Per Campaign"
           value={settings.variantsPerCampaign}
           disabled={busy || !settings.enabled}
-          min={2}
-          max={6}
+          min={1}
+          max={1}
           onChange={(value) => void saveSettings({ variantsPerCampaign: value })}
         />
         <NumberRow
@@ -350,8 +465,16 @@ export function ImprovementSettingsPanel(props?: {
           value={settings.maxConcurrentCampaigns}
           disabled={busy || !settings.enabled}
           min={1}
-          max={3}
+          max={1}
           onChange={(value) => void saveSettings({ maxConcurrentCampaigns: value })}
+        />
+        <NumberRow
+          label="Campaign Timeout (minutes)"
+          value={settings.campaignTimeoutMinutes}
+          disabled={busy || !settings.enabled}
+          min={5}
+          max={120}
+          onChange={(value) => void saveSettings({ campaignTimeoutMinutes: value })}
         />
         <NumberRow
           label="Replay Set Size"
@@ -369,6 +492,139 @@ export function ImprovementSettingsPanel(props?: {
           max={90}
           onChange={(value) => void saveSettings({ evalWindowDays: value })}
         />
+      </div>
+
+      <div className="settings-subsection">
+        <h3>Automation Overview</h3>
+        <p className="settings-form-hint" style={{ marginTop: 0 }}>
+          Success is measured as draft PRs opened, not campaigns started.
+        </p>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+            gap: 12,
+            marginBottom: 16,
+          }}
+        >
+          <MetricCard
+            label="PR Yield"
+            value={overviewMetrics.totalCampaigns > 0 ? formatPercent(overviewMetrics.prYield) : "n/a"}
+            hint={`${overviewMetrics.prOpened} PR candidate(s) opened from ${overviewMetrics.totalCampaigns} campaign(s).`}
+            tone={overviewMetrics.prOpened > 0 ? "#2f855a" : "#9b2c2c"}
+          />
+          <MetricCard
+            label="Active Campaigns"
+            value={String(overviewMetrics.activeCampaigns)}
+            hint={
+              overviewMetrics.activeCampaigns > 0
+                ? Object.entries(overviewMetrics.stageCounts)
+                    .filter(([, count]) => count > 0)
+                    .map(([stage, count]) => `${stage}:${count}`)
+                    .join(" | ")
+                : "No active self-improvement campaigns."
+            }
+            tone={overviewMetrics.activeCampaigns > 0 ? "var(--color-accent-primary)" : "#6b7280"}
+          />
+          <MetricCard
+            label="Parked Backlog"
+            value={String(overviewMetrics.parkedCandidates)}
+            hint={`${overviewMetrics.coolingDownCandidates} candidate(s) cooling down, ${overviewMetrics.parkedCampaigns} parked campaign(s).`}
+            tone={overviewMetrics.parkedCandidates > 0 ? "#b7791f" : "#2f855a"}
+          />
+          <MetricCard
+            label="Provider Health"
+            value={providerHealth.label}
+            hint={providerHealth.details}
+            tone={
+              providerHealth.status === "healthy"
+                ? "#2f855a"
+                : providerHealth.status === "degraded"
+                  ? "#b7791f"
+                  : "#c53030"
+            }
+          />
+        </div>
+
+        <div className="settings-form-group">
+          <div style={{ fontWeight: 600, color: "var(--color-text-primary)" }}>PR Candidate Funnel</div>
+          <p className="settings-form-hint" style={{ margin: "4px 0 0 0" }}>
+            Campaigns: <code>{overviewMetrics.totalCampaigns}</code> | PR opened: <code>{overviewMetrics.prOpened}</code> | Failed:{" "}
+            <code>{overviewMetrics.failedCampaigns}</code> | Parked: <code>{overviewMetrics.parkedCampaigns}</code>
+          </p>
+        </div>
+
+        <div className="settings-form-group">
+          <div style={{ fontWeight: 600, color: "var(--color-text-primary)" }}>Provider / Automation Health</div>
+          <p className="settings-form-hint" style={{ margin: "4px 0 0 0" }}>
+            {providerHealth.details}
+          </p>
+          {providerHealth.incidents.length > 0 ? (
+            <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+              {providerHealth.incidents.map((incident) => (
+                <div
+                  key={incident.id}
+                  style={{
+                    border: "1px solid var(--color-border-muted)",
+                    borderRadius: 10,
+                    padding: "10px 12px",
+                    background: "var(--color-bg-secondary)",
+                  }}
+                >
+                  <div style={{ fontWeight: 600, color: "var(--color-text-primary)" }}>
+                    <code>{incident.title}</code>
+                  </div>
+                  <p className="settings-form-hint" style={{ margin: "4px 0 0 0" }}>
+                    {incident.detail}
+                  </p>
+                  <p className="settings-form-hint" style={{ margin: "6px 0 0 0" }}>
+                    Last seen: <code>{formatTimestamp(incident.at)}</code>
+                  </p>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+
+        <div className="settings-form-group">
+          <div style={{ fontWeight: 600, color: "var(--color-text-primary)" }}>Top Parked Candidates</div>
+          {topParkedCandidates.length === 0 ? (
+            <p className="settings-form-hint" style={{ margin: "4px 0 0 0" }}>
+              No candidates are currently parked or cooling down.
+            </p>
+          ) : (
+            <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+              {topParkedCandidates.map((candidate) => (
+                <div
+                  key={candidate.id}
+                  style={{
+                    border: "1px solid var(--color-border-muted)",
+                    borderRadius: 10,
+                    padding: "10px 12px",
+                    background: "var(--color-bg-secondary)",
+                  }}
+                >
+                  <div style={{ fontWeight: 600, color: "var(--color-text-primary)" }}>{candidate.title}</div>
+                  <p className="settings-form-hint" style={{ margin: "4px 0 0 0" }}>
+                    Status: <code>{candidate.status}</code> | Failure streak: <code>{candidate.failureStreak || 0}</code>
+                    {candidate.lastFailureClass ? (
+                      <>
+                        {" "}
+                        | Last failure: <code>{candidate.lastFailureClass}</code>
+                      </>
+                    ) : null}
+                  </p>
+                  <p className="settings-form-hint" style={{ margin: "6px 0 0 0" }}>
+                    {candidate.parkReason || candidate.summary}
+                  </p>
+                  <p className="settings-form-hint" style={{ margin: "6px 0 0 0" }}>
+                    Cooldown until: <code>{formatTimestamp(candidate.cooldownUntil)}</code>
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="settings-subsection">
@@ -435,6 +691,7 @@ export function ImprovementSettingsPanel(props?: {
               <option value="open">Open</option>
               <option value="running">Running</option>
               <option value="review">Review</option>
+              <option value="parked">Parked</option>
               <option value="resolved">Resolved</option>
               <option value="dismissed">Dismissed</option>
             </select>
@@ -577,6 +834,32 @@ function SectionTitle(props: { title: string; hint: string }) {
   );
 }
 
+function MetricCard(props: {
+  label: string;
+  value: string;
+  hint: string;
+  tone: string;
+}) {
+  return (
+    <div
+      style={{
+        border: "1px solid var(--color-border-muted)",
+        borderRadius: 12,
+        padding: "14px 16px",
+        background: "var(--color-bg-secondary)",
+      }}
+    >
+      <div className="settings-form-hint" style={{ margin: 0 }}>
+        {props.label}
+      </div>
+      <div style={{ fontSize: 24, fontWeight: 700, color: props.tone, marginTop: 4 }}>{props.value}</div>
+      <p className="settings-form-hint" style={{ margin: "6px 0 0 0" }}>
+        {props.hint}
+      </p>
+    </div>
+  );
+}
+
 function CampaignCard(props: {
   campaign: ImprovementCampaign;
   workspaceNameById: Map<string, string>;
@@ -600,6 +883,12 @@ function CampaignCard(props: {
           <p className="settings-form-hint" style={{ margin: "4px 0 0 0" }}>
             Campaign: <code>{props.campaign.status}</code> | Review: <code>{props.campaign.reviewStatus}</code> | Promotion:{" "}
             <code>{props.campaign.promotionStatus || "idle"}</code>
+            {props.campaign.stage ? (
+              <>
+                {" "}
+                | Stage: <code>{props.campaign.stage}</code>
+              </>
+            ) : null}
             {winner ? (
               <>
                 {" "}
@@ -621,6 +910,22 @@ function CampaignCard(props: {
               </span>
             ))}
           </p>
+          {props.campaign.stopReason || props.campaign.promotionError ? (
+            <p className="settings-form-hint" style={{ margin: "6px 0 0 0" }}>
+              Stop reason: <code>{props.campaign.stopReason || "n/a"}</code>
+              {props.campaign.promotionError ? ` | ${props.campaign.promotionError}` : ""}
+            </p>
+          ) : null}
+          {props.campaign.providerHealthSnapshot ? (
+            <p className="settings-form-hint" style={{ margin: "6px 0 0 0" }}>
+              Provider snapshot:{" "}
+              {Object.entries(props.campaign.providerHealthSnapshot).map(([key, value]) => (
+                <span key={key}>
+                  <code>{key}</code>=<code>{String(value)}</code>{" "}
+                </span>
+              ))}
+            </p>
+          ) : null}
           {props.campaign.judgeVerdict ? (
             <p className="settings-form-hint" style={{ margin: "6px 0 0 0" }}>
               Judge: <code>{props.campaign.judgeVerdict.status}</code> | Rankings:{" "}
