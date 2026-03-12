@@ -142,7 +142,7 @@ export const WorkspaceIdSchema = z
   .string()
   .refine(isValidWorkspaceId, { message: "Must be a valid UUID or temp workspace ID" });
 
-const ImageAttachmentSchema = z
+export const ImageAttachmentSchema = z
   .object({
     data: z.string().trim().min(1).optional(),
     filePath: z.string().trim().max(MAX_PATH_LENGTH).optional(),
