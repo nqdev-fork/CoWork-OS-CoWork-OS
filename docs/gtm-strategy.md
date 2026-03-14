@@ -54,7 +54,7 @@ Users keep control of data and provider keys with optional offline model executi
 - 30+ LLM providers
 - 14 messaging channels
 - 100+ built-in skills
-- 3200+ tests
+- 4000+ tests
 - ZeroLeaks report published in-repo
 
 ## Narrative Guardrails
