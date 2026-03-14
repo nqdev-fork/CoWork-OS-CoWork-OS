@@ -14,9 +14,9 @@ const validQuestions = [
 ];
 
 describe("ToolRegistry request_user_input", () => {
-  it("accepts valid payload in propose mode and returns submitted response", async () => {
+  it("accepts valid payload in plan mode and returns submitted response", async () => {
     const daemon = {
-      getTaskById: vi.fn().mockResolvedValue({ agentConfig: { executionMode: "propose" } }),
+      getTaskById: vi.fn().mockResolvedValue({ agentConfig: { executionMode: "plan" } }),
       requestUserInput: vi.fn().mockResolvedValue({
         requestId: "req-1",
         status: "submitted",
@@ -37,7 +37,7 @@ describe("ToolRegistry request_user_input", () => {
     });
   });
 
-  it("rejects request_user_input outside propose mode", async () => {
+  it("rejects request_user_input outside plan mode", async () => {
     const fakeThis = {
       taskId: "task-2",
       daemon: {
@@ -48,14 +48,14 @@ describe("ToolRegistry request_user_input", () => {
 
     await expect(
       (ToolRegistry as Any).prototype.requestUserInput.call(fakeThis, { questions: validQuestions }),
-    ).rejects.toThrow(/only available in propose mode/i);
+    ).rejects.toThrow(/only available in plan mode/i);
   });
 
   it("normalizes imperfect payloads into valid request_user_input schema", async () => {
     const fakeThis = {
       taskId: "task-3",
       daemon: {
-        getTaskById: vi.fn().mockResolvedValue({ agentConfig: { executionMode: "propose" } }),
+        getTaskById: vi.fn().mockResolvedValue({ agentConfig: { executionMode: "plan" } }),
         requestUserInput: vi.fn().mockResolvedValue({
           requestId: "req-3",
           status: "submitted",
