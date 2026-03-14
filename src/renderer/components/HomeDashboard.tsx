@@ -397,7 +397,7 @@ export function HomeDashboard({
     return counts;
   }, [rootTasks]);
 
-  const displayTasks = activeTasks.slice(0, 4);
+  const displayTasks = activeTasks.filter(isAutomatedSession).slice(0, 4);
 
   const loadMoreAutomationTasks = (element?: HTMLDivElement | null) => {
     if (automationLoadedCount >= automatedTasks.length) return;
