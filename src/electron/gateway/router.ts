@@ -101,7 +101,10 @@ import {
   normalizeWhatsAppNaturalCommand,
   stripWhatsAppCommandPreamble,
 } from "./whatsapp-command-utils";
+import { writeKitFileWithSnapshot } from "../context/kit-revisions";
 export type { RouterConfig } from "./router-helpers";
+
+type Any = any;
 
 type MessageSecurityContext = {
   contextType?: "dm" | "group";
@@ -1410,9 +1413,7 @@ export class MessageRouter {
         formatLocalTimestamp(new Date()),
       );
       if (next !== current) {
-        const tmp = prioritiesPath + ".tmp";
-        fs.writeFileSync(tmp, next, "utf8");
-        fs.renameSync(tmp, prioritiesPath);
+        writeKitFileWithSnapshot(prioritiesPath, next, "agent", "router:voice_priorities_update");
       }
     } catch (error) {
       console.warn("[Router] Failed to update PRIORITIES.md:", error);
