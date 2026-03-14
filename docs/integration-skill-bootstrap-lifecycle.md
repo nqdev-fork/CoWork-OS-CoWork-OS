@@ -305,6 +305,20 @@ Lifecycle rules:
 3. During init in missing-only mode, `.cowork/BOOTSTRAP.md` is not recreated after onboarding is already complete.
 4. `.cowork/HEARTBEAT.md` remains separate from bootstrap and is reserved for recurring heartbeat-only checks.
 
+### Pure / mutating function split (`kit-status.ts`)
+
+`computeWorkspaceKitStatus()` is now **pure** — it reads and derives status without writing any state. This makes status reads safe to call from any read-only context (UI polling, lint checks, etc.).
+
+Lifecycle mutations are isolated in `ensureBootstrapLifecycleState()`, which is the only function that writes `workspace-state.json`:
+
+| Function | Reads | Writes | When to call |
+|----------|-------|--------|--------------|
+| `readWorkspaceKitState()` | ✓ | — | Always safe |
+| `computeWorkspaceKitStatus()` | ✓ | — | Status display, lint, UI |
+| `ensureBootstrapLifecycleState()` | ✓ | ✓ | Kit init, status refresh (`KIT_GET_STATUS`), bootstrap deletion flow |
+
+`KIT_GET_STATUS` IPC handler calls `ensureBootstrapLifecycleState()` before the pure `computeWorkspaceKitStatus()` so that `bootstrapSeededAt` and `onboardingCompletedAt` timestamps are always current in the returned status object.
+
 ### Health, linting, and tracked directories
 
 Workspace-kit status is now computed from one shared path and includes:
@@ -350,6 +364,16 @@ Each revision records:
 - optional reason
 - prior content hash
 - timestamp
+
+### Quick-open kit files (`kit:openFile`)
+
+The `KIT_OPEN_FILE` IPC handler (`kit:openFile`) opens any `.cowork/`-scoped file in the system editor. If the file does not exist it is seeded from a default template (with full frontmatter and section scaffolding) before opening.
+
+Exposed in **Memory Hub → Per Workspace** as "Open USER.md" and "Open MEMORY.md" buttons.
+
+Security constraints:
+- `relPath` must start with `.cowork/` and must not contain `..`
+- Rate-limited to the `limited` tier
 
 ### Source modules
 
