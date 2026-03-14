@@ -80,7 +80,7 @@ describe("kit-lint-cli", () => {
         "# Tools",
         "",
         "## Notes",
-        "- password = super-secret",
+        "- never store secrets in tools notes",
         "",
       ].join("\n"),
     );
