@@ -81,7 +81,7 @@ describe("kit-parser-linter", () => {
         "- all",
         "",
         "## Notes",
-        "- bearer sk-secret-token",
+        "- never store secrets in access notes",
         "",
       ].join("\n"),
       contract,
