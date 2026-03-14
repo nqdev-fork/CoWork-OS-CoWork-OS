@@ -54,6 +54,8 @@ import {
   truncateTextForTaskPrompt,
 } from "./utils/attachment-content";
 import { sanitizeToolCallTextFromAssistant } from "../../shared/tool-call-text-sanitizer";
+import { formatProviderErrorForDisplay } from "../../shared/provider-error-format";
+import { Check as CheckIcon } from "lucide-react";
 import { InlineVideoPreview } from "./InlineVideoPreview";
 
 const CODE_PREVIEWS_EXPANDED_KEY = "cowork:codePreviewsExpanded";
@@ -3086,6 +3088,46 @@ export function MainContent({
   const [stepFeedbackOpen, setStepFeedbackOpen] = useState(false);
   const [stepFeedbackText, setStepFeedbackText] = useState("");
   const [stepFeedbackSending, setStepFeedbackSending] = useState(false);
+
+  // Message-level thumbs feedback state
+  const [messageFeedbackMap, setMessageFeedbackMap] = useState<
+    Map<string, "accepted" | "rejected">
+  >(new Map());
+  const [rejectMenuOpenFor, setRejectMenuOpenFor] = useState<string | null>(null);
+  const rejectMenuRef = useRef<HTMLDivElement | null>(null);
+
+  // Close reject menu on outside click only (not when clicking a menu item)
+  useEffect(() => {
+    if (!rejectMenuOpenFor) return;
+    const close = (e: MouseEvent) => {
+      if (rejectMenuRef.current?.contains(e.target as Node)) return;
+      setRejectMenuOpenFor(null);
+    };
+    document.addEventListener("click", close, { capture: true });
+    return () => document.removeEventListener("click", close, { capture: true });
+  }, [rejectMenuOpenFor]);
+
+  const handleMessageFeedback = useCallback(
+    async (payload: {
+      messageId: string;
+      decision: "accepted" | "rejected";
+      reason?: string;
+    }) => {
+      setMessageFeedbackMap((prev) => new Map(prev).set(payload.messageId, payload.decision));
+      setRejectMenuOpenFor(null);
+      try {
+        await window.electronAPI.submitMessageFeedback({
+          taskId: task?.id ?? "",
+          messageId: payload.messageId,
+          decision: payload.decision,
+          reason: payload.reason,
+        });
+      } catch (err) {
+        console.error("[Feedback] Failed to submit message feedback:", err);
+      }
+    },
+    [task?.id],
+  );
 
   // Close feedback panel when step changes
   useEffect(() => {
@@ -6603,6 +6645,63 @@ export function MainContent({
                 }
 
                 if (item.kind === "action_block") {
+                  const isBlockOnlyMinimalCompletions =
+                    !verboseSteps &&
+                    item.events.length > 0 &&
+                    item.events.every((ev) => {
+                      const t = getEffectiveTaskEventType(ev);
+                      const out = resolveTaskOutputSummaryFromCompletionEvent(ev, events);
+                      return t === "task_completed" && !hasTaskOutputs(out);
+                    });
+                  if (isBlockOnlyMinimalCompletions) {
+                    const indicatorPosition = stepFeedTimelineIndexPosition.get(timelineIndex);
+                    const showConnectorAbove =
+                      typeof indicatorPosition === "number" && indicatorPosition > 0;
+                    const showConnectorBelow =
+                      typeof indicatorPosition === "number" &&
+                      indicatorPosition < stepFeedEventCount - 1;
+                    const commandOutputsForBlock = item.eventIndices.flatMap((ei) =>
+                      commandOutputSessionsByInsertIndex.get(ei) ?? [],
+                    );
+                    return (
+                      <Fragment key={item.blockId}>
+                        {item.events.map((event, idx) => {
+                          const eventIndex = item.eventIndices[idx];
+                          if (!shouldRenderTimelineEventInStepFeed(event)) return null;
+                          const isLastChild = idx === item.events.length - 1;
+                          const showChildConnectorAbove = idx === 0 ? showConnectorAbove : true;
+                          const showChildConnectorBelow = !isLastChild || showConnectorBelow;
+                          return (
+                            <div
+                              key={event.id || `event-${eventIndex}`}
+                              className="timeline-event completion-compact"
+                            >
+                              <div className="event-indicator">
+                                {showChildConnectorAbove && (
+                                  <span className="event-connector event-connector-above" aria-hidden="true" />
+                                )}
+                                <span
+                                  className="event-indicator-icon tone-success"
+                                  aria-hidden="true"
+                                  title="Done"
+                                >
+                                  <CheckIcon size={12} strokeWidth={2} />
+                                </span>
+                                {showChildConnectorBelow && (
+                                  <span className="event-connector event-connector-below" aria-hidden="true" />
+                                )}
+                              </div>
+                              <div className="event-content completion-compact-content">
+                                <span className="completion-compact-label">Done</span>
+                                <span className="event-time-muted">{formatTime(event.timestamp)}</span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                        {renderCommandOutputs(commandOutputsForBlock)}
+                      </Fragment>
+                    );
+                  }
                   const lastActionBlockIndex = (() => {
                     for (let i = timelineItems.length - 1; i >= 0; i--) {
                       if (timelineItems[i].kind === "action_block") return i;
@@ -6664,6 +6763,45 @@ export function MainContent({
                               />
                             );
                           }
+                          // In summary mode, render minimal "Done" for task_completed with no outputs
+                          // to preserve turn rhythm without the noisy "1 step / All set" card
+                          const effectiveType = getEffectiveTaskEventType(event);
+                          const outputSummary = resolveTaskOutputSummaryFromCompletionEvent(
+                            event,
+                            events,
+                          );
+                          const isMinimalCompletion =
+                            !verboseSteps &&
+                            effectiveType === "task_completed" &&
+                            !hasTaskOutputs(outputSummary);
+                          if (isMinimalCompletion) {
+                            return (
+                              <div
+                                key={event.id || `event-${eventIndex}`}
+                                className="timeline-event completion-compact"
+                              >
+                                <div className="event-indicator">
+                                  {showChildConnectorAbove && (
+                                    <span className="event-connector event-connector-above" aria-hidden="true" />
+                                  )}
+                                  <span
+                                    className="event-indicator-icon tone-success"
+                                    aria-hidden="true"
+                                    title="Done"
+                                  >
+                                    <CheckIcon size={12} strokeWidth={2} />
+                                  </span>
+                                  {showChildConnectorBelow && (
+                                    <span className="event-connector event-connector-below" aria-hidden="true" />
+                                  )}
+                                </div>
+                                <div className="event-content completion-compact-content">
+                                  <span className="completion-compact-label">Done</span>
+                                  <span className="event-time-muted">{formatTime(event.timestamp)}</span>
+                                </div>
+                              </div>
+                            );
+                          }
                           const isExpandable = hasEventDetails(event);
                           const isExpanded = isEventExpanded(event);
                           const eventTitle = renderEventTitle(
@@ -6707,6 +6845,8 @@ export function MainContent({
                                       onViewOutputs: onViewTaskOutputs,
                                       hideVerificationSteps: true,
                                       summaryMode: !verboseSteps,
+                                      task,
+                                      childTasks,
                                     })
                                   : undefined
                               }
@@ -6836,6 +6976,69 @@ export function MainContent({
                         <div className="message-actions">
                           <MessageCopyButton text={messageText} />
                           <MessageSpeakButton text={messageText} voiceEnabled={voiceEnabled} />
+                          {event.id && !isTaskWorking && (
+                            <>
+                              <button
+                                className={`message-feedback-btn${messageFeedbackMap.get(event.id) === "accepted" ? " active" : ""}`}
+                                title="Helpful"
+                                onClick={() =>
+                                  void handleMessageFeedback({
+                                    messageId: event.id!,
+                                    decision: "accepted",
+                                  })
+                                }
+                              >
+                                👍
+                              </button>
+                              <div
+                                ref={
+                                  rejectMenuOpenFor === event.id
+                                    ? rejectMenuRef
+                                    : undefined
+                                }
+                                className="message-feedback-thumbdown-wrap"
+                              >
+                                <button
+                                  className={`message-feedback-btn${messageFeedbackMap.get(event.id) === "rejected" ? " active" : ""}`}
+                                  title="Not helpful"
+                                  onClick={() =>
+                                    setRejectMenuOpenFor((v) =>
+                                      v === event.id ? null : (event.id ?? null),
+                                    )
+                                  }
+                                >
+                                  👎
+                                </button>
+                                {rejectMenuOpenFor === event.id && (
+                                  <div className="message-feedback-menu">
+                                    {(
+                                      [
+                                        ["incorrect", "Incorrect"],
+                                        ["too_verbose", "Too verbose"],
+                                        ["ignored_instructions", "Ignored instructions"],
+                                        ["wrong_tone", "Wrong tone"],
+                                        ["unsafe", "Unsafe / unwanted"],
+                                      ] as const
+                                    ).map(([reason, label]) => (
+                                      <button
+                                        key={reason}
+                                        className="message-feedback-reason"
+                                        onClick={() =>
+                                          void handleMessageFeedback({
+                                            messageId: event.id!,
+                                            decision: "rejected",
+                                            reason,
+                                          })
+                                        }
+                                      >
+                                        {label}
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            </>
+                          )}
                           {isLastAssistant && isTaskWorking && (
                             <button
                               className="bubble-feedback-toggle"
@@ -7022,6 +7225,8 @@ export function MainContent({
                               onViewOutputs: onViewTaskOutputs,
                               hideVerificationSteps: true,
                               summaryMode: !verboseSteps,
+                              task,
+                              childTasks,
                             })
                           : undefined
                       }
@@ -7185,16 +7390,18 @@ export function MainContent({
               </div>
             </div>
           )}
-          {task.status === "completed" && task.terminalStatus === "partial_success" && (
-            <div className="task-status-banner task-status-banner-paused">
-              <div className="task-status-banner-content">
-                <strong>Completed with preserved outputs</strong>
-                <span className="task-status-banner-detail">
-                  Cowork kept the files and summary it produced, even though some checks or steps did not fully finish.
-                </span>
+          {task.status === "completed" &&
+            task.terminalStatus === "partial_success" &&
+            verboseSteps && (
+              <div className="task-status-banner task-status-banner-paused">
+                <div className="task-status-banner-content">
+                  <strong>Completed with preserved outputs</strong>
+                  <span className="task-status-banner-detail">
+                    Cowork kept the files and summary it produced, even though some checks or steps did not fully finish.
+                  </span>
+                </div>
               </div>
-            </div>
-          )}
+            )}
           <div className="input-row">
             <button
               className="attachment-btn attachment-btn-left"
@@ -8189,6 +8396,8 @@ function renderEventDetails(
     onViewOutputs?: (taskId: string, primaryOutputPath?: string) => void;
     hideVerificationSteps?: boolean;
     summaryMode?: boolean;
+    task?: Task | null;
+    childTasks?: Task[];
   },
 ) {
   const workspacePath = options?.workspacePath;
@@ -8196,6 +8405,10 @@ function renderEventDetails(
   const eventStream = options?.events || [];
   const onViewOutputs = options?.onViewOutputs;
   const summaryMode = options?.summaryMode === true;
+  const taskForEvent =
+    options?.task?.id === event.taskId
+      ? options.task
+      : options?.childTasks?.find((t) => t.id === event.taskId) ?? options?.task;
   const imageExt = /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i;
   const videoExt = /\.(mp4|webm)$/i;
   const spreadsheetExt = /\.xlsx?$/i;
@@ -8517,15 +8730,18 @@ function renderEventDetails(
       }
       return null;
     }
-    case "step_failed":
+    case "step_failed": {
+      const rawReason =
+        event.payload?.reason || event.payload?.step?.error || event.payload?.error || "Step failed.";
       return (
         <div
           className="event-details"
           style={{ background: "rgba(239, 68, 68, 0.1)", borderColor: "rgba(239, 68, 68, 0.2)" }}
         >
-          {event.payload?.reason || event.payload?.step?.error || "Step failed."}
+          {formatProviderErrorForDisplay(String(rawReason), { task: taskForEvent })}
         </div>
       );
+    }
     case "verification_pending_user_action": {
       const checklist: string[] = Array.isArray(event.payload?.pendingChecklist)
         ? event.payload.pendingChecklist.filter((item: unknown): item is string => typeof item === "string")
@@ -8913,7 +9129,10 @@ function renderEventDetails(
           className="event-details"
           style={{ background: "rgba(239, 68, 68, 0.1)", borderColor: "rgba(239, 68, 68, 0.2)" }}
         >
-          {event.payload.error || event.payload.message}
+          {formatProviderErrorForDisplay(
+            String(event.payload.error || event.payload.message || ""),
+            { task: taskForEvent },
+          )}
         </div>
       );
     default:
