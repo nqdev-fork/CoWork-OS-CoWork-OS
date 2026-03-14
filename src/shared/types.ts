@@ -93,11 +93,22 @@ export interface UpdateUserFactRequest {
 }
 
 // Workspace Kit (.cowork) helpers (workspace-scoped, file-based context)
+export interface WorkspaceKitIssue {
+  level: "error" | "warning";
+  code: string;
+  message: string;
+}
+
 export interface WorkspaceKitFileStatus {
   relPath: string;
   exists: boolean;
   sizeBytes?: number;
   modifiedAt?: number;
+  title?: string;
+  stale?: boolean;
+  issues?: WorkspaceKitIssue[];
+  revisionCount?: number;
+  specialHandling?: "bootstrap" | "heartbeat";
 }
 
 export interface WorkspaceKitStatus {
@@ -106,6 +117,8 @@ export interface WorkspaceKitStatus {
   hasKitDir: boolean;
   files: WorkspaceKitFileStatus[];
   missingCount: number;
+  lintWarningCount?: number;
+  lintErrorCount?: number;
   onboarding?: {
     bootstrapSeededAt?: number;
     onboardingCompletedAt?: number;
@@ -702,7 +715,7 @@ export interface SuccessCriteria {
  */
 export type AgentType = "main" | "sub" | "parallel";
 export type ConversationMode = "task" | "chat" | "hybrid" | "think";
-export type ExecutionMode = "execute" | "propose" | "analyze" | "verified";
+export type ExecutionMode = "execute" | "plan" | "analyze" | "verified";
 export type ExecutionModeSource = "user" | "strategy" | "auto_promote";
 export type TurnBudgetPolicy = "hard_window" | "adaptive_unbounded";
 export type VerificationArtifactPathPolicy =
@@ -823,7 +836,7 @@ export interface AgentConfig {
   /**
    * Execution mode gate:
    * - execute: tools may mutate state (default)
-   * - propose: planning/read-only guidance, no mutating tools
+   * - plan: planning/read-only guidance, no mutating tools
    * - analyze: strict analysis/read-only mode
    */
   executionMode?: ExecutionMode;
@@ -1199,6 +1212,21 @@ export interface ImprovementLoopSettings {
   campaignTokenBudget: number;
   campaignCostBudget: number;
   improvementProgramPath?: string;
+}
+
+export interface ImprovementEligibility {
+  eligible: boolean;
+  reason: string;
+  enrolled: boolean;
+  repoPath?: string;
+  machineFingerprint?: string;
+  ownerEnrollmentChallenge?: string;
+  checks: {
+    unpackagedApp: boolean;
+    canonicalRepo: boolean;
+    ownerEnrollment: boolean;
+    ownerProofPresent: boolean;
+  };
 }
 
 export const DEFAULT_IMPROVEMENT_LOOP_SETTINGS: ImprovementLoopSettings = {
@@ -3673,6 +3701,9 @@ export const IPC_CHANNELS = {
 
   // Self-improvement loop
   IMPROVEMENT_GET_SETTINGS: "improvement:getSettings",
+  IMPROVEMENT_GET_ELIGIBILITY: "improvement:getEligibility",
+  IMPROVEMENT_SAVE_OWNER_ENROLLMENT: "improvement:saveOwnerEnrollment",
+  IMPROVEMENT_CLEAR_OWNER_ENROLLMENT: "improvement:clearOwnerEnrollment",
   IMPROVEMENT_SAVE_SETTINGS: "improvement:saveSettings",
   IMPROVEMENT_LIST_CANDIDATES: "improvement:listCandidates",
   IMPROVEMENT_LIST_RUNS: "improvement:listRuns",
