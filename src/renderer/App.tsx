@@ -81,6 +81,25 @@ const RENDERER_NOISE_EVENT_TYPES = new Set([
 const RENDERER_DROPPED_EVENT_TYPES = new Set(["log", "llm_usage", "task_analysis"]);
 const RENDERER_THROTTLED_EVENT_TYPES = new Set(["progress_update", "executing", "llm_streaming"]);
 const RENDERER_NOISE_THROTTLE_MS = 250;
+/** Tool-heavy events batched to avoid UI freeze/re-render storms (OpenClaw-style fix) */
+const EVENT_TYPES_BATCHABLE = new Set(["tool_call", "tool_result"]);
+/** Milestone events flush the batch and append immediately */
+const EVENT_TYPES_MILESTONE = new Set([
+  "assistant_message",
+  "user_message",
+  "task_completed",
+  "task_cancelled",
+  "error",
+  "timeline_group_finished",
+  "timeline_step_finished",
+  "approval_requested",
+  "input_request_created",
+  "plan_created",
+  "step_started",
+  "step_completed",
+  "step_failed",
+]);
+const EVENT_BATCH_FLUSH_INTERVAL_MS = 400;
 const STALE_TASK_RECONCILE_INTERVAL_MS = 4_000;
 const STALE_TASK_RECONCILE_IDLE_WINDOW_MS = 12_000;
 
@@ -240,6 +259,8 @@ export function App() {
   const noiseEventThrottleRef = useRef<Map<string, number>>(new Map());
   const taskLastEventTimestampRef = useRef<Map<string, number>>(new Map());
   const staleTaskReconcileInFlightRef = useRef(false);
+  const pendingToolEventsRef = useRef<TaskEvent[]>([]);
+  const pendingToolEventsFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Disclaimer state (null = loading)
   const [disclaimerAccepted, setDisclaimerAccepted] = useState<boolean | null>(null);
@@ -1304,6 +1325,20 @@ export function App() {
           noiseEventThrottleRef.current.set(throttleKey, now);
         }
 
+        const isMilestone = EVENT_TYPES_MILESTONE.has(event.type);
+        const isBatchable = EVENT_TYPES_BATCHABLE.has(event.type);
+
+        const flushPendingToolEvents = () => {
+          if (pendingToolEventsRef.current.length === 0) return;
+          const toAppend = pendingToolEventsRef.current;
+          pendingToolEventsRef.current = [];
+          if (pendingToolEventsFlushTimerRef.current) {
+            clearTimeout(pendingToolEventsFlushTimerRef.current);
+            pendingToolEventsFlushTimerRef.current = null;
+          }
+          setEvents((prev) => capTaskEvents([...prev, ...toAppend]));
+        };
+
         if (event.type === "llm_streaming") {
           // Replace the previous streaming event to avoid array bloat
           setEvents((prev) => {
@@ -1315,6 +1350,17 @@ export function App() {
             }
             return capTaskEvents([...prev, rawEvent]);
           });
+        } else if (isMilestone) {
+          flushPendingToolEvents();
+          setEvents((prev) => capTaskEvents([...prev, rawEvent]));
+        } else if (isBatchable && isSelectedTask) {
+          pendingToolEventsRef.current.push(rawEvent);
+          if (!pendingToolEventsFlushTimerRef.current) {
+            pendingToolEventsFlushTimerRef.current = setTimeout(() => {
+              pendingToolEventsFlushTimerRef.current = null;
+              flushPendingToolEvents();
+            }, EVENT_BATCH_FLUSH_INTERVAL_MS);
+          }
         } else {
           setEvents((prev) => capTaskEvents([...prev, rawEvent]));
         }
@@ -1328,11 +1374,28 @@ export function App() {
       }
     });
 
-    return typeof unsubscribe === "function" ? unsubscribe : undefined;
+    return () => {
+      // Flush pending batched events before unsubscribe so we don't lose the last batch
+      if (pendingToolEventsRef.current.length > 0) {
+        const toAppend = pendingToolEventsRef.current;
+        pendingToolEventsRef.current = [];
+        if (pendingToolEventsFlushTimerRef.current) {
+          clearTimeout(pendingToolEventsFlushTimerRef.current);
+          pendingToolEventsFlushTimerRef.current = null;
+        }
+        setEvents((prev) => capTaskEvents([...prev, ...toAppend]));
+      }
+      if (typeof unsubscribe === "function") unsubscribe();
+    };
   }, [selectedTaskId, remoteTaskView]);
 
   // Load historical events when task is selected
   useEffect(() => {
+    pendingToolEventsRef.current = [];
+    if (pendingToolEventsFlushTimerRef.current) {
+      clearTimeout(pendingToolEventsFlushTimerRef.current);
+      pendingToolEventsFlushTimerRef.current = null;
+    }
     if (!selectedTaskId) {
       setEvents([]);
       return;
@@ -1417,6 +1480,11 @@ export function App() {
         if (!isTaskPossiblyRunning(canonicalTask.status) && window.electronAPI?.getTaskEvents) {
           const refreshedEvents = await window.electronAPI.getTaskEvents(taskId);
           if (cancelled) return;
+          pendingToolEventsRef.current = [];
+          if (pendingToolEventsFlushTimerRef.current) {
+            clearTimeout(pendingToolEventsFlushTimerRef.current);
+            pendingToolEventsFlushTimerRef.current = null;
+          }
           setEvents(capTaskEvents(refreshedEvents));
           const latestTimestamp = getLatestEventTimestamp(refreshedEvents);
           taskLastEventTimestampRef.current.set(
