@@ -54,7 +54,7 @@ async function writeWorkspaceKitState(workspacePath: string, state: KitWorkspace
   await fsp.writeFile(statePath, JSON.stringify(state, null, 2), "utf8");
 }
 
-export async function syncBootstrapLifecycleState(
+export async function ensureBootstrapLifecycleState(
   workspacePath: string,
   state?: KitWorkspaceState,
 ): Promise<{
@@ -90,7 +90,10 @@ export async function computeWorkspaceKitStatus(
   workspaceId = workspacePath,
 ): Promise<WorkspaceKitStatus> {
   const kitRoot = path.join(workspacePath, KIT_DIR_NAME);
-  const lifecycle = await syncBootstrapLifecycleState(workspacePath);
+  const state = await readWorkspaceKitState(workspacePath);
+  const bootstrapPath = path.join(workspacePath, KIT_DIR_NAME, "BOOTSTRAP.md");
+  const bootstrapPresent = fs.existsSync(bootstrapPath);
+  const lifecycle = { state, bootstrapPresent };
 
   const hasKitDir = (() => {
     try {
