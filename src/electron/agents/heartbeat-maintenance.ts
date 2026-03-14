@@ -1,10 +1,10 @@
 import fs from "fs";
 import path from "path";
 import { createHash } from "crypto";
+import { buildWorkspaceKitSections, parseHeartbeatChecklist, renderHeartbeatPrompt } from "../context/kit-injection";
 import { getUserDataDir } from "../utils/user-data-dir";
 
 const KIT_DIRNAME = ".cowork";
-const HEARTBEAT_FILENAME = "HEARTBEAT.md";
 const STATE_FILENAME = "heartbeat-maintenance-state.json";
 
 export type HeartbeatChecklistCadence = "heartbeat" | "hourly" | "daily" | "weekly" | "monthly";
@@ -78,51 +78,35 @@ function getCadence(sectionTitle: string): { cadence: HeartbeatChecklistCadence;
 export function getHeartbeatChecklistPath(workspacePath?: string): string | undefined {
   const root = typeof workspacePath === "string" ? workspacePath.trim() : "";
   if (!root) return undefined;
-  return path.join(root, KIT_DIRNAME, HEARTBEAT_FILENAME);
+  return path.join(root, KIT_DIRNAME, "HEARTBEAT.md");
 }
 
 export function readHeartbeatChecklist(workspacePath?: string): HeartbeatChecklistItem[] {
-  const checklistPath = getHeartbeatChecklistPath(workspacePath);
-  if (!checklistPath || !fs.existsSync(checklistPath)) {
-    return [];
-  }
+  const root = typeof workspacePath === "string" ? workspacePath.trim() : "";
+  if (!root) return [];
 
-  let raw = "";
-  try {
-    raw = fs.readFileSync(checklistPath, "utf8");
-  } catch {
-    return [];
-  }
+  const heartbeatSection = buildWorkspaceKitSections({
+    workspacePath: root,
+    scopes: ["heartbeat"],
+  }).find((section) => section.file === "HEARTBEAT.md");
+  if (!heartbeatSection) return [];
 
-  const items: HeartbeatChecklistItem[] = [];
-  const lines = raw.split(/\r?\n/);
-  let currentSection = "Heartbeat";
+  const sourcePath = getHeartbeatChecklistPath(root) || path.join(root, KIT_DIRNAME, "HEARTBEAT.md");
+  const tasks = parseHeartbeatChecklist(heartbeatSection.parsed.body);
 
-  for (const line of lines) {
-    const headingMatch = line.match(/^##+\s+(.+?)\s*$/);
-    if (headingMatch) {
-      currentSection = headingMatch[1].trim() || "Heartbeat";
-      continue;
-    }
-
-    const bulletMatch = line.match(/^\s*-\s+(.+?)\s*$/);
-    if (!bulletMatch) continue;
-
-    const title = normalizeBullet(bulletMatch[1]);
-    if (!title) continue;
-
-    const { cadence, cadenceMs } = getCadence(currentSection);
-    items.push({
-      id: hashId(`${currentSection}\n${title}`),
-      title,
-      sectionTitle: currentSection,
+  return tasks.map((task) => {
+    const sectionTitle = task.cadence || "Heartbeat";
+    const normalizedTitle = normalizeBullet(task.check);
+    const { cadence, cadenceMs } = getCadence(sectionTitle);
+    return {
+      id: hashId(`${sectionTitle}\n${normalizedTitle}`),
+      title: normalizedTitle,
+      sectionTitle,
       cadence,
       cadenceMs,
-      sourcePath: checklistPath,
-    });
-  }
-
-  return items;
+      sourcePath,
+    };
+  });
 }
 
 export function buildHeartbeatWorkspaceContext(workspacePath?: string, now = new Date()): string {
@@ -137,7 +121,18 @@ export function buildHeartbeatWorkspaceContext(workspacePath?: string, now = new
     sections.push(`### ${title}\n${text}`);
   };
 
-  pushSection("Recurring Checks", HEARTBEAT_FILENAME);
+  const heartbeatItems = readHeartbeatChecklist(root);
+  const heartbeatPrompt = renderHeartbeatPrompt(
+    heartbeatItems.map((item) => ({
+      check: item.title,
+      cadence: item.sectionTitle,
+      action: "propose",
+    })),
+  );
+  if (heartbeatPrompt) {
+    sections.push(`### Heartbeat Contract\n${heartbeatPrompt}`);
+  }
+
   pushSection("Priorities", "PRIORITIES.md");
   pushSection("Company Profile", "COMPANY.md");
   pushSection("Operating System", "OPERATIONS.md");
