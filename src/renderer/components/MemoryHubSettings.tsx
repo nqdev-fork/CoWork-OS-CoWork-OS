@@ -597,6 +597,33 @@ export function MemoryHubSettings(props?: {
                 Create project
               </button>
             </div>
+
+            <div style={{ marginTop: "10px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
+              <button
+                className="settings-button"
+                onClick={() =>
+                  void window.electronAPI.openWorkspaceKitFile({
+                    workspaceId: selectedWorkspaceId,
+                    relPath: ".cowork/USER.md",
+                  })
+                }
+                disabled={!selectedWorkspaceId || kitBusy}
+              >
+                Open USER.md
+              </button>
+              <button
+                className="settings-button"
+                onClick={() =>
+                  void window.electronAPI.openWorkspaceKitFile({
+                    workspaceId: selectedWorkspaceId,
+                    relPath: ".cowork/MEMORY.md",
+                  })
+                }
+                disabled={!selectedWorkspaceId || kitBusy}
+              >
+                Open MEMORY.md
+              </button>
+            </div>
           </div>
         )}
 
