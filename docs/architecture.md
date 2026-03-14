@@ -51,7 +51,7 @@ Key code:
 
 #### Structured Input Requests
 
-When a propose-mode task needs a real decision, the executor can require `request_user_input` instead of continuing with an ambiguous free-text question. The flow is:
+When a plan-mode task needs a real decision, the executor can require `request_user_input` instead of continuing with an ambiguous free-text question. The flow is:
 
 - the tool creates an `input_requests` record and pauses the task
 - the desktop UI renders the request as an inline multiple-choice card
