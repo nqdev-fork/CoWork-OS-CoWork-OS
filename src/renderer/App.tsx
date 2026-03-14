@@ -47,8 +47,10 @@ import {
   addUniqueTaskId,
   buildTaskCompletionToast,
   decideCompletionPanelBehavior,
+  recordCompletionToastShown,
   removeTaskId,
   shouldClearUnseenOutputBadges,
+  shouldShowCompletionToast,
   shouldTrackUnseenCompletion,
 } from "./utils/task-completion-ux";
 
@@ -215,6 +217,7 @@ export function App() {
 
   // Model selection state
   const [selectedModel, setSelectedModel] = useState<string>("opus-4-5");
+  const [sessionModelOverride, setSessionModelOverride] = useState<string>("");
   const [availableModels, setAvailableModels] = useState<LLMModelInfo[]>([]);
   const [availableProviders, setAvailableProviders] = useState<LLMProviderInfo[]>([]);
 
@@ -261,6 +264,8 @@ export function App() {
   const staleTaskReconcileInFlightRef = useRef(false);
   const pendingToolEventsRef = useRef<TaskEvent[]>([]);
   const pendingToolEventsFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Tracks output paths we've already shown completion toast for (suppresses repeat toasts on follow-ups) */
+  const completionToastNotifiedPathsRef = useRef<Map<string, Set<string>>>(new Map());
 
   // Disclaimer state (null = loading)
   const [disclaimerAccepted, setDisclaimerAccepted] = useState<boolean | null>(null);
@@ -372,6 +377,7 @@ export function App() {
       const config = await window.electronAPI.getLLMConfigStatus();
       if (!config) return;
       setSelectedModel(config.currentModel);
+      setSessionModelOverride("");
       setAvailableModels(config.models);
       setAvailableProviders(config.providers);
     } catch (error) {
@@ -1205,6 +1211,19 @@ export function App() {
           event,
           fallbackEventsForTask,
         );
+        const toastDecision = shouldShowCompletionToast(
+          event.taskId,
+          outputSummary,
+          completionToastNotifiedPathsRef.current,
+        );
+        if (toastDecision.show) {
+          recordCompletionToastShown(
+            event.taskId,
+            toastDecision.pathsToRecord,
+            completionToastNotifiedPathsRef.current,
+            hasTaskOutputs(outputSummary),
+          );
+        }
         const resolveWorkspacePathForTask = async (): Promise<string | undefined> => {
           const taskForEvent = tasksRef.current.find((t) => t.id === event.taskId);
           if (!taskForEvent) return currentWorkspaceRef.current?.path;
@@ -1221,41 +1240,43 @@ export function App() {
         const primaryOutputPath = hasTaskOutputs(outputSummary)
           ? outputSummary.primaryOutputPath
           : undefined;
-        addToast(
-          buildTaskCompletionToast({
-            taskId: event.taskId,
-            taskTitle: task?.title,
-            outputSummary,
-            terminalStatus:
-              typeof event.payload?.terminalStatus === "string"
-                ? event.payload.terminalStatus
+        if (toastDecision.show) {
+          addToast(
+            buildTaskCompletionToast({
+              taskId: event.taskId,
+              taskTitle: task?.title,
+              outputSummary,
+              terminalStatus:
+                typeof event.payload?.terminalStatus === "string"
+                  ? event.payload.terminalStatus
+                  : undefined,
+              actionDependencies: hasTaskOutputs(outputSummary)
+                ? {
+                    resolveWorkspacePath: resolveWorkspacePathForTask,
+                    openFile: (path, workspacePath) => window.electronAPI.openFile(path, workspacePath),
+                    showInFinder: (path, workspacePath) =>
+                      window.electronAPI.showInFinder(path, workspacePath),
+                    onViewInFiles: () => {
+                      setCurrentView("main");
+                      setSelectedTaskId(event.taskId);
+                      setRightSidebarCollapsed(false);
+                      if (primaryOutputPath) {
+                        setRightPanelHighlight({ taskId: event.taskId, path: primaryOutputPath });
+                      }
+                      setUnseenOutputTaskIds((prev) => removeTaskId(prev, event.taskId));
+                      setUnseenCompletedTaskIds((prev) => removeTaskId(prev, event.taskId));
+                    },
+                    onOpenFileError: (error) => {
+                      console.error("Failed to open completion output:", error);
+                    },
+                    onShowInFinderError: (error) => {
+                      console.error("Failed to reveal completion output:", error);
+                    },
+                  }
                 : undefined,
-            actionDependencies: hasTaskOutputs(outputSummary)
-              ? {
-                  resolveWorkspacePath: resolveWorkspacePathForTask,
-                  openFile: (path, workspacePath) => window.electronAPI.openFile(path, workspacePath),
-                  showInFinder: (path, workspacePath) =>
-                    window.electronAPI.showInFinder(path, workspacePath),
-                  onViewInFiles: () => {
-                    setCurrentView("main");
-                    setSelectedTaskId(event.taskId);
-                    setRightSidebarCollapsed(false);
-                    if (primaryOutputPath) {
-                      setRightPanelHighlight({ taskId: event.taskId, path: primaryOutputPath });
-                    }
-                    setUnseenOutputTaskIds((prev) => removeTaskId(prev, event.taskId));
-                    setUnseenCompletedTaskIds((prev) => removeTaskId(prev, event.taskId));
-                  },
-                  onOpenFileError: (error) => {
-                    console.error("Failed to open completion output:", error);
-                  },
-                  onShowInFinderError: (error) => {
-                    console.error("Failed to reveal completion output:", error);
-                  },
-                }
-              : undefined,
-          }),
-        );
+            }),
+          );
+        }
 
         if (hasTaskOutputs(outputSummary)) {
           const panelBehavior = decideCompletionPanelBehavior({
@@ -1689,13 +1710,14 @@ export function App() {
     const taskDomain = options?.taskDomain;
     const llmProfile = options?.llmProfile;
     const llmProfileForced = options?.llmProfileForced;
-    const hasSelectedModelInCurrentProvider = availableModels.some((m) => m.key === selectedModel);
-    const sessionModelOverride = hasSelectedModelInCurrentProvider ? selectedModel.trim() : "";
-    const effectiveLlmProfile = sessionModelOverride ? undefined : llmProfile;
-    const effectiveLlmProfileForced = sessionModelOverride ? false : llmProfileForced;
+    const trimmedSessionModelOverride = sessionModelOverride.trim();
+    const hasSelectedModelInCurrentProvider = availableModels.some((m) => m.key === trimmedSessionModelOverride);
+    const effectiveSessionModelOverride = hasSelectedModelInCurrentProvider ? trimmedSessionModelOverride : "";
+    const effectiveLlmProfile = effectiveSessionModelOverride ? undefined : llmProfile;
+    const effectiveLlmProfileForced = effectiveSessionModelOverride ? false : llmProfileForced;
 
     const agentConfig =
-      sessionModelOverride ||
+      effectiveSessionModelOverride ||
       autonomousMode ||
       collaborativeMode ||
       multiLlmMode ||
@@ -1704,7 +1726,7 @@ export function App() {
       taskDomain ||
       effectiveLlmProfile
         ? {
-            ...(sessionModelOverride ? { modelKey: sessionModelOverride } : {}),
+            ...(effectiveSessionModelOverride ? { modelKey: effectiveSessionModelOverride } : {}),
             ...(autonomousMode ? { allowUserInput: false, autonomousMode: true } : {}),
             ...(collaborativeMode ? { collaborativeMode: true } : {}),
             ...(multiLlmMode
@@ -1943,8 +1965,10 @@ export function App() {
 
   const handleModelChange = (modelKey: string) => {
     setSelectedModel(modelKey);
+    setSessionModelOverride(modelKey.trim());
     // Session-only override: do not persist to provider settings here.
     // The selected model is attached as task agentConfig.modelKey on task creation.
+    // Provider defaults still come from persisted settings until the user explicitly changes this.
     // When model changes during a task, clear the current task to start fresh
     if (selectedTaskId) {
       setSelectedTaskId(null);
@@ -2575,7 +2599,7 @@ export function App() {
                 }}
                 workspace={currentWorkspace}
                 onOpenSettings={(tab) => {
-                  setSettingsTab(tab || "appearance");
+                  setSettingsTab((tab as typeof settingsTab | undefined) || "appearance");
                   setCurrentView("settings");
                 }}
                 availableProviders={availableProviders}
@@ -2594,7 +2618,7 @@ export function App() {
                 onChangeWorkspace={handleChangeWorkspace}
                 onSelectWorkspace={(workspace) => setCurrentWorkspace(workspace)}
                 onOpenSettings={(tab) => {
-                  setSettingsTab(tab || "appearance");
+                  setSettingsTab((tab as typeof settingsTab | undefined) || "appearance");
                   setCurrentView("settings");
                 }}
                 onStopTask={handleCancelTask}
