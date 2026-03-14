@@ -110,6 +110,15 @@ All persistent state lives under the **user data directory** (DB + encrypted set
 
 Back up that directory (or the Docker volume) to back up the instance.
 
+## Timezone (Docker & Systemd)
+
+To pin the daemon to a specific IANA timezone (e.g. for cron, timestamps, scheduling):
+
+- Set `COWORK_TZ` in the environment (e.g. `COWORK_TZ=America/New_York`, `COWORK_TZ=Europe/London`).
+- **Docker:** In `docker-compose.yml`, add `COWORK_TZ=America/New_York` under `environment`. The entrypoint sets `TZ` from `COWORK_TZ` before starting.
+- **Systemd:** In `/etc/cowork-os.env` (or your env file), add `COWORK_TZ=America/New_York`. The daemon applies it at startup.
+- Invalid IANA timezone values fall back to UTC with a warning.
+
 ## Common Questions (FAQ)
 
 **Do I need a macOS machine at all?**  
