@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   AlertTriangle,
+  Check,
   Circle,
   FileOutput,
   Loader2,
@@ -69,6 +70,16 @@ describe("timeline indicators", () => {
     expect(indicator.icon).toBe(Loader2);
     expect(indicator.tone).toBe("active");
     expect(indicator.spin).toBe(true);
+  });
+
+  it("shows Check (no spin) for progress updates when task is completed", () => {
+    const indicator = resolveTimelineIndicator(
+      makeEvent("timeline_step_updated", { message: "Working" }),
+      { isTaskCompleted: true },
+    );
+    expect(indicator.icon).toBe(Check);
+    expect(indicator.tone).toBe("success");
+    expect(indicator.spin).toBeUndefined();
   });
 
   it("maps failed steps to AlertTriangle error icon", () => {
