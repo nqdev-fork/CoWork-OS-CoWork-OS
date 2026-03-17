@@ -593,6 +593,8 @@ export function ConnectorsSettings() {
         command: customCommand.trim(),
         args,
         env: {},
+        enabled: true,
+        transport: "stdio" as const,
       });
       await loadData();
       setShowCustomForm(false);
@@ -620,7 +622,7 @@ export function ConnectorsSettings() {
   }).filter(({ connector }) => activeCategory === "" || getConnectorCategory(connector) === activeCategory);
 
   const filteredIntegrations = INTEGRATIONS.filter(
-    (integration) => activeCategory === "" || getIntegrationCategory() === activeCategory,
+    (_integration) => activeCategory === "" || getIntegrationCategory() === activeCategory,
   );
 
   return (

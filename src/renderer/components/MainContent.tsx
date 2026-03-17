@@ -23,8 +23,11 @@ import {
   InputRequest,
 } from "../../shared/types";
 import { parseLeadingSkillSlashCommand } from "../../shared/skill-slash-commands";
-import { CollaborativeThoughtsPanel } from "./CollaborativeThoughtsPanel";
+import { CollaborativeAgentLines } from "./CollaborativeAgentLines";
+import { CollaborativeSummaryPanel } from "./CollaborativeSummaryPanel";
 import { DispatchedAgentsPanel } from "./DispatchedAgentsPanel";
+import { CliAgentFrame } from "./CliAgentFrame";
+import { isCliAgentChildTask, resolveCliAgentType } from "../../shared/cli-agent-detection";
 import { MultiLlmSelectionPanel } from "./MultiLlmSelectionPanel";
 import { AssistantMessageContent } from "./AssistantMessageContent";
 import { isVerificationStepDescription } from "../../shared/plan-utils";
@@ -260,6 +263,10 @@ import {
   shouldShowTimelineBranchStub,
 } from "./timeline/timeline-indicators";
 import { getStepCompletionPreviewPath } from "../utils/step-document-preview";
+import {
+  normalizeInlineLists,
+  normalizeInlineHeadings,
+} from "../utils/markdown-inline-lists";
 
 // Mermaid diagram component — theme-aware init for reliable text visibility
 let mermaidLastTheme: boolean | null = null;
@@ -886,9 +893,8 @@ const normalizeCommitmentText = (value: unknown): string | null => {
   return trimmed.length > 0 ? trimmed : null;
 };
 
-const getHeadingIcon = (emoji: string): React.ReactNode | null => {
+const getHeadingIcon = (emoji: string): React.ReactNode => {
   const Icon = getEmojiIcon(emoji);
-  if (!Icon) return null;
   return <Icon size={16} strokeWidth={1.8} />;
 };
 
@@ -1269,23 +1275,26 @@ export function normalizeMarkdownForDisplay(text: string): string {
 }
 
 export function normalizeTimelineTitleMarkdownForDisplay(text: string): string {
-  // Timeline titles should stay compact inline text; escape ATX headings so
-  // shell comments like "# route check ..." are not rendered as <h1>.
-  return normalizeMarkdownForDisplay(text).replace(
-    /^( {0,3})(#{1,6})(?=\s)/gm,
-    (_match: string, indent: string, hashes: string) =>
-      `${indent}${hashes.replace(/#/g, "\\#")}`,
+  // Normalize inline headings (### mid-line -> line-start) and lists
+  const normalized = normalizeInlineLists(
+    normalizeInlineHeadings(normalizeMarkdownForDisplay(text)),
+  );
+  // Escape only single # so shell comments like "# route check" are not rendered
+  // as <h1>. Allow ##, ###, etc. to render as headings.
+  return normalized.replace(
+    /^( {0,3})(#)(?=\s)/gm,
+    (_match: string, indent: string, hash: string) =>
+      `${indent}${hash.replace(/#/g, "\\#")}`,
   );
 }
 
 export function cleanAssistantMessageForDisplay(message: string): string {
-  return normalizeMarkdownForDisplay(
-    String(message || "")
-      .replace(/\[\[speak\]\]([\s\S]*?)\[\[\/speak\]\]/gi, "$1")
-      .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "")
-      .replace(/<tool_result>[\s\S]*?<\/tool_result>/gi, "")
-      .trim(),
-  );
+  const sanitized = String(message || "")
+    .replace(/\[\[speak\]\]([\s\S]*?)\[\[\/speak\]\]/gi, "$1")
+    .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "")
+    .replace(/<tool_result>[\s\S]*?<\/tool_result>/gi, "")
+    .trim();
+  return normalizeMarkdownForDisplay(normalizeInlineLists(sanitized));
 }
 
 const buildMarkdownComponents = (options: {
@@ -2555,6 +2564,7 @@ interface CommandOutputSession {
   isRunning: boolean;
   exitCode: number | null;
   startTimestamp: number; // When the command started, for positioning in timeline
+  cwd?: string; // Working directory where the command runs
 }
 
 export function MainContent({
@@ -2977,8 +2987,8 @@ export function MainContent({
   const eventTitleMarkdownComponents = useMemo(
     () => ({
       ...markdownComponents,
-      // Keep timeline titles inline; avoid wrapping plain text in <p> blocks.
-      p: ({ children }: Any) => <>{children}</>,
+      // Keep timeline titles inline; replace emoji with Lucide icons.
+      p: ({ children }: Any) => <>{replaceEmojisInChildren(children, 14)}</>,
     }),
     [markdownComponents],
   );
@@ -3162,6 +3172,10 @@ export function MainContent({
     }
     return null;
   }, [task, events, isTaskWorking]);
+
+  // Action block step windowing
+  const STEP_WINDOW_SIZE = 7;
+  const [showAllActionBlocks, setShowAllActionBlocks] = useState<Set<string>>(new Set());
 
   // Step feedback UI state
   const [stepFeedbackOpen, setStepFeedbackOpen] = useState(false);
@@ -3348,7 +3362,13 @@ export function MainContent({
       forceSnapshot: boolean;
     };
     type DispatchedItem = { kind: "dispatched-agents"; timestamp: number };
-    type TimelineItem = EventItem | ActionBlockItem | CanvasItem | DispatchedItem;
+    type CliAgentFrameItem = {
+      kind: "cli-agent-frame";
+      timestamp: number;
+      childTask: Task;
+      childTaskEvents: TaskEvent[];
+    };
+    type TimelineItem = EventItem | ActionBlockItem | CanvasItem | DispatchedItem | CliAgentFrameItem;
 
     // Group consecutive action events (tool calls, steps) between assistant messages
     const eventItems: (EventItem | ActionBlockItem)[] = [];
@@ -3420,10 +3440,31 @@ export function MainContent({
     // Build a sorted list of special items (canvas + dispatched agents) to merge in
     const specialItems: TimelineItem[] = [...canvasItems];
 
-    // Insert dispatched agents panel at the chronological position of the first child task
-    if (!collaborativeRun && childTasks.length > 0) {
-      const firstChildTimestamp = Math.min(...childTasks.map((t) => t.createdAt));
-      specialItems.push({ kind: "dispatched-agents" as const, timestamp: firstChildTimestamp });
+    // Insert child task panels at the chronological position of the first child task.
+    // CLI agent child tasks get their own per-agent CliAgentFrame; others use DispatchedAgentsPanel.
+    // Show for both collaborative and non-collaborative runs so main area shows sub-agent steps.
+    if (childTasks.length > 0) {
+      const cliChildTasks = childTasks.filter((t) => isCliAgentChildTask(t));
+      const nonCliChildTasks = childTasks.filter((t) => !isCliAgentChildTask(t));
+
+      if (cliChildTasks.length > 0) {
+        // Each CLI agent gets its own frame in the timeline
+        for (const ct of cliChildTasks) {
+          specialItems.push({
+            kind: "cli-agent-frame" as const,
+            timestamp: ct.createdAt,
+            childTask: ct,
+            childTaskEvents: childEvents.filter((e) => e.taskId === ct.id),
+          });
+        }
+      }
+
+      if (nonCliChildTasks.length > 0 || cliChildTasks.length === 0) {
+        // Non-CLI child tasks (or if none are CLI) use the existing dispatched agents panel
+        const tasksForPanel = nonCliChildTasks.length > 0 ? nonCliChildTasks : childTasks;
+        const firstChildTimestamp = Math.min(...tasksForPanel.map((t) => t.createdAt));
+        specialItems.push({ kind: "dispatched-agents" as const, timestamp: firstChildTimestamp });
+      }
     }
 
     specialItems.sort((a, b) => a.timestamp - b.timestamp);
@@ -3457,6 +3498,7 @@ export function MainContent({
     latestUserMessageTimestamp,
     collaborativeRun,
     childTasks,
+    childEvents,
   ]);
 
   // Build all command output sessions so previous command windows remain visible.
@@ -3484,6 +3526,7 @@ export function MainContent({
       const payloadType = typeof payload.type === "string" ? payload.type : "";
       const payloadCommand = typeof payload.command === "string" ? payload.command : "";
       const payloadOutput = typeof payload.output === "string" ? payload.output : "";
+      const payloadCwd = typeof payload.cwd === "string" ? payload.cwd : undefined;
 
       if (payloadType === "start") {
         // Previous session did not emit an end event; keep it visible in timeline.
@@ -3495,6 +3538,7 @@ export function MainContent({
           isRunning: true,
           exitCode: null,
           startTimestamp: event.timestamp,
+          cwd: payloadCwd,
         };
         continue;
       }
@@ -3507,9 +3551,11 @@ export function MainContent({
           isRunning: payloadType !== "end",
           exitCode: null,
           startTimestamp: event.timestamp,
+          cwd: payloadCwd,
         };
-      } else if (!currentSession.command && payloadCommand) {
-        currentSession.command = payloadCommand;
+      } else {
+        if (payloadCommand) currentSession.command = payloadCommand;
+        if (payloadCwd) currentSession.cwd = payloadCwd;
       }
 
       if (
@@ -3818,6 +3864,7 @@ export function MainContent({
           output={session.output}
           isRunning={session.isRunning}
           exitCode={session.exitCode}
+          cwd={session.cwd}
           taskId={task?.id}
           onClose={() => handleDismissCommandOutput(session.id)}
         />
@@ -6578,37 +6625,40 @@ export function MainContent({
       {/* Body */}
       <div className="main-body" ref={mainBodyRef} onScroll={handleScroll}>
         <div className="task-content">
-          {/* User Prompt - Right aligned like chat */}
-          <div className="chat-message user-message">
-            <CollapsibleUserBubble>
-              <ReactMarkdown remarkPlugins={userMarkdownPlugins} components={markdownComponents}>
-                {stripPptxBubbleContent(displayPrompt)}
-              </ReactMarkdown>
-              {extractAttachmentNames(displayPrompt).length > 0 && (
-                <div className="bubble-attachments">
-                  {extractAttachmentNames(displayPrompt).map((name, i) => (
-                    <span className="bubble-attachment-chip" key={i}>
-                      <svg
-                        width="12"
-                        height="12"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                      >
-                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                        <path d="M14 2v6h6" />
-                      </svg>
-                      <span className="bubble-attachment-name" title={name}>
-                        {name}
+          {/* User Prompt - Right aligned like chat. Omit when we have user_message events
+              (e.g. collaborative mode) so the prompt appears only once in the timeline. */}
+          {!events.some((e) => getEffectiveTaskEventType(e) === "user_message") && (
+            <div className="chat-message user-message">
+              <CollapsibleUserBubble>
+                <ReactMarkdown remarkPlugins={userMarkdownPlugins} components={markdownComponents}>
+                  {stripPptxBubbleContent(displayPrompt)}
+                </ReactMarkdown>
+                {extractAttachmentNames(displayPrompt).length > 0 && (
+                  <div className="bubble-attachments">
+                    {extractAttachmentNames(displayPrompt).map((name, i) => (
+                      <span className="bubble-attachment-chip" key={i}>
+                        <svg
+                          width="12"
+                          height="12"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                        >
+                          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                          <path d="M14 2v6h6" />
+                        </svg>
+                        <span className="bubble-attachment-name" title={name}>
+                          {name}
+                        </span>
                       </span>
-                    </span>
-                  ))}
-                </div>
-              )}
-            </CollapsibleUserBubble>
-            <MessageCopyButton text={displayPrompt} />
-          </div>
+                    ))}
+                  </div>
+                )}
+              </CollapsibleUserBubble>
+              <MessageCopyButton text={displayPrompt} />
+            </div>
+          )}
 
           {/* View steps toggle - show right after original prompt */}
           {events.some((event) => {
@@ -6668,32 +6718,8 @@ export function MainContent({
             </div>
           )}
 
-          {/* Collaborative / Multi-LLM Thoughts - shown in main area when task has a collaborative run */}
-          {collaborativeRun && (
-            <div className="collaborative-thoughts-main">
-              <CollaborativeThoughtsPanel
-                teamRunId={collaborativeRun.id}
-                teamId={collaborativeRun.teamId}
-                runPhase={collaborativeRun.phase}
-                mode={collaborativeRun.multiLlmMode ? "multi-llm" : "collaborative"}
-                isRunning={collaborativeRun.status === "running"}
-                onWrapUp={
-                  onWrapUpTask
-                    ? () => {
-                        if (!wrappingUp) {
-                          setWrappingUp(true);
-                          onWrapUpTask();
-                        }
-                      }
-                    : undefined
-                }
-                isWrappingUp={wrappingUp}
-              />
-            </div>
-          )}
-
-          {/* Conversation Flow - renders all events in order */}
-          {events.length > 0 && (
+          {/* Conversation Flow - renders all events in order; show when we have events OR collaborative run with child tasks */}
+          {(events.length > 0 || (collaborativeRun && childTasks.length > 0)) && (
             <div className="conversation-flow" ref={timelineRef}>
               {/* Render command outputs that started before any visible event */}
               {renderCommandOutputs(commandOutputSessionsByInsertIndex.get(-1))}
@@ -6710,15 +6736,59 @@ export function MainContent({
                   );
                 }
 
+                if (item.kind === "cli-agent-frame") {
+                  const agentType = resolveCliAgentType(item.childTask, item.childTaskEvents) || "codex-cli";
+                  return (
+                    <CliAgentFrame
+                      key={`cli-frame-${item.childTask.id}`}
+                      task={item.childTask}
+                      events={item.childTaskEvents}
+                      agentType={agentType}
+                      defaultExpanded={item.childTask.status === "executing"}
+                    />
+                  );
+                }
+
                 if (item.kind === "dispatched-agents") {
+                  // Filter out CLI agent tasks — they render in their own frames above
+                  const nonCliChildTasks = childTasks.filter((t) => !isCliAgentChildTask(t));
+                  const panelTasks = nonCliChildTasks.length > 0 ? nonCliChildTasks : childTasks;
+                  const panelEvents = childEvents.filter((e) =>
+                    panelTasks.some((t) => t.id === e.taskId),
+                  );
                   return (
                     <div key="dispatched-agents" className="collaborative-thoughts-main">
-                      <DispatchedAgentsPanel
-                        parentTaskId={task!.id}
-                        childTasks={childTasks}
-                        childEvents={childEvents}
-                        onSelectChildTask={onSelectChildTask}
-                      />
+                      {collaborativeRun ? (
+                        <CollaborativeSummaryPanel
+                          collaborativeRun={collaborativeRun}
+                          childTasks={panelTasks}
+                          childEvents={panelEvents}
+                          userPrompt={task?.prompt || task?.userPrompt}
+                          onSelectChildTask={onSelectChildTask}
+                          mainTaskCompleted={
+                            !!task &&
+                            ["completed", "failed", "cancelled"].includes(task.status)
+                          }
+                          onWrapUp={
+                            onWrapUpTask
+                              ? () => {
+                                  if (!wrappingUp) {
+                                    setWrappingUp(true);
+                                    onWrapUpTask!();
+                                  }
+                                }
+                              : undefined
+                          }
+                          isWrappingUp={wrappingUp}
+                        />
+                      ) : (
+                        <DispatchedAgentsPanel
+                          parentTaskId={task!.id}
+                          childTasks={panelTasks}
+                          childEvents={panelEvents}
+                          onSelectChildTask={onSelectChildTask}
+                        />
+                      )}
                     </div>
                   );
                 }
@@ -6787,7 +6857,7 @@ export function MainContent({
                     }
                     return -1;
                   })();
-                  const isActive = timelineIndex === lastActionBlockIndex;
+                  const isActive = timelineIndex === lastActionBlockIndex && isTaskWorking;
                   const { summary, toolCallCount, durationMs, outputTokens } = buildActionBlockSummary(
                     item.events,
                     events,
@@ -6811,6 +6881,36 @@ export function MainContent({
                   const commandOutputsForBlock = item.eventIndices.flatMap((ei) =>
                     commandOutputSessionsByInsertIndex.get(ei) ?? [],
                   );
+                  const isBlockShowAll = showAllActionBlocks.has(item.blockId);
+                  // Count only truly renderable events to avoid slicing on non-renderable raw events
+                  const renderableRawIndices: number[] = [];
+                  for (let ri = 0; ri < item.events.length; ri++) {
+                    const ev = item.events[ri];
+                    if (suppressedParallelEventIds.has(ev.id) && !parallelGroupsByAnchorEventId.has(ev.id)) continue;
+                    if (!parallelGroupsByAnchorEventId.has(ev.id) && !shouldRenderTimelineEventInStepFeed(ev)) continue;
+                    renderableRawIndices.push(ri);
+                  }
+                  const renderableCount = renderableRawIndices.length;
+                  const needsWindow = !isBlockShowAll && renderableCount > STEP_WINDOW_SIZE;
+                  const hiddenBlockEventCount = needsWindow ? renderableCount - STEP_WINDOW_SIZE : 0;
+                  let visibleBlockEvents: typeof item.events;
+                  let visibleBlockEventIndices: typeof item.eventIndices;
+                  if (needsWindow) {
+                    const firstVisibleRawIdx = renderableRawIndices[renderableCount - STEP_WINDOW_SIZE];
+                    visibleBlockEvents = item.events.slice(firstVisibleRawIdx);
+                    visibleBlockEventIndices = item.eventIndices.slice(firstVisibleRawIdx);
+                  } else {
+                    visibleBlockEvents = item.events;
+                    visibleBlockEventIndices = item.eventIndices;
+                  }
+                  const lastRenderableEvent = [...item.events].reverse().find((ev) => {
+                    if (suppressedParallelEventIds.has(ev.id) && !parallelGroupsByAnchorEventId.has(ev.id)) return false;
+                    return parallelGroupsByAnchorEventId.has(ev.id) || shouldRenderTimelineEventInStepFeed(ev);
+                  });
+                  const lastStepLabelRaw = lastRenderableEvent
+                    ? renderEventTitle(lastRenderableEvent, workspace?.path, setViewerFilePath, agentContext, { summaryMode: !verboseSteps })
+                    : undefined;
+                  const lastStepLabel = typeof lastStepLabelRaw === "string" ? lastStepLabelRaw : undefined;
                   return (
                     <Fragment key={item.blockId}>
                       <ActionBlock
@@ -6824,15 +6924,46 @@ export function MainContent({
                         onToggle={onToggle}
                         showConnectorAbove={showConnectorAbove}
                         showConnectorBelow={showConnectorBelow}
+                        lastStepLabel={lastStepLabel}
                       >
-                        {item.events.map((event, idx) => {
-                          const eventIndex = item.eventIndices[idx];
+                        {hiddenBlockEventCount > 0 && (
+                          <button
+                            type="button"
+                            className="action-block-show-all-btn"
+                            onClick={() =>
+                              setShowAllActionBlocks((prev) => {
+                                const next = new Set(prev);
+                                next.add(item.blockId);
+                                return next;
+                              })
+                            }
+                          >
+                            ↑ Show all ({item.events.length} steps)
+                          </button>
+                        )}
+                        {isBlockShowAll && (
+                          <button
+                            type="button"
+                            className="action-block-show-all-btn action-block-show-less-btn"
+                            onClick={() =>
+                              setShowAllActionBlocks((prev) => {
+                                const next = new Set(prev);
+                                next.delete(item.blockId);
+                                return next;
+                              })
+                            }
+                          >
+                            Show less
+                          </button>
+                        )}
+                        {visibleBlockEvents.map((event, idx) => {
+                          const eventIndex = visibleBlockEventIndices[idx];
                           const parallelGroup = parallelGroupsByAnchorEventId.get(event.id);
                           if (suppressedParallelEventIds.has(event.id) && !parallelGroup) return null;
                           if (!parallelGroup && !shouldRenderTimelineEventInStepFeed(event)) {
                             return null;
                           }
-                          const isLastChild = idx === item.events.length - 1;
+                          const isLastChild = idx === visibleBlockEvents.length - 1;
                           const showChildConnectorAbove = true;
                           const showChildConnectorBelow = !isLastChild || showConnectorBelow;
                           if (parallelGroup) {
@@ -7350,12 +7481,36 @@ export function MainContent({
         )}
         {renderAttachmentPanel()}
         <div
-          className={`input-container ${isDraggingFiles ? "drag-over" : ""}`}
+          className={`input-container ${isDraggingFiles ? "drag-over" : ""} ${collaborativeRun && onSelectChildTask ? "input-container-with-agents" : ""}`}
           onDragOver={handleDragOver}
           onDragEnter={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
         >
+          {/* Collaborative agent lines — extension of input box, inside same container */}
+          {collaborativeRun && onSelectChildTask && (
+            <CollaborativeAgentLines
+              collaborativeRun={collaborativeRun}
+              childTasks={childTasks}
+              childEvents={childEvents}
+              onOpenAgent={(taskId) => onSelectChildTask(taskId)}
+              mainTaskCompleted={
+                !!task &&
+                ["completed", "failed", "cancelled"].includes(task.status)
+              }
+              onWrapUp={
+                onWrapUpTask
+                  ? () => {
+                      if (!wrappingUp) {
+                        setWrappingUp(true);
+                        onWrapUpTask();
+                      }
+                    }
+                  : undefined
+              }
+              isWrappingUp={wrappingUp}
+            />
+          )}
           {hasActiveStructuredInputRequest && inputRequest && onSubmitInputRequest && onDismissInputRequest && (
             <StructuredInputPromptCard
               request={inputRequest}

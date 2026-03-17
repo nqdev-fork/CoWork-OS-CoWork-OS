@@ -181,7 +181,7 @@ export function SkillsSettings({ onSkillSelect }: SkillsSettingsProps) {
                       <span className="skill-icon">
                         {(() => {
                           const Icon = getEmojiIcon(skill.icon);
-                          return Icon ? <Icon size={18} strokeWidth={1.5} /> : skill.icon;
+                          return <Icon size={18} strokeWidth={1.5} />;
                         })()}
                       </span>
                       <div className="skill-info">

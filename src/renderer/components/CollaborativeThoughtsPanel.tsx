@@ -297,7 +297,7 @@ export function CollaborativeThoughtsPanel({
                 <span className="team-member-icon">
                   {(() => {
                     const Icon = getEmojiIcon(m.role.icon);
-                    return Icon ? <Icon size={16} strokeWidth={1.5} /> : m.role.icon;
+                    return <Icon size={16} strokeWidth={1.5} />;
                   })()}
                 </span>
                 <span className="team-member-name" style={{ color: m.role.color }}>
@@ -325,8 +325,8 @@ export function CollaborativeThoughtsPanel({
               >
                 <span className="team-member-icon">
                   {(() => {
-                    const Icon = getEmojiIcon(t.agentIcon);
-                    return Icon ? <Icon size={16} strokeWidth={1.5} /> : t.agentIcon;
+                  const Icon = getEmojiIcon(t.agentIcon);
+                  return <Icon size={16} strokeWidth={1.5} />;
                   })()}
                 </span>
                 <span className="team-member-name" style={{ color: t.agentColor }}>
@@ -363,7 +363,7 @@ export function CollaborativeThoughtsPanel({
                   <span className="stream-agent-icon">
                     {(() => {
                       const Icon = getEmojiIcon(st.agentIcon);
-                      return Icon ? <Icon size={16} strokeWidth={1.5} /> : st.agentIcon;
+                      return <Icon size={16} strokeWidth={1.5} />;
                     })()}
                   </span>
                   <span className="stream-agent-name" style={{ color: st.agentColor }}>
@@ -401,7 +401,7 @@ export function CollaborativeThoughtsPanel({
                   <span className="stream-agent-icon">
                     {(() => {
                       const Icon = getEmojiIcon(thought.agentIcon);
-                      return Icon ? <Icon size={16} strokeWidth={1.5} /> : thought.agentIcon;
+                      return <Icon size={16} strokeWidth={1.5} />;
                     })()}
                   </span>
                   <span className="stream-agent-name" style={{ color: thought.agentColor }}>
@@ -450,7 +450,7 @@ export function CollaborativeThoughtsPanel({
                   <span className="stream-agent-icon">
                     {(() => {
                       const Icon = getEmojiIcon(st.agentIcon);
-                      return Icon ? <Icon size={16} strokeWidth={1.5} /> : st.agentIcon;
+                      return <Icon size={16} strokeWidth={1.5} />;
                     })()}
                   </span>
                   <span className="stream-agent-name" style={{ color: st.agentColor }}>

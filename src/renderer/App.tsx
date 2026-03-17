@@ -53,6 +53,8 @@ import {
   shouldShowCompletionToast,
   shouldTrackUnseenCompletion,
 } from "./utils/task-completion-ux";
+import { isSpawnSubagentsPrompt } from "../shared/spawn-intent-detection";
+import { isSynthesisChildTask } from "../shared/synthesis-agent-detection";
 
 // Helper to get effective theme based on system preference
 function getEffectiveTheme(themeMode: ThemeMode): "light" | "dark" {
@@ -211,8 +213,19 @@ export function App() {
   }, [tasks, selectedTaskId]);
 
   const childTaskIdsRef = useRef<Set<string>>(new Set());
+  // Buffer for child events that arrive before childTaskIdsRef is populated (race condition fix)
+  const pendingChildEventsRef = useRef<TaskEvent[]>([]);
   useEffect(() => {
-    childTaskIdsRef.current = new Set(childTasks.map((t) => t.id));
+    const newIds = new Set(childTasks.map((t) => t.id));
+    childTaskIdsRef.current = newIds;
+    // Flush any buffered events that now match known child task IDs
+    if (pendingChildEventsRef.current.length > 0 && newIds.size > 0) {
+      const matched = pendingChildEventsRef.current.filter((e) => newIds.has(e.taskId));
+      pendingChildEventsRef.current = pendingChildEventsRef.current.filter((e) => !newIds.has(e.taskId));
+      if (matched.length > 0) {
+        setChildEvents((prev) => [...prev, ...matched]);
+      }
+    }
   }, [childTasks]);
 
   // Model selection state
@@ -1387,10 +1400,18 @@ export function App() {
         }
       }
 
-      // Capture events from dispatched child tasks for DispatchedAgentsPanel
-      if (!isSelectedTask && childTaskIdsRef.current.has(event.taskId)) {
-        if (event.type !== "llm_streaming" && event.type !== "llm_usage") {
+      // Capture events from dispatched child tasks for DispatchedAgentsPanel / CliAgentFrame
+      if (!isSelectedTask && event.type !== "llm_streaming" && event.type !== "llm_usage") {
+        if (childTaskIdsRef.current.has(event.taskId)) {
           setChildEvents((prev) => [...prev, rawEvent]);
+        } else if (event.type === "task_created" || event.type === "step_started" || event.type === "tool_call" || event.type === "command_output" || event.type === "progress_update" || event.type === "assistant_message") {
+          // Buffer events from unknown task IDs — they may be from a just-spawned child
+          // whose task_created event hasn't been processed yet (race condition)
+          pendingChildEventsRef.current.push(rawEvent);
+          // Cap buffer to prevent unbounded growth from unrelated tasks
+          if (pendingChildEventsRef.current.length > 500) {
+            pendingChildEventsRef.current = pendingChildEventsRef.current.slice(-200);
+          }
         }
       }
     });
@@ -1558,9 +1579,25 @@ export function App() {
     };
 
     loadChildHistoricalEvents();
+
+    // Periodically re-fetch events while any child task is still executing
+    // to catch events missed during the initial race window
+    const hasExecutingChildren = childTasks.some(
+      (t) => t.status === "executing" || t.status === "planning",
+    );
+    let pollTimer: ReturnType<typeof setInterval> | null = null;
+    if (hasExecutingChildren) {
+      pollTimer = setInterval(() => {
+        loadChildHistoricalEvents();
+      }, 5_000);
+    }
+
+    return () => {
+      if (pollTimer) clearInterval(pollTimer);
+    };
     // Re-load when child tasks change (new children appear)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [childTasks.map((c) => c.id).join(","), remoteTaskView]);
+  }, [childTasks.map((c) => `${c.id}:${c.status}`).join(","), remoteTaskView]);
 
   // Load all existing sessions upfront so the sidebar is fully populated.
   // Pagination only kicks in for sessions beyond INITIAL_TASK_LOAD (extremely
@@ -1683,8 +1720,13 @@ export function App() {
     images?: ImageAttachment[],
   ) => {
     if (!currentWorkspace) return;
+
+    // Auto-enable collaborative mode when prompt requests spawning subagents/agents
+    // (e.g. "spawn 3 subagents", "spawn agents") — before any other processing
+    const spawnIntent = isSpawnSubagentsPrompt(`${title}\n${prompt}`);
+    const requestedCollaborative =
+      options?.collaborativeMode === true || spawnIntent;
     const requestedAutonomous = options?.autonomousMode === true;
-    const requestedCollaborative = options?.collaborativeMode === true;
     const requestedMultiLlm = options?.multiLlmMode === true;
     const autonomousMode = requestedAutonomous && !requestedCollaborative && !requestedMultiLlm;
     const collaborativeMode = requestedCollaborative && !requestedMultiLlm;
@@ -1695,6 +1737,13 @@ export function App() {
         type: "info",
         title: "Collaborative mode selected",
         message: "Autonomous mode is disabled when collaborative mode is enabled.",
+      });
+    }
+    if (spawnIntent && !options?.collaborativeMode) {
+      addToast({
+        type: "info",
+        title: "Collaborative mode enabled",
+        message: "Your prompt requests spawning agents — the task will be handled by the collaborative team.",
       });
     }
 
@@ -2612,7 +2661,11 @@ export function App() {
                 events={events}
                 childTasks={remoteTaskView ? [] : childTasks}
                 childEvents={remoteTaskView ? [] : childEvents}
-                onSelectChildTask={setSelectedTaskId}
+                onSelectChildTask={(taskId) => {
+                  const task = childTasks.find((t) => t.id === taskId);
+                  if (task && isSynthesisChildTask(task)) return;
+                  setSelectedTaskId(taskId);
+                }}
                 onSendMessage={handleSendMessage}
                 onCreateTask={handleCreateTask}
                 onChangeWorkspace={handleChangeWorkspace}

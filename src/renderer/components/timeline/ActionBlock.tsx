@@ -164,6 +164,8 @@ interface ActionBlockProps {
   onToggle: () => void;
   showConnectorAbove?: boolean;
   showConnectorBelow?: boolean;
+  /** Last step label shown centered in the header when collapsed */
+  lastStepLabel?: string;
   children: React.ReactNode;
 }
 
@@ -182,6 +184,7 @@ export function ActionBlock({
   onToggle,
   showConnectorAbove = false,
   showConnectorBelow = false,
+  lastStepLabel,
   children,
 }: ActionBlockProps) {
   return (
@@ -208,6 +211,9 @@ export function ActionBlock({
           )}
         </span>
         <span className="action-block-summary">{summary}</span>
+        {!expanded && lastStepLabel && (
+          <span className="action-block-last-step-label" aria-label="Last step">{lastStepLabel}</span>
+        )}
         <span className="action-block-meta">
           {toolCallCount > 0 && (
             <span className="action-block-count">

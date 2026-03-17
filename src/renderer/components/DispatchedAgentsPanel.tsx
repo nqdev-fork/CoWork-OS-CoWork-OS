@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkBreaks from "remark-breaks";
 import { Check, X, Play, Loader2 } from "lucide-react";
 import type { Task, TaskEvent } from "../../shared/types";
+import { normalizeMarkdownForCollab } from "../utils/markdown-inline-lists";
 import { getEmojiIcon } from "../utils/emoji-icon-map";
+import { replaceEmojisInChildren } from "../utils/emoji-replacer";
 import { getEffectiveTaskEventType } from "../utils/task-event-compat";
 import { sanitizeToolCallTextFromAssistant } from "../../shared/tool-call-text-sanitizer";
 import { formatProviderErrorForDisplay } from "../../shared/provider-error-format";
@@ -154,7 +157,15 @@ function StreamBubble({ item, isCompactEvent }: { item: StreamItem; isCompactEve
             <p
               className={`step-event ${item.type === "step_completed" ? "step-completed" : ""} ${item.type === "step_failed" ? "step-failed" : ""} ${item.type === "progress_update" ? "step-progress" : ""}`}
             >
-              {displayContent}
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm, remarkBreaks]}
+                components={{
+                  p: ({ children }) => <>{replaceEmojisInChildren(children, 13)}</>,
+                  li: ({ children }) => <>{replaceEmojisInChildren(children, 13)}</>,
+                }}
+              >
+                {normalizeMarkdownForCollab(displayContent)}
+              </ReactMarkdown>
             </p>
           </div>
           <span className="stream-event-time thought-time">{timeStr}</span>
@@ -179,7 +190,15 @@ function StreamBubble({ item, isCompactEvent }: { item: StreamItem; isCompactEve
             {item.type === "step_started" && (
               <Play size={14} strokeWidth={2} className="step-icon step-icon-started" />
             )}
-            {displayContent}
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm, remarkBreaks]}
+              components={{
+                p: ({ children }) => <>{replaceEmojisInChildren(children, 13)}</>,
+                li: ({ children }) => <>{replaceEmojisInChildren(children, 13)}</>,
+              }}
+            >
+              {normalizeMarkdownForCollab(displayContent)}
+            </ReactMarkdown>
           </p>
         ) : isMarkdown ? (
           <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={safeMarkdownUrlTransform}>
@@ -365,9 +384,8 @@ export function DispatchedAgentsPanel({
             >
               <span className="team-member-icon">
                 {(() => {
-                  const emoji = info.role?.icon || "🤖";
-                  const Icon = getEmojiIcon(emoji);
-                  return Icon ? <Icon size={16} strokeWidth={1.5} /> : emoji;
+                  const Icon = getEmojiIcon(info.role?.icon || "🤖");
+                  return <Icon size={16} strokeWidth={1.5} />;
                 })()}
               </span>
               <span className="team-member-name" style={{ color: info.role?.color || "#6366f1" }}>
@@ -404,7 +422,7 @@ export function DispatchedAgentsPanel({
                   <span className="stream-agent-icon">
                     {(() => {
                       const Icon = getEmojiIcon(item.agentIcon);
-                      return Icon ? <Icon size={16} strokeWidth={1.5} /> : item.agentIcon;
+                      return <Icon size={16} strokeWidth={1.5} />;
                     })()}
                   </span>
                   <span className="stream-agent-name" style={{ color: item.agentColor }}>

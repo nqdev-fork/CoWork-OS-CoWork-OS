@@ -204,8 +204,10 @@ export const EMOJI_ICON_MAP: Record<string, ComponentType<LucideProps>> = {
  * Variation-selector-tolerant emoji lookup.
  * Handles mismatches where the map key has a VS16 (U+FE0F) but the input
  * doesn't, or vice versa, by building a normalized index at module load.
+ * Strips skin-tone modifiers (U+1F3FB–U+1F3FF) for lookup.
  */
 const VS_REGEX = /[\uFE0E\uFE0F]/g;
+const SKIN_TONE_REGEX = /[\u{1F3FB}-\u{1F3FF}]/gu;
 const NORMALIZED: Record<string, ComponentType<LucideProps>> = {};
 for (const [key, value] of Object.entries(EMOJI_ICON_MAP)) {
   NORMALIZED[key] = value;
@@ -213,6 +215,16 @@ for (const [key, value] of Object.entries(EMOJI_ICON_MAP)) {
   if (stripped !== key) NORMALIZED[stripped] = value;
 }
 
-export function getEmojiIcon(emoji: string): ComponentType<LucideProps> | undefined {
-  return NORMALIZED[emoji] || NORMALIZED[emoji.replace(VS_REGEX, "")];
+/**
+ * Resolve emoji to a Lucide icon. Always returns a Lucide component;
+ * uses Bot as fallback when no mapping exists (never shows raw emoji).
+ */
+export function getEmojiIcon(emoji: string): ComponentType<LucideProps> {
+  const normalized = emoji.replace(VS_REGEX, "").replace(SKIN_TONE_REGEX, "");
+  return (
+    NORMALIZED[emoji] ||
+    NORMALIZED[normalized] ||
+    NORMALIZED[emoji.replace(VS_REGEX, "")] ||
+    Bot
+  );
 }

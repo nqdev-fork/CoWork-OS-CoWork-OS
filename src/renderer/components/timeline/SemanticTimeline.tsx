@@ -6,14 +6,19 @@
  *
  * - Concise: short summaries, evidence collapsed
  * - Verbose: evidence expanded by default, raw events visible
+ *
+ * Default display is "windowed": shows last WINDOW_SIZE events in a fixed-height
+ * frame. A "Show all" toggle expands to the full list.
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { UiTimelineEvent } from "../../../shared/timeline-events";
 import type { TaskEvent, TimelineVerbosity } from "../../../shared/types";
 import { AgentEventCard } from "./AgentEventCard";
 import { ApprovalEventCard } from "./ApprovalEventCard";
 import { SummaryEventCard } from "./SummaryEventCard";
+
+const WINDOW_SIZE = 6;
 
 // ---------------------------------------------------------------------------
 // Phase chip strip
@@ -71,6 +76,29 @@ function VerbosityToggle({ verbosity, onChange }: VerbosityToggleProps) {
 }
 
 // ---------------------------------------------------------------------------
+// Show-all toggle
+// ---------------------------------------------------------------------------
+
+interface ShowAllToggleProps {
+  showAll: boolean;
+  totalCount: number;
+  onChange: (v: boolean) => void;
+}
+
+function ShowAllToggle({ showAll, totalCount, onChange }: ShowAllToggleProps) {
+  return (
+    <button
+      type="button"
+      className="semantic-timeline-show-all-btn"
+      onClick={() => onChange(!showAll)}
+      aria-pressed={showAll}
+    >
+      {showAll ? "Show less" : `Show all (${totalCount})`}
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // SemanticTimeline
 // ---------------------------------------------------------------------------
 
@@ -95,6 +123,8 @@ export function SemanticTimeline({
   hidePhaseChips = false,
 }: SemanticTimelineProps) {
   const [verbosity, setVerbosity] = useState<TimelineVerbosity>(initialVerbosity);
+  const [showAll, setShowAll] = useState(false);
+  const feedRef = useRef<HTMLDivElement>(null);
 
   const activePhases = useMemo(() => {
     const phases = new Set<TimelinePhase>();
@@ -107,6 +137,17 @@ export function SemanticTimeline({
   }, [events]);
 
   const isVerbose = verbosity === "verbose";
+  const isWindowed = !showAll;
+
+  // In windowed mode, show only the last WINDOW_SIZE events
+  const visibleEvents = isWindowed ? events.slice(-WINDOW_SIZE) : events;
+
+  // Auto-scroll to bottom in windowed mode when events change
+  useEffect(() => {
+    if (isWindowed && feedRef.current) {
+      feedRef.current.scrollTop = feedRef.current.scrollHeight;
+    }
+  }, [visibleEvents, isWindowed]);
 
   if (events.length === 0) {
     return <div className="semantic-timeline semantic-timeline-empty" />;
@@ -118,58 +159,68 @@ export function SemanticTimeline({
       {(!hidePhaseChips || !hideVerbosityToggle) && (
         <div className="semantic-timeline-header">
           {!hidePhaseChips && <PhaseChips activePhases={activePhases} />}
-          {!hideVerbosityToggle && (
-            <VerbosityToggle verbosity={verbosity} onChange={setVerbosity} />
-          )}
+          <div className="semantic-timeline-controls">
+            {!hideVerbosityToggle && (
+              <VerbosityToggle verbosity={verbosity} onChange={setVerbosity} />
+            )}
+            {events.length > WINDOW_SIZE && (
+              <ShowAllToggle showAll={showAll} totalCount={events.length} onChange={setShowAll} />
+            )}
+          </div>
         </div>
       )}
 
       {/* Card list */}
-      <div className="semantic-timeline-feed" role="list">
-        {events.map((event, index) => {
-          const showConnectorAbove = index > 0;
-          const showConnectorBelow = index < events.length - 1;
+      <div
+        ref={feedRef}
+        className={`semantic-timeline-window ${isWindowed ? "windowed" : "expanded"}`}
+      >
+        <div className="semantic-timeline-feed" role="list">
+          {visibleEvents.map((event, index) => {
+            const showConnectorAbove = index > 0;
+            const showConnectorBelow = index < visibleEvents.length - 1;
 
-          switch (event.kind) {
-            case "summary":
-              return (
-                <div key={event.id} role="listitem">
-                  <SummaryEventCard
-                    event={event}
-                    allEvents={allEvents}
-                    showConnectorAbove={showConnectorAbove}
-                    showConnectorBelow={showConnectorBelow}
-                    defaultExpanded={isVerbose}
-                  />
-                </div>
-              );
-            case "approval":
-              return (
-                <div key={event.id} role="listitem">
-                  <ApprovalEventCard
-                    event={event}
-                    allEvents={allEvents}
-                    showConnectorAbove={showConnectorAbove}
-                    showConnectorBelow={showConnectorBelow}
-                  />
-                </div>
-              );
-            case "agent":
-              return (
-                <div key={event.id} role="listitem">
-                  <AgentEventCard
-                    event={event}
-                    allEvents={allEvents}
-                    showConnectorAbove={showConnectorAbove}
-                    showConnectorBelow={showConnectorBelow}
-                    defaultExpanded={isVerbose || event.status === "running"}
-                  />
-                </div>
-              );
-            default:
-              return null;
-          }
-        })}
+            switch (event.kind) {
+              case "summary":
+                return (
+                  <div key={event.id} role="listitem">
+                    <SummaryEventCard
+                      event={event}
+                      allEvents={allEvents}
+                      showConnectorAbove={showConnectorAbove}
+                      showConnectorBelow={showConnectorBelow}
+                      defaultExpanded={isVerbose}
+                    />
+                  </div>
+                );
+              case "approval":
+                return (
+                  <div key={event.id} role="listitem">
+                    <ApprovalEventCard
+                      event={event}
+                      allEvents={allEvents}
+                      showConnectorAbove={showConnectorAbove}
+                      showConnectorBelow={showConnectorBelow}
+                    />
+                  </div>
+                );
+              case "agent":
+                return (
+                  <div key={event.id} role="listitem">
+                    <AgentEventCard
+                      event={event}
+                      allEvents={allEvents}
+                      showConnectorAbove={showConnectorAbove}
+                      showConnectorBelow={showConnectorBelow}
+                      defaultExpanded={isVerbose || event.status === "running"}
+                    />
+                  </div>
+                );
+              default:
+                return null;
+            }
+          })}
+        </div>
       </div>
     </div>
   );

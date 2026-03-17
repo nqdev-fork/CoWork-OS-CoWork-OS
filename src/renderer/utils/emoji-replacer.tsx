@@ -1,6 +1,16 @@
 import { Children, type ReactNode } from "react";
 import { getEmojiIcon } from "./emoji-icon-map";
 
+/** Strip leading emoji (e.g. "🔬 Researcher" -> "Researcher") for display when icon is shown separately */
+export function stripLeadingEmoji(text: string): string {
+  return text
+    .replace(
+      /^[\s\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2139}\u{2702}-\u{27B0}][\uFE0F\uFE0E\u{1F3FB}-\u{1F3FF}\u200D]*\s*/u,
+      "",
+    )
+    .trim();
+}
+
 /**
  * Matches emoji characters anywhere in a string.
  * Covers modern emoji (1F300-1FAFF), misc symbols (2600-27BF),

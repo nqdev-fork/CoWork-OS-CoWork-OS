@@ -1,10 +1,23 @@
 import { useRef, useEffect, useState, useCallback } from "react";
 
+const DIR_NAME_MAX_LEN = 12;
+
+function getDirName(cwd: string): string {
+  const parts = cwd.replace(/\\/g, "/").split("/").filter(Boolean);
+  return parts[parts.length - 1] ?? cwd;
+}
+
+function truncateDirName(name: string): string {
+  if (name.length <= DIR_NAME_MAX_LEN) return name;
+  return name.slice(0, DIR_NAME_MAX_LEN) + "...";
+}
+
 interface CommandOutputProps {
   command: string;
   output: string;
   isRunning: boolean;
   exitCode?: number | null;
+  cwd?: string;
   taskId?: string;
   onClose?: () => void;
 }
@@ -14,6 +27,7 @@ export function CommandOutput({
   output,
   isRunning,
   exitCode,
+  cwd,
   taskId,
   onClose,
 }: CommandOutputProps) {
@@ -92,6 +106,8 @@ export function CommandOutput({
   };
 
   // Determine status indicator
+  const dirName = cwd ? truncateDirName(getDirName(cwd)) : "";
+
   const getStatusIndicator = () => {
     if (isRunning) {
       return <span className="command-status running">Running...</span>;
@@ -120,6 +136,11 @@ export function CommandOutput({
           <span className="command-text" title={command}>
             {command}
           </span>
+          {cwd && (
+            <span className="command-cwd" title={cwd}>
+              {dirName}
+            </span>
+          )}
         </div>
         <div className="command-output-actions">
           {isRunning && taskId && !stopClicked && (
@@ -185,7 +206,11 @@ export function CommandOutput({
         </div>
       </div>
       <div ref={outputRef} className="command-output-content" onScroll={handleScroll}>
-        <pre>{output || (isRunning ? "Waiting for output..." : "")}</pre>
+        <pre>
+          {isRunning
+            ? output || "Waiting for output..."
+            : (output || "") + (output.endsWith("\n") ? "" : "\n") + `$ ${dirName ? dirName + " " : ""}%`}
+        </pre>
       </div>
       {!autoScroll && isRunning && (
         <button

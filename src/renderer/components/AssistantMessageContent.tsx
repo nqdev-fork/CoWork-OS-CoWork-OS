@@ -1,6 +1,7 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { InlineVideoPreview } from "./InlineVideoPreview";
+import { normalizeInlineLists } from "../utils/markdown-inline-lists";
 
 type AssistantMessageContentProps = {
   message: string;
@@ -127,9 +128,10 @@ export function AssistantMessageContent({
       {segments.map((segment, index) => {
         if (segment.type === "markdown") {
           if (!segment.content.trim()) return null;
+          const normalizedContent = normalizeInlineLists(segment.content);
           return (
             <ReactMarkdown key={`md-${index}`} remarkPlugins={[remarkGfm]} components={markdownComponents}>
-              {segment.content}
+              {normalizedContent}
             </ReactMarkdown>
           );
         }
