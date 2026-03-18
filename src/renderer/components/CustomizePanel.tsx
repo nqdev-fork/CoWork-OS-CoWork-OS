@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { Plug, Zap, Package, Dna } from "lucide-react";
+import { getEmojiIcon } from "../utils/emoji-icon-map";
 import { PluginStore } from "./PluginStore";
 
 interface PluginPackData {
@@ -457,7 +458,12 @@ export function CustomizePanel({
                 <div className="cp-agent-list">
                   {activePack.agentRoles.map((a) => (
                     <div key={a.name} className="cp-agent-row">
-                      <span className="cp-agent-icon">{a.icon}</span>
+                      <span className="cp-agent-icon">
+                        {a.icon ? (() => {
+                          const Icon = getEmojiIcon(a.icon);
+                          return <Icon size={18} strokeWidth={2} />;
+                        })() : null}
+                      </span>
                       <div className="cp-agent-info">
                         <span className="cp-agent-name">{a.displayName}</span>
                         <span className="cp-agent-desc">{a.description || ""}</span>
