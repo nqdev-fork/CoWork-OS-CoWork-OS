@@ -201,8 +201,11 @@ function StreamBubble({ item, isCompactEvent }: { item: StreamItem; isCompactEve
             </ReactMarkdown>
           </p>
         ) : isMarkdown ? (
-          <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={safeMarkdownUrlTransform}>
-            {displayContent}
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm, remarkBreaks]}
+            urlTransform={safeMarkdownUrlTransform}
+          >
+            {normalizeMarkdownForCollab(displayContent)}
           </ReactMarkdown>
         ) : (
           <p>{displayContent}</p>
@@ -417,23 +420,23 @@ export function DispatchedAgentsPanel({
 
           return (
             <div key={item.id}>
-              {showHeader && (
-                <div className="stream-agent-header">
-                  <span className="stream-agent-icon">
-                    {(() => {
-                      const Icon = getEmojiIcon(item.agentIcon);
-                      return <Icon size={16} strokeWidth={1.5} />;
-                    })()}
-                  </span>
-                  <span className="stream-agent-name" style={{ color: item.agentColor }}>
-                    {item.agentName}
-                  </span>
-                </div>
-              )}
               <div
                 className={`stream-thought ${isCompactEvent ? "stream-thought-compact" : ""}`}
                 style={{ borderLeftColor: item.agentColor }}
               >
+                {showHeader && (
+                  <div className="stream-agent-header-inline">
+                    <span className="stream-agent-icon">
+                      {(() => {
+                        const Icon = getEmojiIcon(item.agentIcon);
+                        return <Icon size={14} strokeWidth={1.5} />;
+                      })()}
+                    </span>
+                    <span className="stream-agent-name-inline" style={{ color: item.agentColor }}>
+                      {item.agentName}
+                    </span>
+                  </div>
+                )}
                 <StreamBubble item={item} isCompactEvent={isCompactEvent} />
               </div>
             </div>
