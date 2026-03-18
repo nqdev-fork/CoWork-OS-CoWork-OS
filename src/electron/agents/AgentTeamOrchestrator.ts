@@ -123,6 +123,8 @@ export class AgentTeamOrchestrator {
   private itemRepo: AgentTeamItemRepositoryLike;
   private thoughtRepo: AgentTeamThoughtRepository;
   private runLocks = new Map<string, boolean>();
+  /** Tracks runs where the user explicitly requested a wrap-up. */
+  private wrapUpRequestedRunIds = new Set<string>();
 
   constructor(
     private deps: AgentTeamOrchestratorDeps,
@@ -219,7 +221,12 @@ export class AgentTeamOrchestrator {
           return;
         }
 
-        const hasFailures = refreshedItems.some((i) => i.status === "failed");
+        // When wrap-up was user-initiated, only synthesis failure should mark the run
+        // as failed — pre-synthesis items may have been cut short intentionally.
+        const wasUserWrapUp = this.wrapUpRequestedRunIds.has(run.id);
+        const hasFailures = wasUserWrapUp
+          ? refreshedItems.find((i) => i.title === SYNTHESIS_ITEM_TITLE)?.status === "failed"
+          : refreshedItems.some((i) => i.status === "failed");
         const status = hasFailures ? "failed" : "completed";
         const summary = this.buildRunSummary(refreshedItems);
         const completedPhase = run.collaborativeMode ? "complete" : undefined;
@@ -236,6 +243,7 @@ export class AgentTeamOrchestrator {
             reason: "all_items_terminal",
           });
         }
+        this.wrapUpRequestedRunIds.delete(run.id);
         // When a collaborative run finishes, mark the root task as completed/failed
         if (run.collaborativeMode && this.deps.completeRootTask) {
           this.deps.completeRootTask(
@@ -469,6 +477,9 @@ export class AgentTeamOrchestrator {
   async wrapUpRun(runId: string): Promise<void> {
     const run = this.runRepo.findById(runId);
     if (!run || run.status !== "running") return;
+
+    // Track that this run was user-initiated wrap-up so final status reflects intent.
+    this.wrapUpRequestedRunIds.add(runId);
 
     const team = this.teamRepo.findById(run.teamId);
     if (!team) return;
