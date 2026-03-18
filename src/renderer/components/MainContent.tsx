@@ -54,6 +54,7 @@ import {
   extractAttachmentNames,
   stripHtmlForText,
   stripPptxBubbleContent,
+  stripStrategyContextBlock,
   truncateTextForTaskPrompt,
 } from "./utils/attachment-content";
 import { sanitizeToolCallTextFromAssistant } from "../../shared/tool-call-text-sanitizer";
@@ -5236,6 +5237,29 @@ export function MainContent({
     return assistantMessages.length > 0 ? assistantMessages[assistantMessages.length - 1] : null;
   }, [events]);
 
+  const displayPrompt =
+    typeof task?.userPrompt === "string" && task.userPrompt.trim().length > 0
+      ? task.userPrompt
+      : typeof task?.prompt === "string"
+        ? task.prompt
+        : "";
+  const cleanedDisplayPrompt = displayPrompt
+    ? stripStrategyContextBlock(stripPptxBubbleContent(displayPrompt))
+    : "";
+  const trimmedPrompt = cleanedDisplayPrompt.trim();
+  const initialPromptEventId = useMemo(() => {
+    if (!trimmedPrompt) return null;
+    for (const event of events) {
+      if (getEffectiveTaskEventType(event) !== "user_message") continue;
+      const rawMessage = typeof event.payload?.message === "string" ? event.payload.message : "";
+      const cleanedEventMessage = stripStrategyContextBlock(stripPptxBubbleContent(rawMessage));
+      if (cleanedEventMessage === trimmedPrompt || cleanedEventMessage.startsWith(trimmedPrompt)) {
+        return event.id;
+      }
+    }
+    return null;
+  }, [events, trimmedPrompt]);
+
   // Welcome/Empty state
   if (!task) {
     return (
@@ -6540,8 +6564,6 @@ export function MainContent({
     stepFeedEventCount += 1;
   });
 
-  const displayPrompt = task.userPrompt || task.prompt;
-  const trimmedPrompt = displayPrompt.trim();
   const baseTitle = task.title || buildTaskTitle(trimmedPrompt);
   const normalizedTitle = baseTitle.replace(TITLE_ELLIPSIS_REGEX, "");
   const titleMatchesPrompt =
@@ -6641,13 +6663,12 @@ export function MainContent({
       {/* Body */}
       <div className="main-body" ref={mainBodyRef} onScroll={handleScroll}>
         <div className="task-content">
-          {/* User Prompt - Right aligned like chat. Omit when we have user_message events
-              (e.g. collaborative mode) so the prompt appears only once in the timeline. */}
-          {!events.some((e) => getEffectiveTaskEventType(e) === "user_message") && (
+          {/* Always anchor the initial user prompt above the timeline. */}
+          {trimmedPrompt && (
             <div className="chat-message user-message">
               <CollapsibleUserBubble>
                 <ReactMarkdown remarkPlugins={userMarkdownPlugins} components={markdownComponents}>
-                  {stripPptxBubbleContent(displayPrompt)}
+                  {cleanedDisplayPrompt}
                 </ReactMarkdown>
                 {extractAttachmentNames(displayPrompt).length > 0 && (
                   <div className="bubble-attachments">
@@ -6672,7 +6693,7 @@ export function MainContent({
                   </div>
                 )}
               </CollapsibleUserBubble>
-              <MessageCopyButton text={displayPrompt} />
+              <MessageCopyButton text={cleanedDisplayPrompt} />
             </div>
           )}
 
@@ -7102,8 +7123,15 @@ export function MainContent({
 
                 // Render user messages as chat bubbles on the right
                 if (isUserMessage) {
+                  if (event.id === initialPromptEventId) {
+                    return (
+                      <Fragment key={event.id || `event-${item.eventIndex}`}>
+                        {renderCommandOutputs(commandOutputsAfterEvent)}
+                      </Fragment>
+                    );
+                  }
                   const rawMessage = event.payload?.message || "User message";
-                  const messageText = stripPptxBubbleContent(rawMessage);
+                  const messageText = stripStrategyContextBlock(stripPptxBubbleContent(rawMessage));
                   const attachmentNames = extractAttachmentNames(rawMessage);
                   return (
                     <Fragment key={event.id || `event-${item.eventIndex}`}>

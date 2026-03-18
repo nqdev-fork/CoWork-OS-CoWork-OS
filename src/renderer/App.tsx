@@ -2095,11 +2095,43 @@ export function App() {
           : rightSidebarCollapsed;
   const unseenOutputCount = unseenOutputTaskIds.length;
 
-  const handleSelectTaskFromShell = (taskId: string | null) => {
-    clearRemoteTaskView();
-    setSelectedTaskId(taskId);
-    setCurrentView("main");
-  };
+  const handleSelectTaskFromShell = useCallback(
+    (taskId: string | null) => {
+      clearRemoteTaskView();
+      setSelectedTaskId(taskId);
+      setCurrentView("main");
+    },
+    [clearRemoteTaskView],
+  );
+
+  // When opening a session from history, ensure we have the full task (including prompt)
+  // in case it wasn't in the initial list or has stale data
+  useEffect(() => {
+    if (!selectedTaskId || remoteTaskView || !window.electronAPI?.getTask) return;
+
+    const task = tasks.find((t) => t.id === selectedTaskId);
+    const hasPrompt = task && (task.prompt || task.userPrompt);
+    if (hasPrompt) return;
+
+    let cancelled = false;
+    const fetchTask = async () => {
+      try {
+        const fullTask = (await window.electronAPI.getTask(selectedTaskId)) as Task | null;
+        if (cancelled || !fullTask) return;
+        setTasks((prev) => {
+          const idx = prev.findIndex((t) => t.id === fullTask.id);
+          if (idx >= 0) return prev.map((t) => (t.id === fullTask.id ? { ...t, ...fullTask } : t));
+          return [fullTask, ...prev];
+        });
+      } catch (error) {
+        if (!cancelled) console.error("Failed to fetch task for session view:", error);
+      }
+    };
+    void fetchTask();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedTaskId, remoteTaskView, tasks]);
 
   const openTaskById = useCallback(
     async (taskId: string) => {
@@ -2174,7 +2206,7 @@ export function App() {
       (window.location.protocol === "http:" || window.location.protocol === "https:");
     const isViteDevServer =
       typeof window !== "undefined" &&
-      (window.location.host === "localhost:5173" || window.location.host === "127.0.0.1:5173");
+      (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
 
     if (isHttpContext && !isViteDevServer) {
       return <WebAccessClient />;

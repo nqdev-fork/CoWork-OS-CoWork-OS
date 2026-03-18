@@ -542,15 +542,16 @@ export function Sidebar({
     return () => el.removeEventListener("scroll", handleScroll);
   }, [onLoadMoreTasks]);
 
-  // Close menu when clicking outside
+  // Close menu when clicking outside (use 'click' not 'mousedown' so moving from outside to menu still allows selection)
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (menuRef.current && !menuRef.current.contains(target)) {
         setMenuOpenTaskId(null);
       }
     };
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
+    document.addEventListener("click", handleClickOutside);
+    return () => document.removeEventListener("click", handleClickOutside);
   }, []);
 
   // Focus rename input when entering rename mode
@@ -1060,7 +1061,6 @@ export function Sidebar({
                   className="task-item-menu cli-task-menu"
                   role="menu"
                   aria-label="Session actions"
-                  ref={menuRef}
                 >
                   <button
                     className="task-item-menu-option cli-menu-option"

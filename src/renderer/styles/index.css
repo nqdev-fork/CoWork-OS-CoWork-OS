@@ -957,7 +957,7 @@ button:focus-visible,
 
 .theme-light .cli-task-menu,
 .theme-light .task-item-menu {
-  background: rgba(255, 255, 255, 0.95) !important;
+  background: #ffffff !important;
   border-color: rgba(0, 0, 0, 0.15) !important;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
 }
@@ -1564,7 +1564,8 @@ a,
     background 0.15s ease;
 }
 
-.task-item:hover .task-item-more {
+.task-item:hover .task-item-more,
+.task-item-more[aria-expanded="true"] {
   opacity: 1;
 }
 
@@ -1583,14 +1584,12 @@ a,
   right: 0;
   z-index: 100;
   min-width: 140px;
-  background: var(--color-bg-elevated);
-  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  background: #2d2d30;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-lg);
   padding: 4px;
-  margin-top: 4px;
+  margin-top: 2px;
 }
 
 .task-item-menu::before {
@@ -13660,7 +13659,8 @@ button {
   transition: opacity 0.15s ease;
 }
 
-.cli-task-item:hover .cli-task-actions {
+.cli-task-item:hover .cli-task-actions,
+.cli-task-actions:has(.task-item-menu) {
   opacity: 1;
 }
 
@@ -13683,7 +13683,7 @@ button {
 /* CLI Task Menu */
 .cli-task-menu {
   font-family: var(--font-mono);
-  background: rgba(0, 0, 0, 0.9) !important;
+  background: #2d2d30 !important;
   border: 1px solid var(--color-border) !important;
 }
 
@@ -28919,7 +28919,8 @@ button {
   transition: opacity 0.12s ease;
 }
 
-.density-focused .task-item:hover .task-item-actions {
+.density-focused .task-item:hover .task-item-actions,
+.density-focused .task-item-actions:has(.task-item-menu) {
   opacity: 1;
 }
 

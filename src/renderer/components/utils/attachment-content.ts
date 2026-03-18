@@ -2,6 +2,8 @@ const MAX_EXTRACTED_ATTACHMENT_CHARS = 6000;
 const MAX_IMAGE_OCR_CHARS = 6000;
 const ATTACHMENT_CONTENT_START_MARKER = "[[ATTACHMENT_EXTRACTED_CONTENT_START]]";
 const ATTACHMENT_CONTENT_END_MARKER = "[[ATTACHMENT_EXTRACTED_CONTENT_END]]";
+const STRATEGY_CONTEXT_BLOCK_PATTERN =
+  /\n*\[AGENT_STRATEGY_CONTEXT_V1\][\s\S]*?\[\/AGENT_STRATEGY_CONTEXT_V1\]\n*/g;
 
 const OCR_REQUEST_PATTERNS = [
   /\bocr\b/i,
@@ -34,6 +36,9 @@ const truncateTextForTaskPrompt = (value: string): string => {
   if (value.length <= MAX_EXTRACTED_ATTACHMENT_CHARS) return value.trim();
   return `${value.slice(0, MAX_EXTRACTED_ATTACHMENT_CHARS)}\n\n[... excerpt truncated to first ${MAX_EXTRACTED_ATTACHMENT_CHARS} characters ...]`;
 };
+
+const stripStrategyContextBlock = (value: string): string =>
+  value.replace(STRATEGY_CONTEXT_BLOCK_PATTERN, "\n").replace(/\n{3,}/g, "\n\n").trim();
 
 const stripPptxBubbleContent = (value: string): string => {
   const lines = value.split("\n");
@@ -142,5 +147,6 @@ export {
   shouldRequestImageOcr,
   stripHtmlForText,
   stripPptxBubbleContent,
+  stripStrategyContextBlock,
   truncateTextForTaskPrompt,
 };
