@@ -166,7 +166,17 @@ export class OllamaProvider implements LLMProvider {
         modified: m.modified_at,
       }));
     } catch (error: Any) {
-      console.error("Failed to fetch Ollama models:", error);
+      const message = error?.message || String(error);
+      const isLocalhost =
+        /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(this.baseUrl);
+      const isUnavailable =
+        /(fetch failed|ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|ENETUNREACH|ETIMEDOUT)/i.test(message);
+
+      if (isLocalhost && isUnavailable) {
+        console.info(`[OllamaProvider] Ollama is not reachable at ${this.baseUrl}; returning no models`);
+      } else {
+        console.warn(`[OllamaProvider] Failed to fetch Ollama models: ${message}`);
+      }
       return [];
     }
   }
