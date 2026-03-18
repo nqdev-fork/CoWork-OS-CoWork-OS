@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { Loader2 } from "lucide-react";
+import { normalizeMarkdownForCollab } from "../utils/markdown-inline-lists";
 import type { AgentThought, AgentTeamRunPhase, AgentRole } from "../../shared/types";
 import { getEmojiIcon } from "../utils/emoji-icon-map";
 
@@ -82,7 +84,8 @@ function ThoughtBubble({ thought }: { thought: AgentThought }) {
   const [expanded, setExpanded] = useState(false);
   const content = thought.content;
   const isLong = content.length > 600;
-  const displayContent = isLong && !expanded ? content.slice(0, 600) + "..." : content;
+  const rawDisplay = isLong && !expanded ? content.slice(0, 600) + "..." : content;
+  const displayContent = normalizeMarkdownForCollab(rawDisplay);
 
   const time = new Date(thought.createdAt);
   const timeStr = time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -90,7 +93,10 @@ function ThoughtBubble({ thought }: { thought: AgentThought }) {
   return (
     <div className={`thought-bubble ${thought.isStreaming ? "thought-streaming" : ""}`}>
       <div className="thought-content markdown-content">
-        <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={safeMarkdownUrlTransform}>
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm, remarkBreaks]}
+          urlTransform={safeMarkdownUrlTransform}
+        >
           {displayContent}
         </ReactMarkdown>
       </div>
@@ -359,21 +365,21 @@ export function CollaborativeThoughtsPanel({
           <div className="streaming-thoughts-section">
             {Array.from(streamingThoughts.values()).map((st) => (
               <div key={st.agentRoleId} className="streaming-thought-entry">
-                <div className="stream-agent-header">
-                  <span className="stream-agent-icon">
-                    {(() => {
-                      const Icon = getEmojiIcon(st.agentIcon);
-                      return <Icon size={16} strokeWidth={1.5} />;
-                    })()}
-                  </span>
-                  <span className="stream-agent-name" style={{ color: st.agentColor }}>
-                    {st.agentDisplayName}
-                  </span>
-                </div>
                 <div
                   className="stream-thought thought-streaming"
                   style={{ borderLeftColor: st.agentColor }}
                 >
+                  <div className="stream-agent-header-inline">
+                    <span className="stream-agent-icon">
+                      {(() => {
+                        const Icon = getEmojiIcon(st.agentIcon);
+                        return <Icon size={14} strokeWidth={1.5} />;
+                      })()}
+                    </span>
+                    <span className="stream-agent-name-inline" style={{ color: st.agentColor }}>
+                      {st.agentDisplayName}
+                    </span>
+                  </div>
                   <div className="thought-bubble thought-streaming">
                     <div className="thought-content streaming-progress">
                       <Loader2 className="streaming-spinner" size={14} strokeWidth={2} />
@@ -396,26 +402,26 @@ export function CollaborativeThoughtsPanel({
 
           return (
             <div key={thought.id}>
-              {showHeader && (
-                <div className="stream-agent-header">
-                  <span className="stream-agent-icon">
-                    {(() => {
-                      const Icon = getEmojiIcon(thought.agentIcon);
-                      return <Icon size={16} strokeWidth={1.5} />;
-                    })()}
-                  </span>
-                  <span className="stream-agent-name" style={{ color: thought.agentColor }}>
-                    {thought.agentDisplayName}
-                  </span>
-                  {thought.agentRoleId === leaderAgentRoleId && (
-                    <span className="leader-badge">{isMultiLlm ? "Judge" : "Leader"}</span>
-                  )}
-                </div>
-              )}
               <div
                 className={`stream-thought ${thought.isStreaming ? "thought-streaming" : ""}`}
                 style={{ borderLeftColor: thought.agentColor }}
               >
+                {showHeader && (
+                  <div className="stream-agent-header-inline">
+                    <span className="stream-agent-icon">
+                      {(() => {
+                        const Icon = getEmojiIcon(thought.agentIcon);
+                        return <Icon size={14} strokeWidth={1.5} />;
+                      })()}
+                    </span>
+                    <span className="stream-agent-name-inline" style={{ color: thought.agentColor }}>
+                      {thought.agentDisplayName}
+                    </span>
+                    {thought.agentRoleId === leaderAgentRoleId && (
+                      <span className="leader-badge">{isMultiLlm ? "Judge" : "Leader"}</span>
+                    )}
+                  </div>
+                )}
                 <ThoughtBubble thought={thought} />
               </div>
               {agentStillStreaming && (
@@ -446,21 +452,21 @@ export function CollaborativeThoughtsPanel({
             if (pendingAgents.length === 0) return null;
             return pendingAgents.map((st) => (
               <div key={st.agentRoleId} className="streaming-thought-entry">
-                <div className="stream-agent-header">
-                  <span className="stream-agent-icon">
-                    {(() => {
-                      const Icon = getEmojiIcon(st.agentIcon);
-                      return <Icon size={16} strokeWidth={1.5} />;
-                    })()}
-                  </span>
-                  <span className="stream-agent-name" style={{ color: st.agentColor }}>
-                    {st.agentDisplayName}
-                  </span>
-                </div>
                 <div
                   className="stream-thought thought-streaming"
                   style={{ borderLeftColor: st.agentColor }}
                 >
+                  <div className="stream-agent-header-inline">
+                    <span className="stream-agent-icon">
+                      {(() => {
+                        const Icon = getEmojiIcon(st.agentIcon);
+                        return <Icon size={14} strokeWidth={1.5} />;
+                      })()}
+                    </span>
+                    <span className="stream-agent-name-inline" style={{ color: st.agentColor }}>
+                      {st.agentDisplayName}
+                    </span>
+                  </div>
                   <div className="thought-bubble thought-streaming">
                     <div className="thought-content streaming-progress">
                       <Loader2 className="streaming-spinner" size={14} strokeWidth={2} />
