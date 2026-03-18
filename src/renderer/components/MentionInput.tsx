@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { AgentRoleData, MentionType } from "../../electron/preload";
+import { getEmojiIcon } from "../utils/emoji-icon-map";
 
 interface MentionInputProps {
   workspaceId: string;
@@ -141,7 +142,10 @@ export function MentionInput({
                 onClick={() => handleSelectAgent(agent)}
               >
                 <span className="agent-icon" style={{ backgroundColor: agent.color }}>
-                  {agent.icon}
+                  {(() => {
+                    const Icon = getEmojiIcon(agent.icon || "🤖");
+                    return <Icon size={16} strokeWidth={2} />;
+                  })()}
                 </span>
                 <div className="agent-info">
                   <span className="agent-name">{agent.displayName}</span>
@@ -157,7 +161,10 @@ export function MentionInput({
         <div className="mention-details">
           <div className="selected-agent">
             <span className="agent-icon" style={{ backgroundColor: selectedAgent.color }}>
-              {selectedAgent.icon}
+              {(() => {
+                const Icon = getEmojiIcon(selectedAgent.icon || "🤖");
+                return <Icon size={16} strokeWidth={2} />;
+              })()}
             </span>
             <span className="agent-name">{selectedAgent.displayName}</span>
             <button className="btn-clear" onClick={handleCancel}>
