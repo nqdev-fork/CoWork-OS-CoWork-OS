@@ -28,134 +28,10 @@ const execAsync = promisify(exec);
 const REGISTRY_CACHE_DURATION = 15 * 60 * 1000;
 
 // Built-in registry of common MCP servers
-// This is used as a fallback when the remote registry is unavailable
-// Package versions verified against npm registry as of 2026-01
+// This is used as a fallback when the remote registry is unavailable.
+// Keep this list curated toward non-overlapping MCP surfaces; native file,
+// browser, memory, and direct GitHub paths are preferred elsewhere in the app.
 const BASE_BUILTIN_SERVERS: MCPRegistryEntry[] = [
-  {
-    id: "filesystem",
-    name: "Filesystem",
-    description: "Provides secure file system access with configurable root directories",
-    version: "2026.1.14",
-    author: "Anthropic",
-    homepage: "https://modelcontextprotocol.io",
-    repository: "https://github.com/modelcontextprotocol/servers",
-    license: "MIT",
-    installMethod: "npm",
-    installCommand: "npx",
-    packageName: "@modelcontextprotocol/server-filesystem",
-    transport: "stdio",
-    defaultCommand: "npx",
-    defaultArgs: ["-y", "@modelcontextprotocol/server-filesystem"],
-    tools: [
-      { name: "read_file", description: "Read complete file contents" },
-      { name: "read_multiple_files", description: "Read multiple files at once" },
-      { name: "write_file", description: "Write content to file" },
-      { name: "edit_file", description: "Edit file with line-based operations" },
-      { name: "create_directory", description: "Create a new directory" },
-      { name: "list_directory", description: "List directory contents" },
-      { name: "directory_tree", description: "Get recursive directory tree" },
-      { name: "move_file", description: "Move or rename files and directories" },
-      { name: "search_files", description: "Search for files matching pattern" },
-      { name: "get_file_info", description: "Get file metadata" },
-    ],
-    tags: ["filesystem", "files", "official"],
-    category: "filesystem",
-    verified: true,
-    featured: true,
-  },
-  {
-    id: "github",
-    name: "GitHub",
-    description:
-      "Provides GitHub API integration for repository management. Requires GITHUB_PERSONAL_ACCESS_TOKEN.",
-    version: "2025.4.8",
-    author: "Anthropic",
-    homepage: "https://modelcontextprotocol.io",
-    repository: "https://github.com/modelcontextprotocol/servers",
-    license: "MIT",
-    installMethod: "npm",
-    installCommand: "npx",
-    packageName: "@modelcontextprotocol/server-github",
-    transport: "stdio",
-    defaultCommand: "npx",
-    defaultArgs: ["-y", "@modelcontextprotocol/server-github"],
-    defaultEnv: {
-      GITHUB_PERSONAL_ACCESS_TOKEN: "",
-    },
-    tools: [
-      { name: "create_or_update_file", description: "Create or update a file in a repository" },
-      { name: "search_repositories", description: "Search GitHub repositories" },
-      { name: "create_repository", description: "Create a new repository" },
-      { name: "get_file_contents", description: "Get contents of a file in a repository" },
-      { name: "push_files", description: "Push multiple files to a repository" },
-      { name: "create_issue", description: "Create a new issue" },
-      { name: "create_pull_request", description: "Create a pull request" },
-      { name: "fork_repository", description: "Fork a repository" },
-      { name: "create_branch", description: "Create a new branch" },
-    ],
-    tags: ["github", "git", "version-control", "official"],
-    category: "development",
-    verified: true,
-    featured: true,
-  },
-  {
-    id: "puppeteer",
-    name: "Puppeteer",
-    description: "Browser automation and web scraping using Puppeteer",
-    version: "2025.5.12",
-    author: "Anthropic",
-    homepage: "https://modelcontextprotocol.io",
-    repository: "https://github.com/modelcontextprotocol/servers",
-    license: "MIT",
-    installMethod: "npm",
-    installCommand: "npx",
-    packageName: "@modelcontextprotocol/server-puppeteer",
-    transport: "stdio",
-    defaultCommand: "npx",
-    defaultArgs: ["-y", "@modelcontextprotocol/server-puppeteer"],
-    tools: [
-      { name: "puppeteer_navigate", description: "Navigate to a URL" },
-      { name: "puppeteer_screenshot", description: "Take a screenshot of the page" },
-      { name: "puppeteer_click", description: "Click an element on the page" },
-      { name: "puppeteer_fill", description: "Fill out an input field" },
-      { name: "puppeteer_select", description: "Select an option from a dropdown" },
-      { name: "puppeteer_hover", description: "Hover over an element" },
-      { name: "puppeteer_evaluate", description: "Execute JavaScript in the page" },
-    ],
-    tags: ["browser", "automation", "web", "official"],
-    category: "automation",
-    verified: true,
-  },
-  {
-    id: "memory",
-    name: "Memory",
-    description: "Knowledge graph-based persistent memory system",
-    version: "2026.1.26",
-    author: "Anthropic",
-    homepage: "https://modelcontextprotocol.io",
-    repository: "https://github.com/modelcontextprotocol/servers",
-    license: "MIT",
-    installMethod: "npm",
-    installCommand: "npx",
-    packageName: "@modelcontextprotocol/server-memory",
-    transport: "stdio",
-    defaultCommand: "npx",
-    defaultArgs: ["-y", "@modelcontextprotocol/server-memory"],
-    tools: [
-      { name: "create_entities", description: "Create new entities in the knowledge graph" },
-      { name: "create_relations", description: "Create relations between entities" },
-      { name: "add_observations", description: "Add observations to entities" },
-      { name: "delete_entities", description: "Delete entities from the graph" },
-      { name: "delete_observations", description: "Delete observations from entities" },
-      { name: "delete_relations", description: "Delete relations between entities" },
-      { name: "read_graph", description: "Read the entire knowledge graph" },
-      { name: "search_nodes", description: "Search for nodes in the graph" },
-      { name: "open_nodes", description: "Open specific nodes by name" },
-    ],
-    tags: ["memory", "knowledge-graph", "persistence", "official"],
-    category: "memory",
-    verified: true,
-  },
   {
     id: "postgres",
     name: "PostgreSQL",
@@ -228,6 +104,19 @@ const BASE_BUILTIN_SERVERS: MCPRegistryEntry[] = [
 ];
 
 const LOCAL_CONNECTOR_VERSION = "0.1.0";
+const SHIPPED_LOCAL_CONNECTOR_IDS = new Set([
+  "salesforce",
+  "jira",
+  "hubspot",
+  "zendesk",
+  "servicenow",
+  "linear",
+  "asana",
+  "okta",
+  "resend",
+  "google-workspace",
+  "discord",
+]);
 
 function isPackagedElectronApp(): boolean {
   try {
@@ -1247,7 +1136,9 @@ function getConnectorEntries(): MCPRegistryEntry[] {
     },
   ];
 
-  return filterUnavailableConnectorEntries(entries);
+  return filterUnavailableConnectorEntries(
+    entries.filter((entry) => SHIPPED_LOCAL_CONNECTOR_IDS.has(entry.id)),
+  );
 }
 
 function getBuiltinRegistry(): MCPRegistry {
