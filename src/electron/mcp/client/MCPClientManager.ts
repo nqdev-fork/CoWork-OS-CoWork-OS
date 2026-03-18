@@ -45,6 +45,7 @@ export class MCPClientManager extends EventEmitter {
   private static instance: MCPClientManager | null = null;
   private connections: Map<string, MCPServerConnection> = new Map();
   private toolServerMap: Map<string, string> = new Map(); // tool name -> server id
+  private toolCatalogSnapshot: { version: number; tools: MCPTool[] } = { version: 0, tools: [] };
   private initialized = false;
   private isInitializing = false; // Flag to batch operations during startup
   private rebuildToolMapDebounceTimer: NodeJS.Timeout | null = null;
@@ -168,6 +169,10 @@ export class MCPClientManager extends EventEmitter {
     await Promise.all(disconnectPromises);
     this.connections.clear();
     this.toolServerMap.clear();
+    this.toolCatalogSnapshot = {
+      version: this.toolCatalogSnapshot.version + 1,
+      tools: [],
+    };
     this.initialized = false;
 
     logger.debug("Shutdown complete");
@@ -238,15 +243,10 @@ export class MCPClientManager extends EventEmitter {
    * Get all available tools from all connected servers
    */
   getAllTools(): MCPTool[] {
-    const tools: MCPTool[] = [];
-
-    for (const connection of this.connections.values()) {
-      if (connection.getStatus().status === "connected") {
-        tools.push(...connection.getTools());
-      }
-    }
-
-    return tools;
+    return this.toolCatalogSnapshot.tools.map((tool) => ({
+      ...tool,
+      inputSchema: tool.inputSchema ? { ...tool.inputSchema } : tool.inputSchema,
+    }));
   }
 
   /**
@@ -282,6 +282,10 @@ export class MCPClientManager extends EventEmitter {
     }
 
     return connection.callTool(toolName, args);
+  }
+
+  getToolCatalogVersion(): number {
+    return this.toolCatalogSnapshot.version;
   }
 
   /**
@@ -383,6 +387,10 @@ export class MCPClientManager extends EventEmitter {
               ? { type: "server_reconnecting", serverId, attempt: 0 }
               : { type: "server_disconnected", serverId };
 
+      if (status === "connected" || status === "disconnected" || status === "reconnecting") {
+        this.rebuildToolMap();
+      }
+
       this.emit("event", event);
 
       // Broadcast to renderer
@@ -420,36 +428,46 @@ export class MCPClientManager extends EventEmitter {
       return;
     }
 
-    // Debounce rebuilds to batch rapid changes
     if (this.rebuildToolMapDebounceTimer) {
       clearTimeout(this.rebuildToolMapDebounceTimer);
-    }
-
-    this.rebuildToolMapDebounceTimer = setTimeout(() => {
-      this.rebuildToolMapImmediate();
       this.rebuildToolMapDebounceTimer = null;
-    }, 100);
+    }
+    this.rebuildToolMapImmediate();
   }
 
   /**
    * Immediately rebuild the tool -> server mapping (no debounce)
    */
   private rebuildToolMapImmediate(): void {
-    this.toolServerMap.clear();
+    const nextToolServerMap = new Map<string, string>();
+    const nextTools: MCPTool[] = [];
 
     for (const [serverId, connection] of this.connections) {
       if (connection.getStatus().status === "connected") {
         for (const tool of connection.getTools()) {
-          if (this.toolServerMap.has(tool.name)) {
+          if (nextToolServerMap.has(tool.name)) {
             logger.warn(
-              `Tool name collision: ${tool.name} from ${serverId} conflicts with ${this.toolServerMap.get(tool.name)}`,
+              `Tool name collision: ${tool.name} from ${serverId} conflicts with ${nextToolServerMap.get(tool.name)}`,
             );
           } else {
-            this.toolServerMap.set(tool.name, serverId);
+            nextToolServerMap.set(tool.name, serverId);
+            nextTools.push({
+              ...tool,
+              inputSchema: tool.inputSchema ? { ...tool.inputSchema } : tool.inputSchema,
+            });
           }
         }
       }
     }
+
+    this.toolServerMap.clear();
+    for (const [toolName, serverId] of nextToolServerMap.entries()) {
+      this.toolServerMap.set(toolName, serverId);
+    }
+    this.toolCatalogSnapshot = {
+      version: this.toolCatalogSnapshot.version + 1,
+      tools: nextTools,
+    };
 
     logger.debug(`Tool map rebuilt: ${this.toolServerMap.size} tools`);
   }
