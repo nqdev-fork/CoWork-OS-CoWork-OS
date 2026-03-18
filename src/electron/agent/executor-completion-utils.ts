@@ -265,10 +265,10 @@ export function getBestFinalResponseCandidate(opts: {
   lastAssistantOutput: string | null;
 }): string {
   const candidates = [
-    opts.buildResultSummary(),
-    opts.lastAssistantText,
     opts.lastNonVerificationOutput,
+    opts.lastAssistantText,
     opts.lastAssistantOutput,
+    opts.buildResultSummary(),
   ];
 
   for (const candidate of candidates) {

@@ -7656,12 +7656,11 @@ ${transcript}
   }
 
   private buildResultSummary(): string | undefined {
-    // Prefer lastAssistantText first — it is the untruncated text from the
-    // most recent assistant response, whereas lastNonVerificationOutput and
-    // lastAssistantOutput are capped by recordAssistantOutput.
+    // Prefer the last non-verification output first so a final "OK" / status-style
+    // verification message does not overwrite the actual user-facing answer.
     const candidates = [
-      this.lastAssistantText,
       this.lastNonVerificationOutput,
+      this.lastAssistantText,
       this.lastAssistantOutput,
     ];
 
@@ -15896,6 +15895,12 @@ You are continuing a previous conversation. The context from the previous conver
       this.getBudgetConstrainedFailureStepIdSet().clear();
       this.terminalStatus = "ok";
       this.failureClass = undefined;
+
+      // Emit user_message for the initial prompt so it appears in session history when reopened
+      const initialPrompt = (this.task.userPrompt || this.task.prompt || "").trim();
+      if (initialPrompt) {
+        this.emitEvent("user_message", { message: initialPrompt });
+      }
 
       // Security: Analyze task prompt for potential injection attempts
       const securityReport = InputSanitizer.analyze(this.task.prompt);
