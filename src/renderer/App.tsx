@@ -2666,6 +2666,7 @@ export function App() {
                   if (task && isSynthesisChildTask(task)) return;
                   setSelectedTaskId(taskId);
                 }}
+                onSelectTask={handleSelectTaskFromShell}
                 onSendMessage={handleSendMessage}
                 onCreateTask={handleCreateTask}
                 onChangeWorkspace={handleChangeWorkspace}
