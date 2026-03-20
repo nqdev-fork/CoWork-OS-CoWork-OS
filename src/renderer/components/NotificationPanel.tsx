@@ -10,6 +10,7 @@ interface AppNotification {
     | "task_failed"
     | "scheduled_task"
     | "input_required"
+    | "companion_suggestion"
     | "info"
     | "warning"
     | "error";
@@ -20,6 +21,9 @@ interface AppNotification {
   taskId?: string;
   cronJobId?: string;
   workspaceId?: string;
+  suggestionId?: string;
+  recommendedDelivery?: "briefing" | "inbox" | "nudge";
+  companionStyle?: "email" | "note";
 }
 
 interface NotificationEvent {
@@ -324,6 +328,11 @@ const typeIcons: Record<string, { icon: React.ReactNode; bg: string; color: stri
     icon: <ThemeIcon emoji="📝" icon={<InfoIcon size={14} />} />,
     bg: "rgba(245, 158, 11, 0.15)",
     color: "rgb(245, 158, 11)",
+  },
+  companion_suggestion: {
+    icon: <ThemeIcon emoji="📬" icon={<InfoIcon size={14} />} />,
+    bg: "rgba(99, 102, 241, 0.15)",
+    color: "rgb(99, 102, 241)",
   },
   info: {
     icon: <ThemeIcon emoji="ℹ️" icon={<InfoIcon size={14} />} />,
