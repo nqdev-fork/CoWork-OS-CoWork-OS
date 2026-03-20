@@ -52,7 +52,7 @@ export class DailyBriefingService {
       priority_review: () => this.buildPriorities(workspaceId),
       upcoming_jobs: () => this.buildUpcomingJobs(workspaceId),
       open_loops: () => this.buildOpenLoops(workspaceId),
-      channel_digest: () => this.buildChannelDigest(workspaceId),
+      awareness_digest: () => this.buildAwarenessDigest(workspaceId),
       evolution_metrics: () => this.buildEvolutionMetrics(workspaceId),
     };
 
@@ -109,6 +109,72 @@ export class DailyBriefingService {
 
   // ── Section builders ────────────────────────────────────────────
 
+  private formatWorkspaceLabel(item: Any): string | null {
+    if (typeof item?.workspaceName === "string" && item.workspaceName.trim()) {
+      return item.workspaceName.trim();
+    }
+    if (typeof item?.workspaceId === "string" && item.workspaceId.trim()) {
+      return item.workspaceId.trim();
+    }
+    return null;
+  }
+
+  private prefixWorkspace(item: Any, text: string): string {
+    const label = this.formatWorkspaceLabel(item);
+    return label ? `[${label}] ${text}` : text;
+  }
+
+  private stripWorkspacePrefix(text: string): string {
+    return String(text || "")
+      .trim()
+      .replace(/^\[[^\]]+\]\s*/, "")
+      .replace(/\s+/g, " ");
+  }
+
+  private joinWorkspaceLabels(...items: Any[]): string | undefined {
+    const labels = new Set<string>();
+    for (const item of items) {
+      const label = this.formatWorkspaceLabel(item);
+      if (label) labels.add(label);
+    }
+    return labels.size > 0 ? [...labels].join(", ") : undefined;
+  }
+
+  private dedupeBriefingItems(
+    items: Any[],
+    keyFn: (item: Any) => string,
+    limit?: number,
+  ): Any[] {
+    const map = new Map<string, Any>();
+    for (const item of items) {
+      const key = keyFn(item);
+      if (!key) continue;
+      const existing = map.get(key);
+      if (!existing) {
+        map.set(key, { ...item });
+        continue;
+      }
+      const mergedWorkspaceName = this.joinWorkspaceLabels(existing, item);
+      if (mergedWorkspaceName) {
+        existing.workspaceName = mergedWorkspaceName;
+      }
+      if (!existing.detail && item.detail) existing.detail = item.detail;
+      if (!existing.link && item.link) existing.link = item.link;
+      if (!existing.status && item.status) existing.status = item.status;
+      if (typeof existing.relevanceScore === "number" && typeof item.relevanceScore === "number") {
+        if (item.relevanceScore > existing.relevanceScore) {
+          existing.relevanceScore = item.relevanceScore;
+        }
+      }
+      if (typeof existing.confidence === "number" && typeof item.confidence === "number") {
+        if (item.confidence > existing.confidence) {
+          existing.confidence = item.confidence;
+        }
+      }
+    }
+    return [...map.values()].slice(0, limit ?? map.size);
+  }
+
   private buildTaskSummary(workspaceId: string): BriefingSection {
     const since = Date.now() - TWENTY_FOUR_HOURS_MS;
     const tasks = this.deps.getRecentTasks(workspaceId, since);
@@ -132,38 +198,130 @@ export class DailyBriefingService {
       });
 
     // Top 5 recent completions
-    for (const t of completed.slice(0, 5)) {
-      items.push({ label: t.title, status: "completed", link: { taskId: t.id } });
+    for (const t of this.dedupeBriefingItems(
+      completed.slice(0, 20),
+      (item) => this.stripWorkspacePrefix(item.title || ""),
+      5,
+    )) {
+      items.push({
+        label: this.prefixWorkspace(t, t.title),
+        status: "completed",
+        link: { taskId: t.id },
+      });
     }
 
     return { type: "task_summary", title: "Task Summary (24h)", items, enabled: true };
   }
 
   private buildMemoryHighlights(workspaceId: string): BriefingSection {
-    const memories = this.deps.searchMemory(workspaceId, "recent learning insight", 5);
-    const items: BriefingItem[] = memories.map((m: Any) => ({
-      label: m.summary || m.content?.slice(0, 100) || "Memory item",
+    const memories = this.dedupeBriefingItems(
+      [
+        ...this.deps.searchMemory(workspaceId, "recent learning insight", 5),
+        ...this.deps.searchMemory(workspaceId, "preference correction workflow timing", 5),
+      ],
+      (item) =>
+        `${item.id || ""}::${this.stripWorkspacePrefix(item.summary || item.content || item.snippet || "")}`,
+      6,
+    );
+    const items: BriefingItem[] = this.dedupeBriefingItems(
+      memories.map((m: Any) => ({
+        ...m,
+        label: this.prefixWorkspace(m, m.summary || m.content?.slice(0, 100) || "Memory item"),
+      })),
+      (item) => this.stripWorkspacePrefix(item.label || item.summary || item.content || ""),
+      5,
+    ).map((m: Any) => ({
+      label: `${this.describeMemoryType(m.type)} ${m.label}`.trim(),
+      detail: [m.workspaceName ? `Workspaces: ${m.workspaceName}` : null, this.memoryTypeDetail(m.type)]
+        .filter(Boolean)
+        .join(" · ") || undefined,
       status: "info" as const,
     }));
     return { type: "memory_highlights", title: "Memory Highlights", items, enabled: true };
   }
 
   private buildSuggestions(workspaceId: string): BriefingSection {
-    const suggestions = this.deps.getActiveSuggestions(workspaceId);
-    const items: BriefingItem[] = suggestions.slice(0, 5).map((s: Any) => ({
-      label: s.title || s.description,
-      detail: s.description,
+    const suggestions = [...this.deps.getActiveSuggestions(workspaceId)].sort((a: Any, b: Any) => {
+      const urgencyScore = (value: string | undefined) =>
+        value === "high" ? 3 : value === "medium" ? 2 : value === "low" ? 1 : 0;
+      const deliveryScore = (value: string | undefined) =>
+        value === "nudge" ? 3 : value === "inbox" ? 2 : value === "briefing" ? 1 : 0;
+      const combinedA = urgencyScore(a.urgency) * 10 + deliveryScore(a.recommendedDelivery) * 5 + (a.confidence || 0);
+      const combinedB = urgencyScore(b.urgency) * 10 + deliveryScore(b.recommendedDelivery) * 5 + (b.confidence || 0);
+      return combinedB - combinedA;
+    });
+    const items: BriefingItem[] = this.dedupeBriefingItems(
+      suggestions.slice(0, 20).map((s: Any) => ({
+        ...s,
+        label: this.prefixWorkspace(s, s.title || s.description),
+      })),
+      (item) =>
+        `${this.stripWorkspacePrefix(item.label || item.title || "")}::${this.stripWorkspacePrefix(
+          item.detail || item.description || "",
+        )}`,
+      5,
+    ).map((s: Any) => ({
+      label: s.label,
+      detail: [
+        s.description || "",
+        s.recommendedDelivery ? `Delivery: ${s.recommendedDelivery}` : null,
+        typeof s.confidence === "number" ? `Confidence: ${Math.round(s.confidence * 100)}%` : null,
+        s.workspaceName ? `Workspaces: ${s.workspaceName}` : null,
+      ]
+        .filter(Boolean)
+        .join(" · "),
       status: "info" as const,
     }));
     return { type: "active_suggestions", title: "Active Suggestions", items, enabled: true };
+  }
+
+  private describeMemoryType(type: string | undefined): string {
+    switch (type) {
+      case "preference":
+        return "Preference:";
+      case "constraint":
+        return "Constraint:";
+      case "timing_preference":
+        return "Timing preference:";
+      case "workflow_pattern":
+        return "Workflow pattern:";
+      case "correction_rule":
+        return "Correction learned:";
+      default:
+        return "";
+    }
+  }
+
+  private memoryTypeDetail(type: string | undefined): string | undefined {
+    switch (type) {
+      case "preference":
+        return "Companion-learned preference";
+      case "constraint":
+        return "Companion-learned constraint";
+      case "timing_preference":
+        return "Attention and interruption pattern";
+      case "workflow_pattern":
+        return "Promoted reusable workflow signal";
+      case "correction_rule":
+        return "Suppression rule from user correction";
+      default:
+        return undefined;
+    }
   }
 
   private buildPriorities(workspaceId: string): BriefingSection {
     const raw = this.deps.getPriorities(workspaceId);
     if (!raw) return { type: "priority_review", title: "Priorities", items: [], enabled: true };
     const lines = raw.split("\n").filter((l) => l.trim() && !l.startsWith("#"));
-    const items: BriefingItem[] = lines.slice(0, 10).map((l) => ({
-      label: l.replace(/^[-*\d.]+\s*/, "").trim(),
+    const items: BriefingItem[] = this.dedupeBriefingItems(
+      lines.slice(0, 20).map((line: string) => ({
+        label: line.replace(/^[-*\d.]+\s*/, "").trim(),
+      })),
+      (item) => this.stripWorkspacePrefix(item.label || ""),
+      10,
+    ).map((item: Any) => ({
+      label: item.label,
+      detail: item.workspaceName ? `Workspaces: ${item.workspaceName}` : undefined,
       status: "info" as const,
     }));
     return { type: "priority_review", title: "Priorities", items, enabled: true };
@@ -176,8 +334,8 @@ export class DailyBriefingService {
         ? new Date(j.state.nextRunAtMs).toLocaleTimeString()
         : "—";
       return {
-        label: j.name || j.taskTitle || "Scheduled job",
-        detail: `Next: ${nextRun}`,
+        label: this.prefixWorkspace(j, j.name || j.taskTitle || "Scheduled job"),
+        detail: `${j.workspaceName ? `Workspace: ${j.workspaceName} · ` : ""}Next: ${nextRun}`,
         status: "pending" as const,
       };
     });
@@ -186,16 +344,94 @@ export class DailyBriefingService {
 
   private buildOpenLoops(workspaceId: string): BriefingSection {
     const loops = this.deps.getOpenLoops(workspaceId);
-    const items: BriefingItem[] = loops.slice(0, 8).map((l) => ({
-      label: l.replace(/^[-*]+\s*/, "").trim(),
+    const items: BriefingItem[] = this.dedupeBriefingItems(
+      loops.slice(0, 20).map((line: string) => ({
+        label: line.replace(/^[-*]+\s*/, "").trim(),
+      })),
+      (item) => this.stripWorkspacePrefix(item.label || ""),
+      8,
+    ).map((item: Any) => ({
+      label: item.label,
+      detail: item.workspaceName ? `Workspaces: ${item.workspaceName}` : undefined,
       status: "pending" as const,
     }));
     return { type: "open_loops", title: "Open Loops", items, enabled: true };
   }
 
-  private buildChannelDigest(_workspaceId: string): BriefingSection {
-    // Placeholder — channel digest requires deeper integration with gateway
-    return { type: "channel_digest", title: "Channel Digest", items: [], enabled: false };
+  private async buildAwarenessDigest(workspaceId: string): Promise<BriefingSection> {
+    try {
+      const summary = await this.deps.getAwarenessSummary?.(workspaceId);
+      const autonomyState = await this.deps.getAutonomyState?.(workspaceId);
+      const autonomyDecisions = (await this.deps.getAutonomyDecisions?.(workspaceId)) || [];
+      if (!summary) {
+        return { type: "awareness_digest", title: "Awareness Digest", items: [], enabled: true };
+      }
+
+      const items: BriefingItem[] = [];
+      if (summary.currentFocus) {
+        items.push({
+          label: `Current focus: ${summary.currentFocus}`,
+          status: "running",
+        });
+      }
+
+      for (const entry of summary.whatMattersNow?.slice(0, 4) || []) {
+        items.push({
+          label: entry.title,
+          detail: entry.detail,
+          status: entry.tags?.includes("deadline") ? "pending" : "info",
+        });
+      }
+
+      for (const entry of summary.dueSoon?.slice(0, 3) || []) {
+        items.push({
+          label: entry.title,
+          detail: entry.detail,
+          status: "pending",
+        });
+      }
+
+      for (const goal of autonomyState?.goals?.slice(0, 3) || []) {
+        items.push({
+          label: `Goal: ${goal.title}`,
+          detail: `Status ${goal.status}, confidence ${Math.round((goal.confidence || 0) * 100)}%`,
+          status: goal.status === "blocked" ? "failed" : "info",
+        });
+      }
+
+      for (const routine of autonomyState?.routines?.slice(0, 2) || []) {
+        items.push({
+          label: `Routine: ${routine.title}`,
+          detail: routine.description,
+          status: "info",
+        });
+      }
+
+      for (const decision of autonomyDecisions.slice(0, 3)) {
+        items.push({
+          label: `Next action: ${decision.title}`,
+          detail: decision.description,
+          status: decision.priority === "high" ? "pending" : "info",
+        });
+      }
+
+      const deduped = this.dedupeBriefingItems(
+        items,
+        (item) => `${this.stripWorkspacePrefix(item.label || "")}::${this.stripWorkspacePrefix(item.detail || "")}`,
+        10,
+      ).map((item: Any) => ({
+        label: item.label,
+        detail:
+          item.detail ||
+          (item.workspaceName ? `Workspaces: ${item.workspaceName}` : undefined),
+        status: item.status,
+      }));
+
+      return { type: "awareness_digest", title: "Awareness Digest", items: deduped, enabled: true };
+    } catch (error) {
+      this.log("[DailyBriefing] buildAwarenessDigest skipped:", error);
+      return { type: "awareness_digest", title: "Awareness Digest", items: [], enabled: true };
+    }
   }
 
   /** Max ms to wait for evolution metrics before skipping the section. */
