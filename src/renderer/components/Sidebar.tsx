@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect, useMemo, useCallback, Fragment } from "react";
-import { ChevronDown, ChevronRight, SlidersHorizontal, Cpu, EyeOff, AppWindow, Bell, HardDrive, Rows3, Server, Workflow } from "lucide-react";
-import { getEmojiIcon } from "../utils/emoji-icon-map";
+import { ChevronDown, ChevronRight, SlidersHorizontal, Cpu, EyeOff, AppWindow, Bell, HardDrive, Rows3, Server, Workflow, HeartPulse, Send } from "lucide-react";
+import { resolveTwinIcon } from "../utils/twin-icons";
 import { stripAllEmojis } from "../utils/emoji-replacer";
 import { Task, Workspace, UiDensity, InfraStatus } from "../../shared/types";
+import { isAutomatedTaskLike } from "../../shared/automated-task-detection";
 
 interface AgentRoleInfo {
   id: string;
@@ -28,9 +29,13 @@ interface SidebarProps {
   tasks: Task[];
   selectedTaskId: string | null;
   isHomeActive?: boolean;
+  isHealthActive?: boolean;
+  isDispatchActive?: boolean;
   completionAttentionTaskIds?: string[];
   onSelectTask: (id: string | null) => void;
   onOpenHome?: () => void;
+  onOpenHealth?: () => void;
+  onOpenDispatch?: () => void;
   onNewSession?: () => void;
   onOpenSettings: () => void;
   onOpenMissionControl: () => void;
@@ -79,18 +84,7 @@ export function getSessionMode(task: Task): SessionMode {
  *  directly). These are grouped into a collapsible "Automated" folder at the
  *  bottom of the sidebar so they don't push user sessions off screen. */
 export function isAutomatedSession(task: Task): boolean {
-  if (task.source === "manual") return false;
-  if (task.source === "cron" || task.source === "improvement") return true;
-  if (task.source === "hook") return false;
-  if (/^heartbeat:/i.test(String(task.title || "").trim())) return true;
-  if (task.source === "api") {
-    return Boolean(
-      task.companyId || task.goalId || task.projectId || task.issueId || task.heartbeatRunId,
-    );
-  }
-  return (
-    !!task.heartbeatRunId
-  );
+  return isAutomatedTaskLike(task);
 }
 
 const HIDDEN_FOCUSED_STATUSES: ReadonlySet<Task["status"]> = new Set(["failed", "cancelled"]);
@@ -203,9 +197,13 @@ export function Sidebar({
   tasks,
   selectedTaskId,
   isHomeActive = false,
+  isHealthActive = false,
+  isDispatchActive = false,
   completionAttentionTaskIds = [],
   onSelectTask,
   onOpenHome,
+  onOpenHealth,
+  onOpenDispatch,
   onNewSession,
   onOpenSettings,
   onOpenMissionControl,
@@ -224,6 +222,7 @@ export function Sidebar({
   const [agentRoles, setAgentRoles] = useState<Map<string, AgentRoleInfo>>(new Map());
   const [showFailedSessions, setShowFailedSessions] = useState(false);
   const [pinActionError, setPinActionError] = useState<string | null>(null);
+  const [archiveActionError, setArchiveActionError] = useState<string | null>(null);
   const [activeModeFilters, setActiveModeFilters] = useState<Set<SessionMode>>(new Set());
   const [showFilterBar] = useState(false);
   const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
@@ -636,6 +635,7 @@ export function Sidebar({
 
   const handleRenameClick = (e: React.MouseEvent, task: Task) => {
     e.stopPropagation();
+    e.preventDefault();
     setMenuOpenTaskId(null);
     setRenameTaskId(task.id);
     setRenameValue(task.title);
@@ -652,6 +652,7 @@ export function Sidebar({
 
   const handlePinClick = async (e: React.MouseEvent, task: Task) => {
     e.stopPropagation();
+    e.preventDefault();
     setMenuOpenTaskId(null);
     setPinActionError(null);
     try {
@@ -682,12 +683,27 @@ export function Sidebar({
 
   const handleArchiveClick = async (e: React.MouseEvent, taskId: string) => {
     e.stopPropagation();
+    e.preventDefault();
     setMenuOpenTaskId(null);
-    await window.electronAPI.deleteTask(taskId);
-    if (selectedTaskId === taskId) {
-      onSelectTask(null);
+    setArchiveActionError(null);
+    try {
+      await window.electronAPI.deleteTask(taskId);
+      if (selectedTaskId === taskId) {
+        onSelectTask(null);
+      }
+      onTasksChanged();
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to archive session. Please try again.";
+      console.error("Failed to archive task:", error);
+      setArchiveActionError(message);
+      if (pinActionErrorTimeoutRef.current !== null) {
+        window.clearTimeout(pinActionErrorTimeoutRef.current);
+      }
+      pinActionErrorTimeoutRef.current = window.setTimeout(() => {
+        setArchiveActionError(null);
+      }, 2500);
     }
-    onTasksChanged();
   };
 
   const toggleCollapse = (e: React.MouseEvent, taskId: string) => {
@@ -815,7 +831,7 @@ export function Sidebar({
     if (!task.parentTaskId) return null;
     const role = task.assignedAgentRoleId ? agentRoles.get(task.assignedAgentRoleId) : undefined;
     if (role?.icon) {
-      const Icon = getEmojiIcon(role.icon);
+      const Icon = resolveTwinIcon(role.icon);
       return (
         <span title={role.displayName}>
           <Icon
@@ -901,13 +917,19 @@ export function Sidebar({
     const treePrefix = depth > 0 ? (isLast ? "└─" : "├─") : "";
     const taskMode = depth === 0 ? getSessionMode(task) : null;
     const modeClass = taskMode && taskMode !== "standard" ? `session-mode-${taskMode}` : "";
+    const isChatSession =
+      task.agentConfig?.executionMode === "chat" || task.agentConfig?.conversationMode === "chat";
     const showCompletionAttention =
       task.status === "completed" &&
+      !isChatSession &&
       selectedTaskId !== task.id &&
       completionAttentionSet.has(task.id);
 
     return (
-      <div key={task.id} className="task-tree-node">
+      <div
+        key={task.id}
+        className={`task-tree-node ${menuOpenTaskId === task.id ? "task-item-menu-open" : ""}`}
+      >
         <div
           className={`task-item cli-task-item ${selectedTaskId === task.id ? "task-item-selected" : ""} ${isSubAgent ? "task-item-subagent" : ""} ${node.synthetic ? "task-item-group-root" : ""} ${modeClass} ${hasChildren ? "task-item-has-children" : ""}`}
           onClick={() => {
@@ -1063,33 +1085,71 @@ export function Sidebar({
                   className="task-item-menu cli-task-menu"
                   role="menu"
                   aria-label="Session actions"
+                  onClick={(e) => e.stopPropagation()}
+                  onMouseDown={(e) => e.stopPropagation()}
                 >
                   <button
+                    type="button"
                     className="task-item-menu-option cli-menu-option"
                     role="menuitem"
                     data-menu-option="rename"
-                    onClick={(e) => handleRenameClick(e, task)}
-                    onKeyDown={(e) => handleMenuItemKeyDown(e, task.id)}
+                    onMouseDown={(e) => {
+                      if (e.button === 0) {
+                        e.preventDefault();
+                        handleRenameClick(e as unknown as React.MouseEvent, task);
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        handleRenameClick(e as unknown as React.MouseEvent, task);
+                      }
+                      handleMenuItemKeyDown(e, task.id);
+                    }}
                   >
                     <span className="cli-menu-prefix">&gt;</span>
                     rename
                   </button>
                   <button
+                    type="button"
                     className="task-item-menu-option cli-menu-option"
                     role="menuitem"
                     data-menu-option="pin"
-                    onClick={(e) => handlePinClick(e, task)}
-                    onKeyDown={(e) => handleMenuItemKeyDown(e, task.id)}
+                    onMouseDown={(e) => {
+                      if (e.button === 0) {
+                        e.preventDefault();
+                        handlePinClick(e as unknown as React.MouseEvent, task);
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        handlePinClick(e as unknown as React.MouseEvent, task);
+                      }
+                      handleMenuItemKeyDown(e, task.id);
+                    }}
                   >
                     <span className="cli-menu-prefix">&gt;</span>
                     {task.pinned ? "unpin" : "pin"}
                   </button>
                   <button
+                    type="button"
                     className="task-item-menu-option task-item-menu-option-danger cli-menu-option cli-menu-danger"
                     role="menuitem"
                     data-menu-option="archive"
-                    onClick={(e) => handleArchiveClick(e, task.id)}
-                    onKeyDown={(e) => handleMenuItemKeyDown(e, task.id)}
+                    onMouseDown={(e) => {
+                      if (e.button === 0) {
+                        e.preventDefault();
+                        handleArchiveClick(e as unknown as React.MouseEvent, task.id);
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        handleArchiveClick(e as unknown as React.MouseEvent, task.id);
+                      }
+                      handleMenuItemKeyDown(e, task.id);
+                    }}
                   >
                     <span className="cli-menu-prefix">&gt;</span>
                     archive
@@ -1190,6 +1250,42 @@ export function Sidebar({
                   <MacMiniIcon size={16} />
                 </span>
                 <span>Devices</span>
+              </span>
+            </span>
+          </button>
+
+          <button
+            type="button"
+            className={`new-task-btn cli-new-task-btn cli-action-btn sidebar-home-btn ${isHealthActive ? "active" : ""}`}
+            onClick={onOpenHealth}
+            aria-pressed={isHealthActive}
+            title="Health"
+          >
+            <span className="cli-btn-text">
+              <span className="terminal-only">health</span>
+              <span className="modern-only cli-new-task-modern-label">
+                <span className="sidebar-home-btn-icon" aria-hidden="true" style={{ display: 'flex' }}>
+                  <HeartPulse size={16} strokeWidth={2} style={{ display: 'block' }} />
+                </span>
+                <span>Health</span>
+              </span>
+            </span>
+          </button>
+
+          <button
+            type="button"
+            className={`new-task-btn cli-new-task-btn cli-action-btn sidebar-home-btn ${isDispatchActive ? "active" : ""}`}
+            onClick={onOpenDispatch}
+            aria-pressed={isDispatchActive}
+            title="Dispatch"
+          >
+            <span className="cli-btn-text">
+              <span className="terminal-only">dispatch</span>
+              <span className="modern-only cli-new-task-modern-label">
+                <span className="sidebar-home-btn-icon" aria-hidden="true" style={{ display: 'flex' }}>
+                  <Send size={16} strokeWidth={2} style={{ display: 'block' }} />
+                </span>
+                <span>Dispatch</span>
               </span>
             </span>
           </button>
@@ -1308,9 +1404,9 @@ export function Sidebar({
               </div>
             </div>
 
-            {pinActionError && (
+            {(pinActionError || archiveActionError) && (
               <div className="cli-sidebar-error" role="alert" style={{ marginTop: '4px', marginLeft: '4px', marginRight: '4px' }}>
-                {pinActionError}
+                {pinActionError || archiveActionError}
               </div>
             )}
 
