@@ -80,6 +80,7 @@ import { PlaybookService } from "../memory/PlaybookService";
 import { UserProfileService } from "../memory/UserProfileService";
 import { RelationshipMemoryService } from "../memory/RelationshipMemoryService";
 import { AdaptiveStyleEngine } from "../memory/AdaptiveStyleEngine";
+import { getAwarenessService } from "../awareness/AwarenessService";
 import { PersonalityManager } from "../settings/personality-manager";
 import { IntentRoute, IntentRouter } from "./strategy/IntentRouter";
 import { DerivedTaskStrategy, TaskStrategyService } from "./strategy/TaskStrategyService";
@@ -3297,7 +3298,7 @@ export class AgentDaemon extends EventEmitter {
           (typeof payload?.message === "string" ? payload.message : "") ||
           (typeof payload?.content === "string" ? payload.content : "");
         if (text) {
-          UserProfileService.ingestUserMessage(text, taskId);
+          getAwarenessService().captureConversation(text, task.workspaceId, taskId);
           // Adaptive style observation — learns communication patterns from user messages
           AdaptiveStyleEngine.observe(text);
 
@@ -3331,7 +3332,7 @@ export class AgentDaemon extends EventEmitter {
       } else if (type === "user_feedback") {
         const feedbackDecision = typeof payload?.decision === "string" ? payload.decision : undefined;
         const feedbackReason = typeof payload?.reason === "string" ? payload.reason : undefined;
-        UserProfileService.ingestUserFeedback(feedbackDecision, feedbackReason, taskId);
+        getAwarenessService().captureFeedback(feedbackReason, task.workspaceId, taskId);
         // Adaptive style observation — learns from explicit feedback signals
         AdaptiveStyleEngine.observeFeedback(feedbackDecision, feedbackReason);
       }
@@ -4937,6 +4938,40 @@ export class AgentDaemon extends EventEmitter {
       return;
     }
 
+    const isChatSession =
+      existingTask.agentConfig?.executionMode === "chat" ||
+      existingTask.agentConfig?.conversationMode === "chat";
+    if (isChatSession) {
+      const completedAt = Date.now();
+      this.taskRepo.update(taskId, {
+        status: "completed",
+        completedAt,
+        error: null,
+        terminalStatus: undefined,
+        failureClass: undefined,
+        resultSummary: undefined,
+        bestKnownOutcome: undefined,
+        budgetUsage: metadata?.budgetUsage,
+        coreOutcome: undefined,
+        dependencyOutcome: undefined,
+        failureDomains: undefined,
+        stopReasons: undefined,
+      });
+      this.clearRetryState(taskId);
+      this.clearTimelineTaskState(taskId);
+      const cached = this.activeTasks.get(taskId);
+      if (cached) {
+        cached.status = "completed";
+        cached.lastAccessed = Date.now();
+      }
+      this.logEvent(taskId, "task_status", {
+        status: "completed",
+        message: resultSummary || "Chat turn completed",
+      });
+      this.queueManager.onTaskFinished(taskId);
+      return;
+    }
+
     const normalizeStepIdForComparison = (raw: string): string =>
       String(raw || "")
         .trim()
@@ -5665,6 +5700,12 @@ export class AgentDaemon extends EventEmitter {
             existingTask.source ?? "manual",
           );
         }
+        getAwarenessService().captureTaskCompletion(
+          existingTask.workspaceId,
+          existingTask.title,
+          typeof updates.resultSummary === "string" ? updates.resultSummary : undefined,
+          taskId,
+        );
       }
     } catch (error) {
       console.warn("[AgentDaemon] Failed to record relationship milestone:", error);
