@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { AlertTriangle } from "lucide-react";
 import { ConnectorSetupModal, ConnectorProvider } from "./ConnectorSetupModal";
 import { ConnectorEnvModal, ConnectorEnvField } from "./ConnectorEnvModal";
+import { ConnectorProfileView } from "./ConnectorProfileView";
 import { NotionSettings } from "./NotionSettings";
 import { BoxSettings } from "./BoxSettings";
 import { OneDriveSettings } from "./OneDriveSettings";
@@ -58,6 +58,42 @@ const SHIPPED_CONNECTOR_IDS = new Set([
   "resend",
   "google-workspace",
   "discord",
+  "figma",
+  "vercel",
+  "monday",
+  "miro",
+  "supabase",
+  "excalidraw",
+  "stripe",
+  "huggingface",
+  "ahrefs",
+  "mermaid-chart",
+  "cloudflare",
+  "make",
+  "clinical-trials",
+  "smartsheet",
+  "netlify",
+  "airtable",
+  "paypal",
+  "square",
+  "attio",
+  "honeycomb",
+  "calcom",
+  "cloudinary",
+  "tavily",
+  "tldraw",
+  "amplitude",
+  "clerk",
+  "mem",
+  "grafana",
+  "mailtrap",
+  "socket",
+  "metabase",
+  "shadcn-ui",
+  "growthbook",
+  "drafts",
+  "fantastical",
+  "tomba",
 ]);
 
 const CONNECTORS: ConnectorDefinition[] = [
@@ -169,6 +205,339 @@ const CONNECTORS: ConnectorDefinition[] = [
       { key: "DISCORD_GUILD_ID", label: "Default Guild ID (optional)" },
     ],
   },
+  {
+    key: "figma",
+    name: "Figma",
+    registryId: "figma",
+    description: "Generate diagrams and better code from Figma context.",
+    supportsOAuth: false,
+    envFields: [{ key: "FIGMA_ACCESS_TOKEN", label: "Access Token", type: "password" }],
+  },
+  {
+    key: "vercel",
+    name: "Vercel",
+    registryId: "vercel",
+    description: "Analyze, debug, and manage projects and deployments.",
+    supportsOAuth: false,
+    envFields: [{ key: "VERCEL_TOKEN", label: "Token", type: "password" }],
+  },
+  {
+    key: "monday",
+    name: "monday.com",
+    registryId: "monday",
+    description: "Manage projects, boards, and workflows in monday.com.",
+    supportsOAuth: false,
+    envFields: [{ key: "MONDAY_API_TOKEN", label: "API Token", type: "password" }],
+  },
+  {
+    key: "miro",
+    name: "Miro",
+    registryId: "miro",
+    description: "Access and create new content on Miro boards.",
+    supportsOAuth: false,
+    envFields: [{ key: "MIRO_OAUTH_TOKEN", label: "OAuth Token", type: "password" }],
+  },
+  {
+    key: "supabase",
+    name: "Supabase",
+    registryId: "supabase",
+    description: "Manage databases, authentication, and storage.",
+    supportsOAuth: false,
+    envFields: [
+      { key: "SUPABASE_URL", label: "Project URL", placeholder: "https://xxx.supabase.co" },
+      { key: "SUPABASE_SERVICE_ROLE_KEY", label: "Service Role Key", type: "password" },
+    ],
+  },
+  {
+    key: "excalidraw",
+    name: "Excalidraw",
+    registryId: "excalidraw",
+    description: "MCP for creating interactive hand-drawn diagrams in Excalidraw.",
+    supportsOAuth: false,
+  },
+  {
+    key: "stripe",
+    name: "Stripe",
+    registryId: "stripe",
+    description: "Payment processing and financial infrastructure tools.",
+    supportsOAuth: false,
+    envFields: [{ key: "STRIPE_SECRET_KEY", label: "Secret Key", type: "password" }],
+  },
+  {
+    key: "huggingface",
+    name: "Hugging Face",
+    registryId: "huggingface",
+    description: "Access the Hugging Face Hub and thousands of Gradio Apps.",
+    supportsOAuth: false,
+    envFields: [{ key: "HUGGINGFACE_API_KEY", label: "API Key", type: "password" }],
+  },
+  {
+    key: "ahrefs",
+    name: "Ahrefs",
+    registryId: "ahrefs",
+    description: "SEO & AI search analytics.",
+    supportsOAuth: false,
+    envFields: [{ key: "API_KEY", label: "API Key", type: "password" }],
+  },
+  {
+    key: "mermaid-chart",
+    name: "Mermaid Chart",
+    registryId: "mermaid-chart",
+    description: "Validates Mermaid syntax, renders diagrams as high-quality SVG.",
+    supportsOAuth: false,
+  },
+  {
+    key: "cloudflare",
+    name: "Cloudflare Developer Platform",
+    registryId: "cloudflare",
+    description: "Build applications with compute, storage, and AI.",
+    supportsOAuth: false,
+  },
+  {
+    key: "make",
+    name: "Make",
+    registryId: "make",
+    description: "Run Make scenarios and manage your Make account.",
+    supportsOAuth: false,
+    envFields: [
+      { key: "MAKE_API_KEY", label: "API Key", type: "password" },
+      { key: "MAKE_TEAM_ID", label: "Team ID (optional)", placeholder: "For deployment" },
+    ],
+  },
+  {
+    key: "clinical-trials",
+    name: "Clinical Trials",
+    registryId: "clinical-trials",
+    description: "Access ClinicalTrials.gov data.",
+    supportsOAuth: false,
+  },
+  {
+    key: "smartsheet",
+    name: "Smartsheet",
+    registryId: "smartsheet",
+    description: "Analyze and manage Smartsheet data with Claude.",
+    supportsOAuth: false,
+    envFields: [{ key: "SMARTSHEET_API_KEY", label: "API Token", type: "password" }],
+  },
+  {
+    key: "netlify",
+    name: "Netlify",
+    registryId: "netlify",
+    description: "Create, deploy, manage, and secure websites on Netlify.",
+    supportsOAuth: false,
+    envFields: [
+      {
+        key: "NETLIFY_PERSONAL_ACCESS_TOKEN",
+        label: "Personal Access Token (optional)",
+        type: "password",
+      },
+    ],
+  },
+  {
+    key: "airtable",
+    name: "Airtable",
+    registryId: "airtable",
+    description: "Bring your structured data to Claude.",
+    supportsOAuth: false,
+    envFields: [{ key: "AIRTABLE_API_KEY", label: "Personal Access Token", type: "password" }],
+  },
+  {
+    key: "paypal",
+    name: "PayPal",
+    registryId: "paypal",
+    description: "Access PayPal payments platform.",
+    supportsOAuth: false,
+    envFields: [
+      { key: "PAYPAL_ACCESS_TOKEN", label: "Access Token", type: "password" },
+      {
+        key: "PAYPAL_ENVIRONMENT",
+        label: "Environment",
+        placeholder: "SANDBOX or PRODUCTION",
+      },
+    ],
+  },
+  {
+    key: "square",
+    name: "Square",
+    registryId: "square",
+    description: "Search and manage transaction, merchant, and payment data.",
+    supportsOAuth: false,
+    envFields: [
+      { key: "ACCESS_TOKEN", label: "Square Access Token", type: "password" },
+      { key: "SANDBOX", label: "Sandbox mode", placeholder: "true for testing" },
+    ],
+  },
+  {
+    key: "attio",
+    name: "Attio",
+    registryId: "attio",
+    description: "Search, manage, and update your Attio CRM from Claude.",
+    supportsOAuth: false,
+    envFields: [{ key: "ATTIO_API_KEY", label: "API Key", type: "password" }],
+  },
+  {
+    key: "honeycomb",
+    name: "Honeycomb",
+    registryId: "honeycomb",
+    description: "Query and explore observability data and SLOs.",
+    supportsOAuth: false,
+    envFields: [{ key: "HONEYCOMB_API_KEY", label: "API Key", type: "password" }],
+  },
+  {
+    key: "calcom",
+    name: "Cal.com",
+    registryId: "calcom",
+    description: "Manage event types, availability, and bookings.",
+    supportsOAuth: false,
+    envFields: [{ key: "CAL_API_KEY", label: "API Key", type: "password" }],
+  },
+  {
+    key: "cloudinary",
+    name: "Cloudinary",
+    registryId: "cloudinary",
+    description: "Manage, transform and deliver your images & videos.",
+    supportsOAuth: false,
+    envFields: [
+      { key: "CLOUDINARY_CLOUD_NAME", label: "Cloud Name" },
+      { key: "CLOUDINARY_API_KEY", label: "API Key", type: "password" },
+      { key: "CLOUDINARY_API_SECRET", label: "API Secret", type: "password" },
+    ],
+  },
+  {
+    key: "tavily",
+    name: "Tavily",
+    registryId: "tavily",
+    description: "Connect your AI agents to the web. Real-time search, extract, map, and crawl.",
+    supportsOAuth: false,
+    envFields: [{ key: "TAVILY_API_KEY", label: "API Key", type: "password" }],
+  },
+  {
+    key: "tldraw",
+    name: "tldraw",
+    registryId: "tldraw",
+    description: "Let Claude sketch, draw, and diagram. Manage local .tldr canvas files.",
+    supportsOAuth: false,
+    envFields: [
+      {
+        key: "TLDRAW_DIR",
+        label: "tldraw directory",
+        placeholder: "~/.tldraw (default)",
+      },
+    ],
+  },
+  {
+    key: "amplitude",
+    name: "Amplitude",
+    registryId: "amplitude",
+    description: "Search, access, and get insights on your Amplitude analytics data.",
+    supportsOAuth: false,
+    envFields: [{ key: "AMPLITUDE_API_KEY", label: "API Key", type: "password" }],
+  },
+  {
+    key: "clerk",
+    name: "Clerk",
+    registryId: "clerk",
+    description: "Add authentication, organizations, and billing. Manage users and sessions.",
+    supportsOAuth: false,
+    envFields: [{ key: "CLERK_API_KEY", label: "Secret Key", type: "password" }],
+  },
+  {
+    key: "mem",
+    name: "Mem",
+    registryId: "mem",
+    description: "The AI notebook for everything on your mind. Notes, collections, and search.",
+    supportsOAuth: false,
+    envFields: [{ key: "MEM_API_KEY", label: "API Key", type: "password" }],
+  },
+  {
+    key: "grafana",
+    name: "Grafana",
+    registryId: "grafana",
+    description: "Access Grafana dashboards, datasources, alerting, and more.",
+    supportsOAuth: false,
+    envFields: [
+      { key: "GRAFANA_URL", label: "Grafana URL", placeholder: "https://your-grafana.com" },
+      {
+        key: "GRAFANA_SERVICE_ACCOUNT_TOKEN",
+        label: "Service Account Token",
+        type: "password",
+      },
+    ],
+  },
+  {
+    key: "mailtrap",
+    name: "Mailtrap",
+    registryId: "mailtrap",
+    description: "Send emails and manage templates using Mailtrap.",
+    supportsOAuth: false,
+    envFields: [
+      { key: "MAILTRAP_API_TOKEN", label: "API Token", type: "password" },
+      { key: "DEFAULT_FROM_EMAIL", label: "Default From Email" },
+      { key: "MAILTRAP_ACCOUNT_ID", label: "Account ID" },
+    ],
+  },
+  {
+    key: "socket",
+    name: "Socket",
+    registryId: "socket",
+    description: "MCP server for scanning dependencies. Check security scores for npm, PyPI, and more.",
+    supportsOAuth: false,
+    envFields: [{ key: "SOCKET_API_KEY", label: "API Key (optional for public)", type: "password" }],
+  },
+  {
+    key: "metabase",
+    name: "Metabase",
+    registryId: "metabase",
+    description: "High-performance MCP server for Metabase analytics data access.",
+    supportsOAuth: false,
+    envFields: [
+      { key: "METABASE_URL", label: "Metabase URL", placeholder: "https://your-metabase.com" },
+      { key: "METABASE_API_KEY", label: "API Key", type: "password" },
+    ],
+  },
+  {
+    key: "shadcn-ui",
+    name: "Shadcn UI",
+    registryId: "shadcn-ui",
+    description: "MCP server for shadcn/ui components. Browse, search, and install components.",
+    supportsOAuth: false,
+  },
+  {
+    key: "growthbook",
+    name: "GrowthBook",
+    registryId: "growthbook",
+    description: "Feature flags and A/B testing. Create experiments, manage SDK connections.",
+    supportsOAuth: false,
+    envFields: [
+      { key: "GB_API_KEY", label: "API Key", type: "password" },
+      { key: "GB_EMAIL", label: "Email" },
+    ],
+  },
+  {
+    key: "drafts",
+    name: "Drafts",
+    registryId: "drafts",
+    description: "MCP server for the Drafts app on macOS. Create, search, and manage drafts.",
+    supportsOAuth: false,
+  },
+  {
+    key: "fantastical",
+    name: "Fantastical",
+    registryId: "fantastical",
+    description: "Read events and tasks, create new items from Fantastical calendar (macOS).",
+    supportsOAuth: false,
+  },
+  {
+    key: "tomba",
+    name: "Tomba",
+    registryId: "tomba",
+    description: "MCP server for Tomba email finder and verification API.",
+    supportsOAuth: false,
+    envFields: [
+      { key: "TOMBA_API_KEY", label: "API Key", type: "password" },
+      { key: "TOMBA_SECRET_KEY", label: "Secret Key", type: "password" },
+    ],
+  },
 ];
 
 interface IntegrationDefinition {
@@ -277,11 +646,62 @@ function getConnectorCategory(connector: ConnectorDefinition): Exclude<Connector
   if (["salesforce", "hubspot", "zendesk"].includes(connector.key)) {
     return "crm";
   }
-  if (["discord", "resend"].includes(connector.key)) {
+  if (["discord", "resend", "mailtrap"].includes(connector.key)) {
     return "communication";
   }
-  if (["jira", "linear", "asana", "servicenow", "okta"].includes(connector.key)) {
+  if (
+    [
+      "jira",
+      "linear",
+      "asana",
+      "servicenow",
+      "okta",
+      "figma",
+      "vercel",
+      "monday",
+      "excalidraw",
+      "supabase",
+      "netlify",
+      "honeycomb",
+      "tavily",
+      "amplitude",
+      "clerk",
+      "grafana",
+      "socket",
+      "metabase",
+      "shadcn-ui",
+      "growthbook",
+      "tomba",
+    ].includes(connector.key)
+  ) {
     return "devtools";
+  }
+  if (
+    [
+      "miro",
+      "huggingface",
+      "mermaid-chart",
+      "make",
+      "smartsheet",
+      "airtable",
+      "calcom",
+      "cloudinary",
+      "tldraw",
+      "mem",
+      "drafts",
+      "fantastical",
+    ].includes(connector.key)
+  ) {
+    return "productivity";
+  }
+  if (["paypal", "stripe", "square", "attio"].includes(connector.key)) {
+    return "crm";
+  }
+  if (["ahrefs", "cloudflare"].includes(connector.key)) {
+    return "devtools";
+  }
+  if (["clinical-trials"].includes(connector.key)) {
+    return "legal";
   }
   return "productivity";
 }
@@ -374,6 +794,15 @@ export function ConnectorsSettings() {
       return registryConnectorIds.has(connector.registryId);
     });
   }, [settings, serverStatuses, registryConnectorIds]);
+
+  // Sync detail view when underlying data changes (e.g. after MCP update)
+  useEffect(() => {
+    if (!detailConnector || !connectorRows.length) return;
+    const row = connectorRows.find((r) => r.connector.key === detailConnector.connector.key);
+    if (row && (row.config !== detailConnector.config || row.status !== detailConnector.status)) {
+      setDetailConnector({ connector: row.connector, config: row.config, status: row.status });
+    }
+  }, [connectorRows, detailConnector]);
 
   const handleInstall = async (connector: ConnectorDefinition) => {
     try {
@@ -612,7 +1041,7 @@ export function ConnectorsSettings() {
       )}
 
       {detailConnector && (
-        <ConnectorDetailModal
+        <ConnectorProfileView
           connector={detailConnector.connector}
           config={detailConnector.config}
           status={detailConnector.status}
@@ -629,6 +1058,7 @@ export function ConnectorsSettings() {
           onOpenEnvModal={(id, name, env, fields) =>
             setEnvModal({ serverId: id, serverName: name, env, fields })
           }
+          onUpdate={loadData}
         />
       )}
 
@@ -714,184 +1144,3 @@ export function ConnectorsSettings() {
   );
 }
 
-interface ConnectorDetailModalProps {
-  connector: ConnectorDefinition;
-  config: MCPServerConfig | undefined;
-  status: MCPServerStatus | undefined;
-  installingId: string | null;
-  connectingServer: string | null;
-  connectionErrors: Record<string, string>;
-  onClose: () => void;
-  onInstall: (c: ConnectorDefinition) => void;
-  onConnect: (id: string) => void;
-  onDisconnect: (id: string) => void;
-  onOpenSetup: (
-    p: ConnectorProvider,
-    id: string,
-    name: string,
-    env?: Record<string, string>
-  ) => void;
-  onOpenEnvModal: (
-    id: string,
-    name: string,
-    env: Record<string, string> | undefined,
-    fields: ConnectorEnvField[]
-  ) => void;
-}
-
-function ConnectorDetailModal({
-  connector,
-  config,
-  status,
-  installingId,
-  connectingServer,
-  connectionErrors,
-  onClose,
-  onInstall,
-  onConnect,
-  onDisconnect,
-  onOpenSetup,
-  onOpenEnvModal,
-}: ConnectorDetailModalProps) {
-  const isInstalled = Boolean(config);
-  const serverStatus = status?.status || "disconnected";
-  const isConnected = serverStatus === "connected";
-  const isConnecting = connectingServer === config?.id;
-  const errorMsg = config ? connectionErrors[config.id] || status?.error : undefined;
-
-  return (
-    <div className="mcp-modal-overlay" onClick={onClose}>
-      <div className="cm-detail-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="cm-detail-header">
-          <div
-            className="cm-detail-icon"
-            style={{ backgroundColor: getConnectorColor(connector.name) }}
-          >
-            {connector.name.charAt(0).toUpperCase()}
-          </div>
-          <div className="cm-detail-title">
-            <h2>{connector.name}</h2>
-            <p className="cm-detail-subtitle">{connector.description}</p>
-          </div>
-          <div className="cm-detail-header-right">
-            {isInstalled ? (
-              <span
-                className={`cm-connection-badge cm-connection-badge--${serverStatus}`}
-                style={{ color: getStatusColor(serverStatus) }}
-              >
-                <span
-                  className="mcp-status-dot"
-                  style={{ backgroundColor: getStatusColor(serverStatus) }}
-                />
-                {getStatusText(serverStatus)}
-              </span>
-            ) : (
-              <span className="cm-connection-badge">Not installed</span>
-            )}
-          </div>
-          <button className="mcp-modal-close" onClick={onClose}>
-            ×
-          </button>
-        </div>
-
-        <div className="cm-detail-body">
-          {errorMsg && (
-            <div className="mcp-server-error">
-              <span className="mcp-error-icon">
-                <AlertTriangle size={14} strokeWidth={2} />
-              </span>
-              {errorMsg}
-            </div>
-          )}
-
-          <div className="cm-detail-section">
-            <h4 className="cm-detail-section-title">Connection</h4>
-            <div className="cm-detail-actions">
-              {!isInstalled ? (
-                <button
-                  className="button-primary button-small"
-                  onClick={() => onInstall(connector)}
-                  disabled={installingId === connector.registryId}
-                >
-                  {installingId === connector.registryId ? "Installing..." : "Install connector"}
-                </button>
-              ) : (
-                <>
-                  {isConnected ? (
-                    <button
-                      className="button-secondary button-small"
-                      onClick={() => onDisconnect(config!.id)}
-                      disabled={isConnecting}
-                    >
-                      {isConnecting ? "Disconnecting..." : "Disconnect"}
-                    </button>
-                  ) : (
-                    <button
-                      className="button-primary button-small"
-                      onClick={() => onConnect(config!.id)}
-                      disabled={isConnecting}
-                    >
-                      {isConnecting ? "Connecting..." : "Connect"}
-                    </button>
-                  )}
-
-                  {connector.supportsOAuth && connector.provider && (
-                    <button
-                      className="button-primary button-small"
-                      onClick={() =>
-                        onOpenSetup(connector.provider!, config!.id, config!.name, config!.env)
-                      }
-                    >
-                      OAuth Setup
-                    </button>
-                  )}
-
-                  {!connector.supportsOAuth && connector.envFields && (
-                    <button
-                      className="button-secondary button-small"
-                      onClick={() =>
-                        onOpenEnvModal(config!.id, config!.name, config!.env, connector.envFields!)
-                      }
-                    >
-                      Configure credentials
-                    </button>
-                  )}
-                </>
-              )}
-            </div>
-          </div>
-
-          <div className="cm-detail-section">
-            <h4 className="cm-detail-section-title">Overview</h4>
-            <p className="cm-detail-overview">{connector.description}</p>
-            <ul className="cm-detail-overview-bullets">
-              <li>Auth method: {connector.supportsOAuth ? "OAuth 2.0" : "API credentials"}</li>
-              {connector.envFields && connector.envFields.length > 0 && (
-                <li>
-                  Required fields: {connector.envFields.map((f) => f.label).join(", ")}
-                </li>
-              )}
-              {status?.tools && status.tools.length > 0 && (
-                <li>{status.tools.length} tools available</li>
-              )}
-            </ul>
-          </div>
-
-          {isConnected && status?.tools && status.tools.length > 0 && (
-            <div className="cm-detail-section">
-              <h4 className="cm-detail-section-title">Available tools</h4>
-              <ul className="cm-tools-list">
-                {status.tools.map((tool) => (
-                  <li key={tool.name} className="cm-tools-item">
-                    <span className="cm-tools-check">✓</span>
-                    <span className="cm-tools-name">{tool.name}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
