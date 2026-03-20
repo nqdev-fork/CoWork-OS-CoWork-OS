@@ -14,7 +14,7 @@ vi.mock("../UserProfileService", () => ({
         {
           id: "f1",
           category: "identity",
-          value: "Preferred name: Mesut",
+          value: "Preferred name: Alice",
           confidence: 0.95,
           source: "conversation",
           pinned: true,

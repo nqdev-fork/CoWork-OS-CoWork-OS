@@ -784,7 +784,7 @@ describe("ImprovementLoopService", () => {
     const observedWorkspace = makeWorkspace({
       id: "workspace-observed",
       name: "new",
-      path: "/Users/mesut/Desktop/new",
+      path: "/tmp/new",
     });
     const coworkWorkspace = makeWorkspace({
       id: "workspace-cowork",

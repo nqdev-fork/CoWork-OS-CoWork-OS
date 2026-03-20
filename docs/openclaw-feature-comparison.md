@@ -235,12 +235,12 @@ If the goal is a feature-for-feature comparison against the provided list:
 
 ### OpenClaw
 
-- `/Users/mesut/Downloads/openclaw-compare/README.md`
-- `/Users/mesut/Downloads/openclaw-compare/docs/concepts/memory.md`
-- `/Users/mesut/Downloads/openclaw-compare/docs/concepts/compaction.md`
-- `/Users/mesut/Downloads/openclaw-compare/docs/gateway/heartbeat.md`
-- `/Users/mesut/Downloads/openclaw-compare/docs/tools/clawhub.md`
-- `/Users/mesut/Downloads/openclaw-compare/docs/concepts/system-prompt.md`
-- `/Users/mesut/Downloads/openclaw-compare/src/agents/tools/sessions-history-tool.ts`
-- `/Users/mesut/Downloads/openclaw-compare/src/agents/tools/sessions-access.ts`
-- `/Users/mesut/Downloads/openclaw-compare/SECURITY.md`
+- `/tmp/openclaw-compare/README.md`
+- `/tmp/openclaw-compare/docs/concepts/memory.md`
+- `/tmp/openclaw-compare/docs/concepts/compaction.md`
+- `/tmp/openclaw-compare/docs/gateway/heartbeat.md`
+- `/tmp/openclaw-compare/docs/tools/clawhub.md`
+- `/tmp/openclaw-compare/docs/concepts/system-prompt.md`
+- `/tmp/openclaw-compare/src/agents/tools/sessions-history-tool.ts`
+- `/tmp/openclaw-compare/src/agents/tools/sessions-access.ts`
+- `/tmp/openclaw-compare/SECURITY.md`

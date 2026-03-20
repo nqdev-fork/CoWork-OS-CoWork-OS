@@ -52,7 +52,7 @@ describe("step-contract write intent", () => {
   it("treats lock/define/set style artifact directives as write intent", () => {
     expect(
       descriptionHasWriteIntent(
-        "Lock requirements in /Users/mesut/Desktop/linux/coworkos/requirements.md with distro defaults.",
+        "Lock requirements in /tmp/linux/coworkos/requirements.md with distro defaults.",
       ),
     ).toBe(true);
   });
@@ -60,12 +60,12 @@ describe("step-contract write intent", () => {
   it("treats passive saved-as artifact phrasing as write intent", () => {
     expect(
       descriptionHasWriteIntent(
-        "Synthesize the findings into a report saved as `/Users/mesut/Desktop/new/ai-agent-trends-2026-03-08.md`.",
+        "Synthesize the findings into a report saved as `/tmp/new/ai-agent-trends-2026-03-08.md`.",
       ),
     ).toBe(true);
     expect(
       descriptionHasStrongWriteIntent(
-        "Synthesize the findings into a report saved as `/Users/mesut/Desktop/new/ai-agent-trends-2026-03-08.md`.",
+        "Synthesize the findings into a report saved as `/tmp/new/ai-agent-trends-2026-03-08.md`.",
       ),
     ).toBe(true);
   });

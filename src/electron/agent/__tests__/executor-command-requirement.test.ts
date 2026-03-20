@@ -9,7 +9,7 @@ describe("TaskExecutor command execution requirement detection", () => {
 
     const prompt = [
       "This is the azure VM private address but I cannot connect to it",
-      "mesut@host % ssh a_mozsoy@10.213.136.68",
+      "alice@host % ssh user@10.213.136.68",
       "Connection closed by 10.213.136.68 port 22",
       "Zscaler is open on my mac",
     ].join("\n");

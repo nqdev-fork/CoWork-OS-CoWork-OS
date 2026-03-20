@@ -77,7 +77,7 @@ bounded_research=true
   it("routes SSH connectivity troubleshooting prompts to execution in operations domain", () => {
     const prompt = [
       "This is the azure VM private address but I cannot connect to it",
-      "mesut@host % ssh a_mozsoy@10.213.136.68",
+      "alice@host % ssh user@10.213.136.68",
       "Connection closed by 10.213.136.68 port 22",
       "Zscaler is open on my mac",
     ].join("\n");
@@ -93,6 +93,26 @@ bounded_research=true
       'Make an interactive website that scrolls horizontally with a timeline and include a "what if" toggle.';
     const routed = IntentRouter.route("Build site", prompt);
     expect(routed.intent).toBe("execution");
+  });
+
+  it("routes explicit skill activation prompts to execution", () => {
+    const routed = IntentRouter.route(
+      "Novel task",
+      "Use the autonovel skill. Seed: a climatologist discovers a city that only exists during fog.",
+    );
+    expect(routed.intent).toBe("execution");
+    expect(routed.conversationMode).toBe("task");
+    expect(routed.signals).toContain("explicit-skill-invocation");
+  });
+
+  it("routes hyphenated explicit skill activation prompts to execution", () => {
+    const routed = IntentRouter.route(
+      "Research task",
+      "Use the autoresearch-report skill. Question: how do genetic changes over time contribute to Alzheimer's?",
+    );
+    expect(routed.intent).toBe("execution");
+    expect(routed.conversationMode).toBe("task");
+    expect(routed.signals).toContain("explicit-skill-invocation");
   });
 
   it("does not let feature-language 'what if' force thinking intent", () => {

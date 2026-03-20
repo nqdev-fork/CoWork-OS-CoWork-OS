@@ -17,6 +17,7 @@ describe("TaskExecutor workspace preflight acknowledgement", () => {
     task: { prompt: "Fix a bug in src/app.ts", id: "t1" },
     classifyWorkspaceNeed: vi.fn(() => "needs_existing"),
     getWorkspaceSignals: vi.fn(() => ({
+      hasEntries: true,
       hasProjectMarkers: false,
       hasCodeFiles: false,
       hasAppDirs: false,
@@ -35,6 +36,28 @@ describe("TaskExecutor workspace preflight acknowledgement", () => {
     expect(shouldPause).toBe(true);
     expect(pauseForUserInput).toHaveBeenCalledTimes(1);
     expect(pauseForUserInput.mock.calls[0][1]).toBe("workspace_mismatch");
+  });
+
+  it("does not pause when the selected workspace is empty", () => {
+    const pauseForUserInput = vi.fn();
+    const tryAutoSwitch = vi.fn(() => false);
+    const fakeThis: Any = {
+      ...buildBase(),
+      workspace: { isTemp: false, id: "ws-empty" },
+      tryAutoSwitchToPreferredWorkspaceForAmbiguousTask: tryAutoSwitch,
+      getWorkspaceSignals: vi.fn(() => ({
+        hasEntries: false,
+        hasProjectMarkers: false,
+        hasCodeFiles: false,
+        hasAppDirs: false,
+      })),
+      pauseForUserInput,
+    };
+
+    const shouldPause = (TaskExecutor as Any).prototype.preflightWorkspaceCheck.call(fakeThis);
+    expect(shouldPause).toBe(false);
+    expect(pauseForUserInput).not.toHaveBeenCalled();
+    expect(tryAutoSwitch).not.toHaveBeenCalled();
   });
 
   it("does not re-pause once the user acknowledged the preflight warning", () => {
@@ -161,6 +184,7 @@ describe("TaskExecutor workspace preflight acknowledgement", () => {
         logEvent: vi.fn(),
       },
       getWorkspaceSignalsForPath: vi.fn(() => ({
+        hasEntries: true,
         hasProjectMarkers: true,
         hasCodeFiles: false,
         hasAppDirs: false,
@@ -506,7 +530,7 @@ describe("TaskExecutor workspace preflight acknowledgement", () => {
     const step = {
       id: "lock-requirements",
       description:
-        "Lock requirements in /Users/mesut/Desktop/linux/coworkos/requirements.md with Debian defaults.",
+        "Lock requirements in /tmp/linux/coworkos/requirements.md with Debian defaults.",
       kind: "primary",
       status: "pending",
     };
@@ -643,9 +667,9 @@ describe("TaskExecutor workspace preflight acknowledgement", () => {
         toolName: "list_directory",
         input: { path: "/" },
         errorMessage:
-          'Path is outside workspace boundary. Attempted path: /. Workspace: /Users/mesut/Desktop/linux.',
+          'Path is outside workspace boundary. Attempted path: /. Workspace: /tmp/linux.',
         toolTimeoutMs: 1_000,
-        targetPaths: ["/Users/mesut/Desktop/linux/coworkos/requirements.md"],
+        targetPaths: ["/tmp/linux/coworkos/requirements.md"],
         stepId: "s-boundary",
       },
     );

@@ -487,7 +487,7 @@ describe("TaskExecutor executeStep failure handling", () => {
   it("does not reference follow-up lock state when step tool calls are soft-blocked by turn budget", async () => {
     executor = createExecutorWithStubs(
       [
-        toolUseResponse("web_search", { query: "latest nokia earnings" }),
+        toolUseResponse("web_search", { query: "latest tech earnings" }),
         textResponse("Using current evidence only."),
       ],
       {},
@@ -2701,11 +2701,11 @@ relationship_memory:
     executor = createExecutorWithStubs([textResponse("OK")], {});
 
     // This mirrors the exact step that failed: "Write a comprehensive markdown
-    // report ... to /Users/mesut/Desktop/new/ai-agent-trends-2026-03-08.md"
+    // report ... to /tmp/new/ai-agent-trends-2026-03-08.md"
     const step: Any = {
       id: "write-report-concrete-path",
       description:
-        "Write a comprehensive markdown report with sources and summaries to /Users/mesut/Desktop/new/ai-agent-trends-2026-03-08.md.",
+        "Write a comprehensive markdown report with sources and summaries to /tmp/new/ai-agent-trends-2026-03-08.md.",
       status: "pending",
     };
 
@@ -2719,7 +2719,7 @@ relationship_memory:
     const step: Any = {
       id: "write-report-saved-as-path",
       description:
-        "Synthesize the findings into a report saved as `/Users/mesut/Desktop/new/ai-agent-trends-2026-03-08.md`.",
+        "Synthesize the findings into a report saved as `/tmp/new/ai-agent-trends-2026-03-08.md`.",
       status: "pending",
     };
 

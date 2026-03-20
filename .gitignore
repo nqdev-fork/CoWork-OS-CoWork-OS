@@ -8,6 +8,8 @@ node_modules/
 dist/
 out/
 release/
+build/healthkit-bridge/
+native/healthkit-bridge/.build/
 *.app
 *.dmg
 *.exe
