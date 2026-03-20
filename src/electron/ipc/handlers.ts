@@ -73,6 +73,7 @@ import * as os from "os";
 import { AgentDaemon } from "../agent/daemon";
 import { LLMProviderFactory, LLMProviderConfig, ModelKey, OpenAIOAuth } from "../agent/llm";
 import { SearchProviderFactory, SearchSettings, SearchProviderType } from "../agent/search";
+import { HealthManager } from "../health/HealthManager";
 import { ChannelGateway } from "../gateway";
 import { updateManager } from "../updater";
 import { rateLimiter, RATE_LIMIT_CONFIGS } from "../utils/rate-limiter";
@@ -115,6 +116,18 @@ import {
   DeleteImportedEntrySchema,
   SetImportedRecallIgnoredSchema,
   StepFeedbackSchema,
+  HealthSourceInputSchema,
+  HealthWorkflowRequestSchema,
+  HealthImportFilesSchema,
+  HealthWritebackRequestSchema,
+  PersonalityImportSchema,
+  PersonalityConfigV2Schema,
+  ContextModeSchema,
+  MAX_PERSONALITY_PREVIEW_BYTES,
+  AwarenessConfigSchema,
+  AwarenessUpdateBeliefSchema,
+  AutonomyConfigSchema,
+  AutonomyUpdateDecisionSchema,
 } from "../utils/validation";
 import { GuardrailManager } from "../guardrails/guardrail-manager";
 import { AppearanceManager } from "../settings/appearance-manager";
@@ -138,6 +151,8 @@ import { startGoogleWorkspaceOAuth } from "../utils/google-workspace-oauth";
 import { XSettingsManager } from "../settings/x-manager";
 import { testXConnection, checkBirdInstalled } from "../utils/x-cli";
 import { getCustomSkillLoader } from "../agent/custom-skill-loader";
+import { getAwarenessService } from "../awareness/AwarenessService";
+import { getAutonomyEngine } from "../awareness/AutonomyEngine";
 import { CustomSkill } from "../../shared/types";
 import {
   isSpawnSubagentsPrompt,
@@ -2422,6 +2437,7 @@ export async function setupIpcHandlers(
       azureEndpoint: config.azure?.endpoint,
       azureDeployment: azureDeployment,
       azureApiVersion: config.azure?.apiVersion,
+      azureReasoningEffort: config.azure?.reasoningEffort,
       groqApiKey: config.groq?.apiKey,
       groqBaseUrl: config.groq?.baseUrl,
       xaiApiKey: config.xai?.apiKey,
@@ -3485,6 +3501,45 @@ export async function setupIpcHandlers(
     return { success: true };
   });
 
+  ipcMain.handle(IPC_CHANNELS.PERSONALITY_GET_CONFIG_V2, async () => {
+    return PersonalityManager.loadConfigV2();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.PERSONALITY_SAVE_CONFIG_V2, async (_, config: unknown) => {
+    const validated = validateInput(PersonalityConfigV2Schema, config, "personality config");
+    const toSave = { ...validated, version: 2 } as import("../../shared/types").PersonalityConfigV2;
+    PersonalityManager.saveConfigV2(toSave);
+    return { success: true };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.PERSONALITY_EXPORT, async (_, format?: "json" | "md") => {
+    return PersonalityManager.exportProfile(format ?? "json");
+  });
+
+  ipcMain.handle(IPC_CHANNELS.PERSONALITY_IMPORT, async (_, data: unknown) => {
+    const validated = validateInput(PersonalityImportSchema, data, "personality import");
+    return PersonalityManager.importProfile(validated);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.PERSONALITY_PREVIEW, async (_, draft: unknown, contextMode?: string) => {
+    if (contextMode !== undefined) {
+      validateInput(ContextModeSchema, contextMode, "context mode");
+    }
+    if (draft != null && typeof draft === "object") {
+      const size = JSON.stringify(draft).length;
+      if (size > MAX_PERSONALITY_PREVIEW_BYTES) {
+        throw new Error(
+          `Personality preview draft exceeds max size (${MAX_PERSONALITY_PREVIEW_BYTES / 1024}KB)`,
+        );
+      }
+    }
+    return PersonalityManager.getPreviewPrompt(draft, contextMode as import("../../shared/types").ContextMode);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.PERSONALITY_GET_TRAIT_PRESETS, async () => {
+    return PersonalityManager.getTraitPresets();
+  });
+
   // Agent Role / Squad handlers
   ipcMain.handle(IPC_CHANNELS.AGENT_ROLE_LIST, async (_, includeInactive?: boolean) => {
     return agentRoleRepo.findAll(includeInactive ?? false);
@@ -4165,10 +4220,265 @@ export async function setupIpcHandlers(
   // Daily Briefing
   ipcMain.handle(IPC_CHANNELS.DAILY_BRIEFING_GENERATE, async (_, workspaceId: string) => {
     checkRateLimit(IPC_CHANNELS.DAILY_BRIEFING_GENERATE);
-    const validatedWorkspaceId = validateInput(UUIDSchema, workspaceId, "workspace ID");
-    const { DailyBriefingService } = await import("../reports/DailyBriefingService");
-    const service = new DailyBriefingService(db);
-    return service.generate(validatedWorkspaceId);
+    const { DailyBriefingService } = await import("../briefing/DailyBriefingService");
+    const { ProactiveSuggestionsService } = await import("../agent/ProactiveSuggestionsService");
+    const { readWorkspacePriorities, readWorkspaceOpenLoops } = await import(
+      "../briefing/workspace-briefing-context"
+    );
+    const ALL_WORKSPACES_ID = "__all__";
+    const workspaceRepo = new WorkspaceRepository(db);
+    const taskRepo = new TaskRepository(db);
+    const normalizedWorkspaceId =
+      workspaceId === ALL_WORKSPACES_ID
+        ? ALL_WORKSPACES_ID
+        : validateInput(UUIDSchema, workspaceId, "workspace ID");
+    const allMode = normalizedWorkspaceId === ALL_WORKSPACES_ID;
+    const briefingWorkspaceIds = allMode
+      ? workspaceRepo
+          .findAll()
+          .filter((workspace) => !workspace.isTemp && !isTempWorkspaceId(workspace.id))
+          .map((workspace) => workspace.id)
+      : [normalizedWorkspaceId];
+    const workspaceById = new Map(
+      workspaceRepo.findAll().map((workspace) => [workspace.id, workspace] as const),
+    );
+    const labelForWorkspace = (id: string) => workspaceById.get(id)?.name || id;
+    const service = new DailyBriefingService(
+      {
+        getRecentTasks: (_workspaceId, sinceMs) => {
+          const tasks = briefingWorkspaceIds.flatMap((id) =>
+            (taskRepo.findByCreatedAtRange({
+              startMs: sinceMs,
+              endMs: Date.now(),
+              limit: 100,
+              workspaceId: id,
+            }) || []).map((task) => ({
+              ...task,
+              workspaceName: labelForWorkspace(id),
+            })),
+          );
+          return tasks.sort((a: Any, b: Any) => (b.createdAt || 0) - (a.createdAt || 0));
+        },
+        searchMemory: (_currentWorkspaceId, query, limit) => {
+          const results = briefingWorkspaceIds.flatMap((id) =>
+            MemoryService.search(id, query, limit).map((memory) => ({
+              ...memory,
+              workspaceId: id,
+              workspaceName: labelForWorkspace(id),
+            })),
+          );
+          return results
+            .sort(
+              (a: Any, b: Any) =>
+                (b.relevanceScore || 0) - (a.relevanceScore || 0) ||
+                (b.createdAt || 0) - (a.createdAt || 0),
+            )
+            .slice(0, limit)
+            .map((memory) => ({
+              summary: memory.snippet,
+              content: memory.snippet,
+              snippet: memory.snippet,
+              type: memory.type,
+              workspaceId: memory.workspaceId,
+              workspaceName: memory.workspaceName,
+            }));
+        },
+        refreshSuggestions: async (currentWorkspaceId) => {
+          if (!allMode) {
+            await ProactiveSuggestionsService.generateAll(currentWorkspaceId);
+            return;
+          }
+          await Promise.all(briefingWorkspaceIds.map((id) => ProactiveSuggestionsService.generateAll(id)));
+        },
+        getActiveSuggestions: (currentWorkspaceId, limit = 5) => {
+          if (!allMode) {
+            return ProactiveSuggestionsService.getTopForBriefing(currentWorkspaceId, limit);
+          }
+          return ProactiveSuggestionsService.getTopForBriefingForWorkspaces(
+            currentWorkspaceId,
+            briefingWorkspaceIds,
+            limit,
+          ).map((suggestion) => ({
+            ...suggestion,
+            workspaceId: suggestion.workspaceId || currentWorkspaceId,
+            workspaceName: labelForWorkspace(suggestion.workspaceId || currentWorkspaceId),
+          }))
+            .sort((a: Any, b: Any) => (b.confidence || 0) - (a.confidence || 0))
+            .slice(0, limit);
+        },
+        getPriorities: (currentWorkspaceId) => {
+          if (!allMode) {
+            const workspacePath = workspaceRepo.findById(currentWorkspaceId)?.path;
+            return readWorkspacePriorities(workspacePath);
+          }
+          const blocks = briefingWorkspaceIds
+            .map((id) => {
+              const workspacePath = workspaceRepo.findById(id)?.path;
+              const raw = readWorkspacePriorities(workspacePath);
+              if (!raw) return "";
+              const lines = raw
+                .split("\n")
+                .map((line) => line.trim())
+                .filter((line) => line && !line.startsWith("#"))
+                .map((line) => {
+                  const item = line.replace(/^[-*\d.]+\s*/, "").trim();
+                  return item ? `- [${labelForWorkspace(id)}] ${item}` : "";
+                })
+                .filter(Boolean);
+              return lines.join("\n");
+            })
+            .filter(Boolean);
+          return blocks.join("\n");
+        },
+        getUpcomingJobs: async () => [],
+        getOpenLoops: (currentWorkspaceId) => {
+          if (!allMode) {
+            const workspacePath = workspaceRepo.findById(currentWorkspaceId)?.path;
+            return readWorkspaceOpenLoops(workspacePath);
+          }
+          return briefingWorkspaceIds.flatMap((id) => {
+            const workspacePath = workspaceRepo.findById(id)?.path;
+            const raw = readWorkspaceOpenLoops(workspacePath);
+            return raw.map((line) => `- [${labelForWorkspace(id)}] ${line}`);
+          });
+        },
+        getAwarenessSummary: async (currentWorkspaceId) => {
+          if (!allMode) {
+            return getAwarenessService().getSummary(currentWorkspaceId);
+          }
+          const summaries = await Promise.all(
+            briefingWorkspaceIds.map(async (id) => ({
+              id,
+              summary: getAwarenessService().getSummary(id),
+            })),
+          );
+          const mergedWhatChanged: Any[] = [];
+          const mergedWhatMattersNow: Any[] = [];
+          const mergedDueSoon: Any[] = [];
+          const mergedBeliefs: Any[] = [];
+          const mergedWakeReasons = new Set<string>();
+          for (const entry of summaries) {
+            const summary = entry.summary;
+            if (!summary) continue;
+            const label = labelForWorkspace(entry.id);
+            const decorateItem = (item: Any) => ({
+              ...item,
+              title: `[${label}] ${item.title}`,
+              workspaceId: entry.id,
+            });
+            mergedWhatChanged.push(...(summary.whatChanged || []).map(decorateItem));
+            mergedWhatMattersNow.push(...(summary.whatMattersNow || []).map(decorateItem));
+            mergedDueSoon.push(...(summary.dueSoon || []).map(decorateItem));
+            mergedBeliefs.push(...(summary.beliefs || []));
+            for (const reason of summary.wakeReasons || []) {
+              mergedWakeReasons.add(reason);
+            }
+          }
+          return {
+            generatedAt: Date.now(),
+            workspaceId: ALL_WORKSPACES_ID,
+            currentFocus: "All workspaces",
+            whatChanged: mergedWhatChanged,
+            whatMattersNow: mergedWhatMattersNow,
+            dueSoon: mergedDueSoon,
+            beliefs: mergedBeliefs,
+            wakeReasons: [...mergedWakeReasons],
+          };
+        },
+        getAutonomyState: async (currentWorkspaceId) => {
+          if (!allMode) {
+            return getAutonomyEngine().getWorldModel(currentWorkspaceId);
+          }
+          const states = await Promise.all(
+            briefingWorkspaceIds.map(async (id) => ({
+              id,
+              state: getAutonomyEngine().getWorldModel(id),
+            })),
+          );
+          const mergedGoals: Any[] = [];
+          const mergedProjects: Any[] = [];
+          const mergedOpenLoops: Any[] = [];
+          const mergedRoutines: Any[] = [];
+          const mergedBeliefs: Any[] = [];
+          const mergedCurrentPriorities: string[] = [];
+          const mergedContinuityNotes: string[] = [];
+          for (const entry of states) {
+            const state = entry.state;
+            if (!state) continue;
+            const label = labelForWorkspace(entry.id);
+            mergedGoals.push(
+              ...(state.goals || []).map((goal: Any) => ({
+                ...goal,
+                title: `[${label}] ${goal.title}`,
+                workspaceId: entry.id,
+              })),
+            );
+            mergedProjects.push(
+              ...(state.projects || []).map((project: Any) => ({
+                ...project,
+                title: `[${label}] ${project.title}`,
+                workspaceId: entry.id,
+              })),
+            );
+            mergedOpenLoops.push(
+              ...(state.openLoops || []).map((loop: Any) => ({
+                ...loop,
+                title: `[${label}] ${loop.title}`,
+                workspaceId: entry.id,
+              })),
+            );
+            mergedRoutines.push(
+              ...(state.routines || []).map((routine: Any) => ({
+                ...routine,
+                title: `[${label}] ${routine.title}`,
+                workspaceId: entry.id,
+              })),
+            );
+            mergedBeliefs.push(...(state.beliefs || []));
+            mergedCurrentPriorities.push(
+              ...(state.currentPriorities || []).map((priority: string) => `[${label}] ${priority}`),
+            );
+            mergedContinuityNotes.push(
+              ...(state.continuityNotes || []).map((note: string) => `[${label}] ${note}`),
+            );
+          }
+          return {
+            generatedAt: Date.now(),
+            workspaceId: ALL_WORKSPACES_ID,
+            currentFocus: "All workspaces",
+            goals: mergedGoals,
+            projects: mergedProjects,
+            openLoops: mergedOpenLoops,
+            routines: mergedRoutines,
+            beliefs: mergedBeliefs,
+            currentPriorities: mergedCurrentPriorities,
+            continuityNotes: mergedContinuityNotes,
+          };
+        },
+        getAutonomyDecisions: async (currentWorkspaceId) => {
+          if (!allMode) {
+            return getAutonomyEngine().listDecisions(currentWorkspaceId);
+          }
+          const decisions = await Promise.all(
+            briefingWorkspaceIds.map(async (id) => ({
+              id,
+              decisions: getAutonomyEngine().listDecisions(id),
+            })),
+          );
+          return decisions.flatMap((entry) =>
+            (entry.decisions || []).map((decision: Any) => ({
+              ...decision,
+              title: `[${labelForWorkspace(entry.id)}] ${decision.title}`,
+              description: `[${labelForWorkspace(entry.id)}] ${decision.description}`,
+              workspaceId: entry.id,
+            })),
+          );
+        },
+        log: (...args: unknown[]) => console.log("[Briefing]", ...args),
+      },
+      db,
+    );
+    return service.generateBriefing(normalizedWorkspaceId);
   });
 
   // Proactive Suggestions
@@ -4480,6 +4790,9 @@ export async function setupIpcHandlers(
     return { success: true, ...result };
   });
 
+  // Health handlers
+  setupHealthHandlers();
+
   // MCP handlers
   setupMCPHandlers();
 
@@ -4503,6 +4816,102 @@ export async function setupIpcHandlers(
 
   // Memory system handlers
   setupMemoryHandlers();
+}
+
+/**
+ * Set up Health IPC handlers
+ */
+export function setupHealthHandlers(): void {
+  rateLimiter.configure(IPC_CHANNELS.HEALTH_UPSERT_SOURCE, RATE_LIMIT_CONFIGS.limited);
+  rateLimiter.configure(IPC_CHANNELS.HEALTH_REMOVE_SOURCE, RATE_LIMIT_CONFIGS.limited);
+  rateLimiter.configure(IPC_CHANNELS.HEALTH_SYNC_SOURCE, RATE_LIMIT_CONFIGS.standard);
+  rateLimiter.configure(IPC_CHANNELS.HEALTH_IMPORT_FILES, RATE_LIMIT_CONFIGS.limited);
+  rateLimiter.configure(IPC_CHANNELS.HEALTH_GENERATE_WORKFLOW, RATE_LIMIT_CONFIGS.expensive);
+  rateLimiter.configure(IPC_CHANNELS.HEALTH_APPLE_CONNECT, RATE_LIMIT_CONFIGS.expensive);
+  rateLimiter.configure(IPC_CHANNELS.HEALTH_APPLE_DISCONNECT, RATE_LIMIT_CONFIGS.limited);
+  rateLimiter.configure(IPC_CHANNELS.HEALTH_APPLE_PREVIEW_WRITEBACK, RATE_LIMIT_CONFIGS.standard);
+  rateLimiter.configure(IPC_CHANNELS.HEALTH_APPLE_APPLY_WRITEBACK, RATE_LIMIT_CONFIGS.expensive);
+
+  ipcMain.handle(IPC_CHANNELS.HEALTH_GET_DASHBOARD, async (): Promise<Any> => {
+    return HealthManager.getDashboard();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.HEALTH_LIST_SOURCES, async (): Promise<Any> => {
+    return HealthManager.listSources();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.HEALTH_UPSERT_SOURCE, async (_, source: Any) => {
+    checkRateLimit(IPC_CHANNELS.HEALTH_UPSERT_SOURCE);
+    const validated = validateInput(HealthSourceInputSchema, source, "health source");
+    return HealthManager.upsertSource(validated);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.HEALTH_REMOVE_SOURCE, async (_, sourceId: string) => {
+    checkRateLimit(IPC_CHANNELS.HEALTH_REMOVE_SOURCE);
+    const validated = validateInput(StringIdSchema, sourceId, "health source ID");
+    return HealthManager.removeSource(validated);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.HEALTH_SYNC_SOURCE, async (_, sourceId: string) => {
+    checkRateLimit(IPC_CHANNELS.HEALTH_SYNC_SOURCE);
+    const validated = validateInput(StringIdSchema, sourceId, "health source ID");
+    return HealthManager.syncSource(validated);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.HEALTH_IMPORT_FILES, async (_, request: Any) => {
+    checkRateLimit(IPC_CHANNELS.HEALTH_IMPORT_FILES);
+    const validated = validateInput(HealthImportFilesSchema, request, "health import request");
+    return HealthManager.importFiles(validated.sourceId, validated.filePaths);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.HEALTH_GENERATE_WORKFLOW, async (_, request: Any) => {
+    checkRateLimit(IPC_CHANNELS.HEALTH_GENERATE_WORKFLOW);
+    const validated = validateInput(HealthWorkflowRequestSchema, request, "health workflow request");
+    return HealthManager.generateWorkflow(validated);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.HEALTH_APPLE_STATUS, async (_, sourceId?: string) => {
+    return HealthManager.getAppleHealthStatus(sourceId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.HEALTH_APPLE_CONNECT, async (_, request: Any) => {
+    checkRateLimit(IPC_CHANNELS.HEALTH_APPLE_CONNECT);
+    const validated = validateInput(
+      z
+        .object({
+          sourceId: StringIdSchema.optional(),
+          connectionMode: z.enum(["native", "import"]).optional(),
+        })
+        .strict(),
+      request,
+      "Apple Health connect request",
+    );
+    return HealthManager.connectAppleHealth(validated);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.HEALTH_APPLE_DISCONNECT, async (_, sourceId: string) => {
+    checkRateLimit(IPC_CHANNELS.HEALTH_APPLE_DISCONNECT);
+    const validated = validateInput(StringIdSchema, sourceId, "Apple Health source ID");
+    return HealthManager.disconnectAppleHealth(validated);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.HEALTH_APPLE_RESET, async (_, sourceId?: string) => {
+    checkRateLimit(IPC_CHANNELS.HEALTH_APPLE_DISCONNECT);
+    const validated = sourceId ? validateInput(StringIdSchema, sourceId, "Apple Health source ID") : undefined;
+    return HealthManager.resetAppleHealth(validated);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.HEALTH_APPLE_PREVIEW_WRITEBACK, async (_, request: Any) => {
+    checkRateLimit(IPC_CHANNELS.HEALTH_APPLE_PREVIEW_WRITEBACK);
+    const validated = validateInput(HealthWritebackRequestSchema, request, "Apple Health writeback request");
+    return HealthManager.previewAppleHealthWriteback(validated);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.HEALTH_APPLE_APPLY_WRITEBACK, async (_, request: Any) => {
+    checkRateLimit(IPC_CHANNELS.HEALTH_APPLE_APPLY_WRITEBACK);
+    const validated = validateInput(HealthWritebackRequestSchema, request, "Apple Health writeback request");
+    return HealthManager.applyAppleHealthWriteback(validated);
+  });
 }
 
 /**
@@ -5106,6 +5515,9 @@ function setupNotificationHandlers(): void {
         taskId?: string;
         cronJobId?: string;
         workspaceId?: string;
+        suggestionId?: string;
+        recommendedDelivery?: "briefing" | "inbox" | "nudge";
+        companionStyle?: "email" | "note";
       },
     ) => {
       if (!notificationService) return null;
@@ -6454,6 +6866,13 @@ function setupKitHandlers(
  * Set up Memory System IPC handlers
  */
 function setupMemoryHandlers(): void {
+  rateLimiter.configure(IPC_CHANNELS.AWARENESS_SAVE_CONFIG, RATE_LIMIT_CONFIGS.limited);
+  rateLimiter.configure(IPC_CHANNELS.AWARENESS_UPDATE_BELIEF, RATE_LIMIT_CONFIGS.limited);
+  rateLimiter.configure(IPC_CHANNELS.AWARENESS_DELETE_BELIEF, RATE_LIMIT_CONFIGS.limited);
+  rateLimiter.configure(IPC_CHANNELS.AUTONOMY_SAVE_CONFIG, RATE_LIMIT_CONFIGS.limited);
+  rateLimiter.configure(IPC_CHANNELS.AUTONOMY_UPDATE_DECISION, RATE_LIMIT_CONFIGS.limited);
+  rateLimiter.configure(IPC_CHANNELS.AUTONOMY_TRIGGER_EVALUATION, RATE_LIMIT_CONFIGS.standard);
+
   // Get memory settings for a workspace
   ipcMain.handle(IPC_CHANNELS.MEMORY_GET_SETTINGS, async (_, workspaceId: string) => {
     try {
@@ -6800,6 +7219,160 @@ function setupMemoryHandlers(): void {
       }
     },
   );
+
+  ipcMain.handle(IPC_CHANNELS.AWARENESS_GET_CONFIG, async () => {
+    try {
+      return getAwarenessService().getConfig();
+    } catch (error) {
+      console.error("[Awareness] Failed to get config:", error);
+      throw error;
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AWARENESS_SAVE_CONFIG, async (_, config: unknown) => {
+    checkRateLimit(IPC_CHANNELS.AWARENESS_SAVE_CONFIG, RATE_LIMIT_CONFIGS.limited);
+    try {
+      const validated = validateInput(AwarenessConfigSchema, config, "awareness config");
+      return getAwarenessService().saveConfig(validated as Any);
+    } catch (error) {
+      console.error("[Awareness] Failed to save config:", error);
+      throw error;
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AWARENESS_LIST_BELIEFS, async (_, workspaceId?: string) => {
+    try {
+      return getAwarenessService().listBeliefs(workspaceId);
+    } catch (error) {
+      console.error("[Awareness] Failed to list beliefs:", error);
+      return [];
+    }
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.AWARENESS_UPDATE_BELIEF,
+    async (_, data: unknown) => {
+      checkRateLimit(IPC_CHANNELS.AWARENESS_UPDATE_BELIEF, RATE_LIMIT_CONFIGS.limited);
+      try {
+        const validated = validateInput(AwarenessUpdateBeliefSchema, data, "awareness update belief");
+        return getAwarenessService().updateBelief(validated.id, validated.patch || {});
+      } catch (error) {
+        console.error("[Awareness] Failed to update belief:", error);
+        throw error;
+      }
+    },
+  );
+
+  ipcMain.handle(IPC_CHANNELS.AWARENESS_DELETE_BELIEF, async (_, id: string) => {
+    checkRateLimit(IPC_CHANNELS.AWARENESS_DELETE_BELIEF, RATE_LIMIT_CONFIGS.limited);
+    try {
+      return { success: getAwarenessService().deleteBelief(id) };
+    } catch (error) {
+      console.error("[Awareness] Failed to delete belief:", error);
+      throw error;
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AWARENESS_GET_SUMMARY, async (_, workspaceId?: string) => {
+    try {
+      return getAwarenessService().getSummary(workspaceId);
+    } catch (error) {
+      console.error("[Awareness] Failed to get summary:", error);
+      throw error;
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AWARENESS_GET_SNAPSHOT, async (_, workspaceId?: string) => {
+    try {
+      return getAwarenessService().getSnapshot(workspaceId);
+    } catch (error) {
+      console.error("[Awareness] Failed to get snapshot:", error);
+      throw error;
+    }
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.AWARENESS_LIST_EVENTS,
+    async (_, data?: { workspaceId?: string; limit?: number }) => {
+      try {
+        return getAwarenessService().listEvents(data || {});
+      } catch (error) {
+        console.error("[Awareness] Failed to list events:", error);
+        return [];
+      }
+    },
+  );
+
+  ipcMain.handle(IPC_CHANNELS.AUTONOMY_GET_CONFIG, async () => {
+    try {
+      return getAutonomyEngine().getConfig();
+    } catch (error) {
+      console.error("[Autonomy] Failed to get config:", error);
+      throw error;
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AUTONOMY_SAVE_CONFIG, async (_, config: unknown) => {
+    checkRateLimit(IPC_CHANNELS.AUTONOMY_SAVE_CONFIG, RATE_LIMIT_CONFIGS.limited);
+    try {
+      const validated = validateInput(AutonomyConfigSchema, config, "autonomy config");
+      return getAutonomyEngine().saveConfig(validated as Any);
+    } catch (error) {
+      console.error("[Autonomy] Failed to save config:", error);
+      throw error;
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AUTONOMY_GET_STATE, async (_, workspaceId?: string) => {
+    try {
+      return getAutonomyEngine().getWorldModel(workspaceId);
+    } catch (error) {
+      console.error("[Autonomy] Failed to get state:", error);
+      throw error;
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AUTONOMY_LIST_DECISIONS, async (_, workspaceId?: string) => {
+    try {
+      return getAutonomyEngine().listDecisions(workspaceId);
+    } catch (error) {
+      console.error("[Autonomy] Failed to list decisions:", error);
+      return [];
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AUTONOMY_LIST_ACTIONS, async (_, workspaceId?: string) => {
+    try {
+      return getAutonomyEngine().listActions(workspaceId);
+    } catch (error) {
+      console.error("[Autonomy] Failed to list actions:", error);
+      return [];
+    }
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.AUTONOMY_UPDATE_DECISION,
+    async (_, data: unknown) => {
+      checkRateLimit(IPC_CHANNELS.AUTONOMY_UPDATE_DECISION, RATE_LIMIT_CONFIGS.limited);
+      try {
+        const validated = validateInput(AutonomyUpdateDecisionSchema, data, "autonomy update decision");
+        return getAutonomyEngine().updateDecision(validated.id, validated.patch || {});
+      } catch (error) {
+        console.error("[Autonomy] Failed to update decision:", error);
+        throw error;
+      }
+    },
+  );
+
+  ipcMain.handle(IPC_CHANNELS.AUTONOMY_TRIGGER_EVALUATION, async (_, workspaceId?: string) => {
+    checkRateLimit(IPC_CHANNELS.AUTONOMY_TRIGGER_EVALUATION, RATE_LIMIT_CONFIGS.standard);
+    try {
+      return getAutonomyEngine().triggerEvaluation(workspaceId);
+    } catch (error) {
+      console.error("[Autonomy] Failed to trigger evaluation:", error);
+      throw error;
+    }
+  });
 
   // ChatGPT Import handler
   let activeImportAbort: AbortController | null = null;
