@@ -107,6 +107,17 @@ export function CommandOutput({
 
   // Determine status indicator
   const dirName = cwd ? truncateDirName(getDirName(cwd)) : "";
+  const fullDirName = cwd ? getDirName(cwd) : "";
+
+  // Ensure first line shows folder prefix (e.g. "$ todo-app % ") when cwd is known
+  const displayOutput = (() => {
+    if (!fullDirName || !output) return output;
+    const prefix = `$ ${fullDirName} % `;
+    if (output.startsWith("$ ") && !output.startsWith(prefix)) {
+      return prefix + output.slice(2);
+    }
+    return output;
+  })();
 
   const getStatusIndicator = () => {
     if (isRunning) {
@@ -208,8 +219,8 @@ export function CommandOutput({
       <div ref={outputRef} className="command-output-content" onScroll={handleScroll}>
         <pre>
           {isRunning
-            ? output || "Waiting for output..."
-            : (output || "") + (output.endsWith("\n") ? "" : "\n") + `$ ${dirName ? dirName + " " : ""}%`}
+            ? displayOutput || "Waiting for output..."
+            : (displayOutput || "") + (displayOutput.endsWith("\n") ? "" : "\n") + `$ ${dirName ? dirName + " " : ""}%`}
         </pre>
       </div>
       {!autoScroll && isRunning && (
