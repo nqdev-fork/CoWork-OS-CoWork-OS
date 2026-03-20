@@ -141,4 +141,79 @@ describe("TaskExecutor high-confidence natural-language skill routing", () => {
     expect(handled).toBe(false);
     expect(executor.toolRegistry.executeTool).not.toHaveBeenCalled();
   });
+
+  it("explicitly routes when the prompt names a skill, even if the confidence score is modest", async () => {
+    rankModelInvocableSkillsForQuery.mockReturnValue([
+      {
+        skill: {
+          id: "autonovel",
+          name: "Autonovel",
+          description: "Run an autonomous fiction pipeline.",
+          parameters: [],
+        },
+        score: 0.62,
+      },
+      {
+        skill: {
+          id: "summarize",
+          name: "Summarize",
+          description: "Summarize text.",
+          parameters: [],
+        },
+        score: 0.17,
+      },
+    ]);
+
+    const executor = createExecutor("Use the autonovel skill. Seed: a climatologist discovers a fog city.");
+    executor.getAvailableTools = vi.fn(() => [{ name: "read_file" }]);
+    const handled = await (TaskExecutor as Any).prototype.maybeHandleHighConfidenceSkillRouting.call(
+      executor,
+    );
+
+    expect(handled).toBe(true);
+    expect(executor.toolRegistry.executeTool).toHaveBeenCalledWith("use_skill", {
+      skill_id: "autonovel",
+      parameters: {},
+    });
+    expect(executor.task.prompt).toBe("Expanded dual-agent review workflow");
+  });
+
+  it("explicitly routes when the prompt names the autoresearch-report skill", async () => {
+    rankModelInvocableSkillsForQuery.mockReturnValue([
+      {
+        skill: {
+          id: "autoresearch-report",
+          name: "AutoResearch Report",
+          description: "Run an autonomous scientific research pipeline.",
+          parameters: [],
+        },
+        score: 0.61,
+      },
+      {
+        skill: {
+          id: "summarize",
+          name: "Summarize",
+          description: "Summarize text.",
+          parameters: [],
+        },
+        score: 0.14,
+      },
+    ]);
+
+    const executor = createExecutor(
+      "Use the autoresearch-report skill. Question: how do genetic changes in the brain contribute to Alzheimer's?",
+    );
+    executor.getAvailableTools = vi.fn(() => [{ name: "read_file" }]);
+
+    const handled = await (TaskExecutor as Any).prototype.maybeHandleHighConfidenceSkillRouting.call(
+      executor,
+    );
+
+    expect(handled).toBe(true);
+    expect(executor.toolRegistry.executeTool).toHaveBeenCalledWith("use_skill", {
+      skill_id: "autoresearch-report",
+      parameters: {},
+    });
+    expect(executor.task.prompt).toBe("Expanded dual-agent review workflow");
+  });
 });
