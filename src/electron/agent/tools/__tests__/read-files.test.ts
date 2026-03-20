@@ -160,6 +160,58 @@ describe("readFilesByPatterns", () => {
     );
   });
 
+  it("redirects new automated task outputs into the managed .cowork zone", async () => {
+    const daemon = {
+      logEvent: vi.fn(),
+      requestApproval: vi.fn(),
+      getTask: vi.fn(() => ({
+        id: "task-auto",
+        source: "hook",
+        title: "Chief of Staff briefing",
+      })),
+    } as Any;
+    const automatedFileTools = new FileTools(workspace, daemon, "task-auto");
+
+    const out = await automatedFileTools.writeFile("editor-startup-checklist.md", "checklist");
+
+    expect(out.success).toBe(true);
+    expect(out.path).toBe(".cowork/automated-outputs/task-auto/editor-startup-checklist.md");
+    expect(
+      fs.readFileSync(
+        path.join(
+          tmpDir,
+          ".cowork",
+          "automated-outputs",
+          "task-auto",
+          "editor-startup-checklist.md",
+        ),
+        "utf-8",
+      ),
+    ).toBe("checklist");
+    expect(fs.existsSync(path.join(tmpDir, "editor-startup-checklist.md"))).toBe(false);
+  });
+
+  it("keeps manual task writes at the requested workspace path", async () => {
+    const daemon = {
+      logEvent: vi.fn(),
+      requestApproval: vi.fn(),
+      getTask: vi.fn(() => ({
+        id: "task-manual",
+        source: "manual",
+        title: "User requested file",
+      })),
+    } as Any;
+    const manualFileTools = new FileTools(workspace, daemon, "task-manual");
+
+    const out = await manualFileTools.writeFile("editor-startup-checklist.md", "manual");
+
+    expect(out.success).toBe(true);
+    expect(out.path).toBe("editor-startup-checklist.md");
+    expect(fs.readFileSync(path.join(tmpDir, "editor-startup-checklist.md"), "utf-8")).toBe(
+      "manual",
+    );
+  });
+
   it("returns canonical resolved path after case-insensitive fallback", async () => {
     writeFile(path.join(tmpDir, "docs", "spec.md"), "# Spec\n");
 
