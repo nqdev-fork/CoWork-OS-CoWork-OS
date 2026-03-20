@@ -685,6 +685,56 @@ describe("listModelInvocableSkills", () => {
     expect(ranked).toHaveLength(1);
     expect(ranked[0]?.skill.id).toBe("codex-cli");
   });
+
+  it("should rank autoresearch-report for scientific literature prompts", async () => {
+    const autoresearchReport = createTestSkill({
+      id: "autoresearch-report",
+      name: "AutoResearch Report",
+      description: "Run an autonomous scientific research pipeline.",
+      category: "Research",
+      metadata: {
+        routing: {
+          useWhen: "Use when the user wants a scientific literature review or evidence synthesis.",
+          dontUseWhen: "Do not use for casual summaries or broad business-market research.",
+          outputs: "A cited research report with evidence and uncertainties.",
+          successCriteria: "The report is structured, cited, reproducible, and separates evidence from synthesis.",
+          keywords: [
+            "autoresearch report",
+            "autoresearch-report",
+            "scientific research",
+            "literature review",
+            "evidence synthesis",
+            "research report",
+          ],
+          examples: {
+            positive: [
+              "Use the autoresearch-report skill for this request.",
+              "Help me with autoresearch report.",
+            ],
+            negative: ["Do not use autoresearch-report for unrelated requests."],
+          },
+        },
+      },
+    });
+    const genericSkill = createTestSkill({
+      id: "generic-research",
+      name: "Generic Research",
+      description: "General research helper.",
+    });
+
+    mockFiles.set("autoresearch-report.json", JSON.stringify(autoresearchReport));
+    mockFiles.set("generic-research.json", JSON.stringify(genericSkill));
+
+    await loader.reloadSkills();
+
+    const ranked = loader.rankModelInvocableSkillsForQuery(
+      "Use the autoresearch-report skill to produce a scientific literature review on Alzheimer's disease genetics.",
+      { limit: 2 },
+    );
+
+    expect(ranked[0]?.skill.id).toBe("autoresearch-report");
+    expect(ranked[0]?.score).toBeGreaterThan(ranked[1]?.score ?? 0);
+  });
 });
 
 describe("getSkillDescriptionsForModel", () => {
