@@ -5,6 +5,7 @@ import {
   HeartbeatEvent,
   HeartbeatStatus,
   HeartbeatConfig,
+  HeartbeatDecisionMode,
   MemoryFeaturesSettings,
   AgentMention,
   Task,
@@ -15,6 +16,12 @@ import {
   CompanyLoopType,
   CompanyPriority,
   CompanyReviewReason,
+  AwarenessSummary,
+  AutonomyDecision,
+  ChiefOfStaffWorldModel,
+  HeartbeatSignalFamily,
+  HeartbeatWorkspaceScope,
+  ProactiveSuggestion,
 } from "../../shared/types";
 import { AgentRoleRepository } from "./AgentRoleRepository";
 import { MentionRepository } from "./MentionRepository";
@@ -55,6 +62,9 @@ interface WorkItems {
   pendingMentions: AgentMention[];
   assignedTasks: Task[];
   relevantActivities: Activity[];
+  awarenessSummary: AwarenessSummary | null;
+  autonomyWorldModel: ChiefOfStaffWorldModel | null;
+  autonomyDecisions: AutonomyDecision[];
 }
 
 interface MaintenanceWorkspaceContext {
@@ -70,6 +80,34 @@ interface DueChecklistItem {
 interface DueProactiveTask {
   task: ProactiveTaskDefinition;
   stateKey: string;
+}
+
+interface HeartbeatDecision {
+  mode: HeartbeatDecisionMode;
+  signalFamily: HeartbeatSignalFamily;
+  confidence: number;
+  interruptionRisk: number;
+  workspaceScope: HeartbeatWorkspaceScope;
+  workspaceId?: string;
+  memoryType?:
+    | "observation"
+    | "preference"
+    | "constraint"
+    | "timing_preference"
+    | "workflow_pattern"
+    | "correction_rule";
+  memoryContent?: string;
+  suggestion?: {
+    title: string;
+    description: string;
+    actionPrompt?: string;
+    suggestionClass?: ProactiveSuggestion["suggestionClass"];
+    urgency?: ProactiveSuggestion["urgency"];
+    learningSignalIds?: string[];
+    sourceSignals?: string[];
+    recommendedDelivery?: ProactiveSuggestion["recommendedDelivery"];
+    companionStyle?: ProactiveSuggestion["companionStyle"];
+  };
 }
 
 /**
@@ -104,6 +142,51 @@ export interface HeartbeatServiceDeps {
   }) => void;
   listWorkspaceContexts?: () => MaintenanceWorkspaceContext[];
   getMemoryFeaturesSettings?: () => MemoryFeaturesSettings;
+  getAwarenessSummary?: (workspaceId?: string) => AwarenessSummary | null;
+  getAutonomyState?: (workspaceId?: string) => ChiefOfStaffWorldModel | null;
+  getAutonomyDecisions?: (workspaceId?: string) => AutonomyDecision[];
+  listActiveSuggestions?: (workspaceId: string) => ProactiveSuggestion[];
+  createCompanionSuggestion?: (
+    workspaceId: string,
+    suggestion: {
+      type?: ProactiveSuggestion["type"];
+      title: string;
+      description: string;
+      actionPrompt?: string;
+      confidence: number;
+      suggestionClass?: ProactiveSuggestion["suggestionClass"];
+      urgency?: ProactiveSuggestion["urgency"];
+      learningSignalIds?: string[];
+      workspaceScope?: HeartbeatWorkspaceScope;
+      sourceSignals?: string[];
+      recommendedDelivery?: ProactiveSuggestion["recommendedDelivery"];
+      companionStyle?: ProactiveSuggestion["companionStyle"];
+      sourceEntity?: string;
+      sourceTaskId?: string;
+    },
+  ) => Promise<ProactiveSuggestion | null>;
+  addNotification?: (params: {
+    type: "companion_suggestion" | "info" | "warning";
+    title: string;
+    message: string;
+    workspaceId?: string;
+    suggestionId?: string;
+    recommendedDelivery?: "briefing" | "inbox" | "nudge";
+    companionStyle?: "email" | "note";
+  }) => Promise<void>;
+  captureMemory?: (
+    workspaceId: string,
+    taskId: string | undefined,
+    type:
+      | "observation"
+      | "preference"
+      | "constraint"
+      | "timing_preference"
+      | "workflow_pattern"
+      | "correction_rule",
+    content: string,
+    isPrivate?: boolean,
+  ) => Promise<unknown>;
 }
 
 /**
@@ -131,6 +214,8 @@ export class HeartbeatService extends EventEmitter {
   private static readonly WAKE_COALESCE_MS = 30_000;
   private static readonly MAX_WAKE_QUEUE_SIZE = 25;
   private static readonly MIN_IMMEDIATE_WAKE_GAP_MS = 10_000;
+  private static readonly INTERRUPTION_THRESHOLD = 0.82;
+  private static readonly PROMOTION_THRESHOLD = 0.78;
 
   constructor(private deps: HeartbeatServiceDeps) {
     super();
@@ -408,24 +493,29 @@ export class HeartbeatService extends EventEmitter {
       const checklistItems = this.extractDueChecklistItems(agent, maintenanceWorkspace);
       const proactiveTasks = this.extractProactiveTasks(agent);
       const immediateWakeRequests = wakeRequests.filter((request) => request.mode === "now");
+      const selectedWorkspace =
+        this.selectWorkspaceForWork(workItems) ?? maintenanceWorkspace;
+      const workspaceId = selectedWorkspace?.workspaceId || this.deps.getDefaultWorkspaceId();
       if (maintenanceWorkspace) {
         result.maintenanceWorkspaceId = maintenanceWorkspace.workspaceId;
       }
       result.maintenanceChecks = checklistItems.length;
+      const decision = this.decideHeartbeatOutcome(
+        agent,
+        workItems,
+        wakeRequests,
+        proactiveTasks,
+        checklistItems,
+        workspaceId,
+      );
+      result.decisionMode = decision.mode;
+      result.signalFamily = decision.signalFamily;
+      result.confidence = decision.confidence;
+      result.interruptionRisk = decision.interruptionRisk;
+      result.workspaceScope = decision.workspaceScope;
 
-      // If work is found, create a task or process it
-      const hasWork =
-        workItems.pendingMentions.length > 0 ||
-        workItems.assignedTasks.length > 0 ||
-        immediateWakeRequests.length > 0 ||
-        proactiveTasks.length > 0 ||
-        checklistItems.length > 0;
-
-      if (hasWork) {
+      if (decision.mode === "task_creation") {
         result.status = "work_done";
-
-        const selectedWorkspace =
-          this.selectWorkspaceForWork(workItems) ?? maintenanceWorkspace;
         const workspacePath = selectedWorkspace
           ? selectedWorkspace.workspacePath
           : this.deps.getDefaultWorkspacePath();
@@ -455,7 +545,6 @@ export class HeartbeatService extends EventEmitter {
         result.reviewReason = outputContract.reviewReason;
         result.evidenceRefs = outputContract.evidenceRefs;
         result.companyPriority = outputContract.companyPriority;
-        const workspaceId = selectedWorkspace?.workspaceId || this.deps.getDefaultWorkspaceId();
 
         if (workspaceId) {
           const task = await this.deps.createTask(
@@ -511,6 +600,8 @@ export class HeartbeatService extends EventEmitter {
           );
         }
 
+        await this.captureCompanionMemory(workspaceId, decision);
+
         this.emitHeartbeatEvent({
           type: "work_found",
           agentRoleId: agent.id,
@@ -518,7 +609,33 @@ export class HeartbeatService extends EventEmitter {
           timestamp: Date.now(),
           result,
         });
+      } else if (decision.mode === "inbox_suggestion" || decision.mode === "nudge") {
+        const suggestionCreated = workspaceId
+          ? await this.deliverCompanionSuggestion(agent, workspaceId, decision)
+          : false;
+        await this.captureCompanionMemory(workspaceId, decision);
+        if (suggestionCreated) {
+          result.status = "work_done";
+          result.silent = false;
+          this.emitHeartbeatEvent({
+            type: "work_found",
+            agentRoleId: agent.id,
+            agentName: agent.displayName,
+            timestamp: Date.now(),
+            result,
+          });
+        } else {
+          result.silent = true;
+          this.emitHeartbeatEvent({
+            type: "no_work",
+            agentRoleId: agent.id,
+            agentName: agent.displayName,
+            timestamp: Date.now(),
+            result,
+          });
+        }
       } else {
+        await this.captureCompanionMemory(workspaceId, decision);
         result.silent = true;
         this.emitHeartbeatEvent({
           type: "no_work",
@@ -796,6 +913,10 @@ export class HeartbeatService extends EventEmitter {
     if (workspaceIds.size === 0 && fallbackWorkspaceId?.trim()) {
       workspaceIds.add(fallbackWorkspaceId.trim());
     }
+    const awarenessWorkspaceId = Array.from(workspaceIds)[0] || fallbackWorkspaceId;
+    const awarenessSummary = this.deps.getAwarenessSummary?.(awarenessWorkspaceId) || null;
+    const autonomyWorldModel = this.deps.getAutonomyState?.(awarenessWorkspaceId) || null;
+    const autonomyDecisions = this.deps.getAutonomyDecisions?.(awarenessWorkspaceId) || [];
 
     const relevantActivities: Activity[] = [];
     const seenActivityIds = new Set<string>();
@@ -818,6 +939,9 @@ export class HeartbeatService extends EventEmitter {
       pendingMentions,
       assignedTasks,
       relevantActivities: relevantActivities.slice(0, 12),
+      awarenessSummary,
+      autonomyWorldModel,
+      autonomyDecisions,
     };
   }
 
@@ -946,6 +1070,56 @@ export class HeartbeatService extends EventEmitter {
       lines.push("");
     }
 
+    if (work.awarenessSummary?.currentFocus) {
+      lines.push("## Current Focus");
+      lines.push(`- ${work.awarenessSummary.currentFocus}`);
+      lines.push("");
+    }
+
+    if ((work.awarenessSummary?.whatMattersNow.length || 0) > 0) {
+      lines.push("## Awareness Signals");
+      for (const item of work.awarenessSummary?.whatMattersNow.slice(0, 6) || []) {
+        const detail = item.detail ? ` — ${item.detail}` : "";
+        lines.push(`- [${item.source}] ${item.title}${detail}`);
+      }
+      lines.push("");
+    }
+
+    if ((work.awarenessSummary?.dueSoon.length || 0) > 0) {
+      lines.push("## Due Soon");
+      for (const item of work.awarenessSummary?.dueSoon.slice(0, 5) || []) {
+        const detail = item.detail ? ` — ${item.detail}` : "";
+        lines.push(`- ${item.title}${detail}`);
+      }
+      lines.push("");
+    }
+
+    if ((work.autonomyWorldModel?.goals.length || 0) > 0) {
+      lines.push("## Active Goals");
+      for (const goal of work.autonomyWorldModel?.goals.slice(0, 4) || []) {
+        lines.push(`- [${goal.status}] ${goal.title}`);
+      }
+      lines.push("");
+    }
+
+    if ((work.autonomyWorldModel?.openLoops.length || 0) > 0) {
+      lines.push("## Open Loops");
+      for (const loop of work.autonomyWorldModel?.openLoops.slice(0, 4) || []) {
+        const detail = loop.dueAt ? ` — due ${new Date(loop.dueAt).toLocaleString()}` : "";
+        lines.push(`- ${loop.title}${detail}`);
+      }
+      lines.push("");
+    }
+
+    if (work.autonomyDecisions.length > 0) {
+      lines.push("## Pending Chief-of-Staff Interventions");
+      for (const decision of work.autonomyDecisions.slice(0, 6)) {
+        const detail = decision.description ? ` — ${decision.description}` : "";
+        lines.push(`- [${decision.actionType}/${decision.status}] ${decision.title}${detail}`);
+      }
+      lines.push("");
+    }
+
     if (checklistItems.length > 0) {
       lines.push("## HEARTBEAT.md Recurring Checks");
       lines.push("Run these user-defined checks proactively during this heartbeat:");
@@ -977,6 +1151,9 @@ export class HeartbeatService extends EventEmitter {
     const hasWorkOrSignal =
       work.pendingMentions.length > 0 ||
       work.assignedTasks.length > 0 ||
+      (work.awarenessSummary?.whatMattersNow.length || 0) > 0 ||
+      (work.awarenessSummary?.dueSoon.length || 0) > 0 ||
+      work.autonomyDecisions.length > 0 ||
       wakeRequests.length > 0 ||
       proactiveTasks.length > 0 ||
       checklistItems.length > 0;
@@ -1117,6 +1294,465 @@ export class HeartbeatService extends EventEmitter {
     }
   }
 
+  private decideHeartbeatOutcome(
+    agent: AgentRole,
+    workItems: WorkItems,
+    wakeRequests: HeartbeatWakeRequest[],
+    proactiveTasks: DueProactiveTask[],
+    checklistItems: DueChecklistItem[],
+    workspaceId?: string,
+  ): HeartbeatDecision {
+    const immediateWakeRequests = wakeRequests.filter((request) => request.mode === "now");
+    if (immediateWakeRequests.length > 0) {
+      return {
+        mode: "task_creation",
+        signalFamily: "urgent_interrupt",
+        confidence: 0.98,
+        interruptionRisk: 0.2,
+        workspaceScope: "single",
+        workspaceId,
+      };
+    }
+
+    if (workItems.pendingMentions.length > 0) {
+      return {
+        mode: "task_creation",
+        signalFamily: "mentions",
+        confidence: 0.95,
+        interruptionRisk: 0.18,
+        workspaceScope: "single",
+        workspaceId,
+      };
+    }
+
+    if (workItems.assignedTasks.length > 0) {
+      return {
+        mode: "task_creation",
+        signalFamily: "assigned_tasks",
+        confidence: 0.92,
+        interruptionRisk: 0.24,
+        workspaceScope: "single",
+        workspaceId,
+      };
+    }
+
+    if (proactiveTasks.length > 0 || checklistItems.length > 0) {
+      return {
+        mode: "task_creation",
+        signalFamily: "maintenance",
+        confidence: 0.88,
+        interruptionRisk: 0.22,
+        workspaceScope: "single",
+        workspaceId,
+      };
+    }
+
+    const requiresHeartbeatAwareness =
+      (workItems.awarenessSummary?.whatMattersNow || []).some((item) => item.requiresHeartbeat) ||
+      (workItems.awarenessSummary?.dueSoon || []).some((item) => item.requiresHeartbeat);
+    if (requiresHeartbeatAwareness) {
+      return {
+        mode: "task_creation",
+        signalFamily: "awareness_signal",
+        confidence: 0.84,
+        interruptionRisk: 0.32,
+        workspaceScope: "single",
+        workspaceId,
+      };
+    }
+
+    const urgentDueSoon = (workItems.awarenessSummary?.dueSoon || []).find(
+      (item) => (item.score || 0) >= 0.9,
+    );
+    if (urgentDueSoon) {
+      return {
+        mode: "nudge",
+        signalFamily: "urgent_interrupt",
+        confidence: Math.max(0.86, urgentDueSoon.score || 0.86),
+        interruptionRisk: 0.35,
+        workspaceScope: "single",
+        workspaceId,
+        memoryType: "observation",
+        memoryContent: `Urgent deadline signal: ${urgentDueSoon.title}${urgentDueSoon.detail ? ` — ${urgentDueSoon.detail}` : ""}`,
+        suggestion: {
+          title: `Immediate attention recommended: ${urgentDueSoon.title}`.slice(0, 90),
+          description:
+            urgentDueSoon.detail ||
+            "A due-soon signal crossed the urgency threshold during heartbeat review.",
+          actionPrompt: `Review the urgent item and decide the next action now: ${urgentDueSoon.title}`,
+          suggestionClass: "urgent",
+          urgency: "high",
+          sourceSignals: [urgentDueSoon.id],
+          learningSignalIds: [urgentDueSoon.id],
+          recommendedDelivery: "nudge",
+          companionStyle: "email",
+        },
+      };
+    }
+
+    const focusDecision = this.analyzeFocusState(workItems, workspaceId);
+    if (focusDecision) {
+      return focusDecision;
+    }
+
+    const openLoopDecision = this.analyzeOpenLoopPressure(agent, workItems, workspaceId);
+    if (openLoopDecision) {
+      return openLoopDecision;
+    }
+
+    const correctionDecision = this.analyzeCorrectionLearning(workItems, workspaceId);
+    if (correctionDecision) {
+      return correctionDecision;
+    }
+
+    const driftDecision = this.analyzeMemoryDrift(workItems, workspaceId);
+    if (driftDecision) {
+      return driftDecision;
+    }
+
+    const crossWorkspaceDecision = this.analyzeCrossWorkspacePatterns(workItems, workspaceId);
+    if (crossWorkspaceDecision) {
+      return crossWorkspaceDecision;
+    }
+
+    const agingDecision = this.analyzeSuggestionAging(workspaceId);
+    if (agingDecision) {
+      return agingDecision;
+    }
+
+    return {
+      mode: "silent",
+      signalFamily: "focus_state",
+      confidence: 0.2,
+      interruptionRisk: 0.9,
+      workspaceScope: "single",
+      workspaceId,
+    };
+  }
+
+  private analyzeFocusState(
+    workItems: WorkItems,
+    workspaceId?: string,
+  ): HeartbeatDecision | null {
+    const currentFocus = workItems.awarenessSummary?.currentFocus?.trim();
+    const relevantFocusSignals = (workItems.awarenessSummary?.whatMattersNow || []).filter(
+      (item) => item.tags.includes("focus") || item.tags.includes("context"),
+    );
+    const interruptionRisk = currentFocus ? 0.78 : 0.54;
+    const confidence = currentFocus && relevantFocusSignals.length > 0 ? 0.76 : 0;
+    if (!currentFocus || confidence < 0.68) {
+      return null;
+    }
+
+    return {
+      mode: "inbox_suggestion",
+      signalFamily: "focus_state",
+      confidence,
+      interruptionRisk,
+      workspaceScope: "single",
+      workspaceId,
+      memoryType:
+        confidence >= HeartbeatService.PROMOTION_THRESHOLD ? "timing_preference" : "observation",
+      memoryContent: `Focus state observed: ${currentFocus}. Interruption risk ${Math.round(
+        interruptionRisk * 100,
+      )}%.`,
+      suggestion: {
+        title: `Protect current focus: ${currentFocus}`.slice(0, 90),
+        description:
+          "You appear to be in focused work. I should keep proactive output lightweight and oriented around preserving that flow.",
+        actionPrompt:
+          "Summarize the single highest-leverage next step that preserves the current focus instead of introducing a new context.",
+        suggestionClass: "focus_support",
+        urgency: "medium",
+        sourceSignals: relevantFocusSignals.map((item) => item.id),
+        learningSignalIds: relevantFocusSignals.map((item) => item.id),
+        recommendedDelivery: "inbox",
+        companionStyle: "email",
+      },
+    };
+  }
+
+  private analyzeOpenLoopPressure(
+    agent: AgentRole,
+    workItems: WorkItems,
+    workspaceId?: string,
+  ): HeartbeatDecision | null {
+    const openLoops = workItems.autonomyWorldModel?.openLoops || [];
+    const pendingDecisions = workItems.autonomyDecisions.filter((decision) => decision.status !== "done");
+    const pressureScore = openLoops.length + pendingDecisions.length;
+    if (pressureScore < 2) {
+      return null;
+    }
+
+    const confidence = Math.min(0.9, 0.6 + pressureScore * 0.08);
+    if (pressureScore >= 4 && (agent.autonomyLevel === "lead" || pendingDecisions.length > 0)) {
+      return {
+        mode: "task_creation",
+        signalFamily: "open_loop_pressure",
+        confidence,
+        interruptionRisk: 0.28,
+        workspaceScope: "single",
+        workspaceId,
+        memoryType: "workflow_pattern",
+        memoryContent: `Open-loop pressure detected: ${pressureScore} unresolved loops/decisions require structured follow-up.`,
+      };
+    }
+
+    return {
+      mode: "inbox_suggestion",
+      signalFamily: "open_loop_pressure",
+      confidence,
+      interruptionRisk: 0.42,
+      workspaceScope: "single",
+      workspaceId,
+      memoryType: "observation",
+      memoryContent: `Open loops accumulating: ${pressureScore} unresolved loops/decisions detected.`,
+      suggestion: {
+        title: `Reduce open-loop pressure in ${openLoops[0]?.title || "current workspace"}`.slice(
+          0,
+          90,
+        ),
+        description:
+          "Several unresolved commitments are accumulating. A short consolidation pass would likely reduce context-switching friction.",
+        actionPrompt:
+          "Review the current open loops and suggest the smallest set of actions that closes or defers them cleanly.",
+        suggestionClass: "open_loop",
+        urgency: pressureScore >= 3 ? "high" : "medium",
+        sourceSignals: [
+          ...openLoops.slice(0, 3).map((loop) => loop.id),
+          ...pendingDecisions.slice(0, 3).map((decision) => decision.id),
+        ],
+        learningSignalIds: [
+          ...openLoops.slice(0, 3).map((loop) => loop.id),
+          ...pendingDecisions.slice(0, 3).map((decision) => decision.id),
+        ],
+        recommendedDelivery: "inbox",
+        companionStyle: "email",
+      },
+    };
+  }
+
+  private analyzeCorrectionLearning(
+    workItems: WorkItems,
+    workspaceId?: string,
+  ): HeartbeatDecision | null {
+    const correctionActivities = workItems.relevantActivities.filter((activity) =>
+      /(fix|rename|correct|instead|should|prefer|not this|wrong)/i.test(
+        `${activity.title} ${activity.description || ""}`,
+      ),
+    );
+    if (correctionActivities.length < 2) {
+      return null;
+    }
+
+    const titles = correctionActivities.slice(0, 3).map((activity) => activity.title);
+    return {
+      mode: "silent",
+      signalFamily: "correction_learning",
+      confidence: 0.82,
+      interruptionRisk: 0.84,
+      workspaceScope: "single",
+      workspaceId,
+      memoryType: "correction_rule",
+      memoryContent: `Correction pattern learned from recent activity: ${titles.join("; ")}`,
+    };
+  }
+
+  private analyzeMemoryDrift(
+    workItems: WorkItems,
+    workspaceId?: string,
+  ): HeartbeatDecision | null {
+    const currentFocus = workItems.awarenessSummary?.currentFocus?.toLowerCase() || "";
+    const activeGoals = workItems.autonomyWorldModel?.goals || [];
+    if (!currentFocus || activeGoals.length === 0) {
+      return null;
+    }
+    const mismatchedGoal = activeGoals.find((goal) => {
+      const goalTitle = goal.title.toLowerCase();
+      return !goalTitle.includes(currentFocus.split(/\s+/)[0] || "") && goal.status === "active";
+    });
+    if (!mismatchedGoal) {
+      return null;
+    }
+
+    return {
+      mode: "silent",
+      signalFamily: "memory_drift",
+      confidence: 0.74,
+      interruptionRisk: 0.88,
+      workspaceScope: "single",
+      workspaceId,
+      memoryType: "observation",
+      memoryContent: `Possible drift observed: current focus "${workItems.awarenessSummary?.currentFocus}" may be diverging from active goal "${mismatchedGoal.title}".`,
+    };
+  }
+
+  private analyzeCrossWorkspacePatterns(
+    workItems: WorkItems,
+    workspaceId?: string,
+  ): HeartbeatDecision | null {
+    const contexts = this.deps.listWorkspaceContexts?.() || [];
+    if (contexts.length < 2 || !this.deps.getAwarenessSummary) {
+      return null;
+    }
+
+    const summaries = contexts
+      .slice(0, 5)
+      .map((context) => ({
+        workspaceId: context.workspaceId,
+        summary: this.deps.getAwarenessSummary?.(context.workspaceId) || null,
+      }))
+      .filter((entry) => entry.summary);
+
+    const busyWorkspaces = summaries.filter(
+      (entry) =>
+        (entry.summary?.whatMattersNow.length || 0) > 0 || (entry.summary?.dueSoon.length || 0) > 0,
+    );
+    if (busyWorkspaces.length < 2) {
+      return null;
+    }
+
+    const signalIds = busyWorkspaces.flatMap((entry) => [
+      ...(entry.summary?.whatMattersNow.slice(0, 1).map((item) => item.id) || []),
+      ...(entry.summary?.dueSoon.slice(0, 1).map((item) => item.id) || []),
+    ]);
+
+    return {
+      mode: "inbox_suggestion",
+      signalFamily: "cross_workspace_patterns",
+      confidence: 0.8,
+      interruptionRisk: 0.48,
+      workspaceScope: "all",
+      workspaceId,
+      memoryType:
+        busyWorkspaces.length >= 3 ? "workflow_pattern" : "observation",
+      memoryContent: `Cross-workspace pattern: ${busyWorkspaces.length} workspaces currently show competing focus or due-soon pressure.`,
+      suggestion: {
+        title: `Cross-workspace friction detected across ${busyWorkspaces.length} workspaces`,
+        description:
+          "Similar pressure is appearing in multiple workspaces. A single coordinated summary would likely reduce repeated re-orientation.",
+        actionPrompt:
+          "Create one executive summary that consolidates the top priorities and next actions across the affected workspaces.",
+        suggestionClass: "cross_workspace",
+        urgency: "medium",
+        sourceSignals: signalIds,
+        learningSignalIds: signalIds,
+        recommendedDelivery: "inbox",
+        companionStyle: "email",
+      },
+    };
+  }
+
+  private analyzeSuggestionAging(workspaceId?: string): HeartbeatDecision | null {
+    if (!workspaceId || !this.deps.listActiveSuggestions) {
+      return null;
+    }
+    const agingThreshold = Date.now() - 3 * 24 * 60 * 60 * 1000;
+    const agingSuggestions = this.deps
+      .listActiveSuggestions(workspaceId)
+      .filter((suggestion) => suggestion.createdAt < agingThreshold);
+    if (agingSuggestions.length < 3) {
+      return null;
+    }
+
+    return {
+      mode: "inbox_suggestion",
+      signalFamily: "suggestion_aging",
+      confidence: 0.72,
+      interruptionRisk: 0.62,
+      workspaceScope: "single",
+      workspaceId,
+      memoryType: "workflow_pattern",
+      memoryContent: `Suggestion backlog aging detected: ${agingSuggestions.length} active suggestions are older than 3 days.`,
+      suggestion: {
+        title: "Prune or refresh aging companion suggestions",
+        description:
+          "Several older suggestions are still active. Reviewing them now would help the companion learn what should be suppressed, revived, or acted on.",
+        actionPrompt:
+          "Review the aging suggestions, dismiss what is stale, and keep only the items that still deserve attention.",
+        suggestionClass: "aging",
+        urgency: "low",
+        sourceSignals: agingSuggestions.slice(0, 5).map((suggestion) => suggestion.id),
+        learningSignalIds: agingSuggestions.slice(0, 5).map((suggestion) => suggestion.id),
+        recommendedDelivery: "briefing",
+        companionStyle: "email",
+      },
+    };
+  }
+
+  private async deliverCompanionSuggestion(
+    agent: AgentRole,
+    workspaceId: string | undefined,
+    decision: HeartbeatDecision,
+  ): Promise<boolean> {
+    if (!workspaceId || !decision.suggestion || !this.deps.createCompanionSuggestion) {
+      return false;
+    }
+    const created = await this.deps.createCompanionSuggestion(workspaceId, {
+      type: "insight",
+      title: decision.suggestion.title,
+      description: decision.suggestion.description,
+      actionPrompt: decision.suggestion.actionPrompt,
+      confidence: decision.confidence,
+      suggestionClass: decision.suggestion.suggestionClass,
+      urgency: decision.suggestion.urgency,
+      learningSignalIds: decision.suggestion.learningSignalIds,
+      workspaceScope: decision.workspaceScope,
+      sourceSignals: decision.suggestion.sourceSignals,
+      recommendedDelivery: decision.suggestion.recommendedDelivery,
+      companionStyle: decision.suggestion.companionStyle,
+    });
+    if (!created) {
+      return false;
+    }
+
+    const delivery = decision.suggestion.recommendedDelivery || "inbox";
+    if (delivery === "inbox" || delivery === "nudge") {
+      await this.deps.addNotification?.({
+        type: "companion_suggestion",
+        title: delivery === "nudge" ? `Companion nudge: ${created.title}` : `Companion suggestion: ${created.title}`,
+        message: created.description,
+        workspaceId,
+        suggestionId: created.id,
+        recommendedDelivery: delivery,
+        companionStyle: created.companionStyle || "email",
+      });
+    }
+
+    this.deps.recordActivity?.({
+      workspaceId,
+      agentRoleId: agent.id,
+      title: `Heartbeat surfaced a companion ${delivery}`,
+      description: created.title,
+      metadata: {
+        signalFamily: decision.signalFamily,
+        confidence: decision.confidence,
+        interruptionRisk: decision.interruptionRisk,
+        workspaceScope: decision.workspaceScope,
+        suggestionId: created.id,
+      },
+    });
+
+    return true;
+  }
+
+  private async captureCompanionMemory(
+    workspaceId: string | undefined,
+    decision: HeartbeatDecision,
+  ): Promise<void> {
+    if (!workspaceId || !decision.memoryType || !decision.memoryContent || !this.deps.captureMemory) {
+      return;
+    }
+    const isPrivate = decision.confidence < HeartbeatService.PROMOTION_THRESHOLD;
+    await this.deps.captureMemory(
+      workspaceId,
+      undefined,
+      decision.memoryType,
+      decision.memoryContent,
+      isPrivate,
+    );
+  }
+
   private describeHeartbeatWork(
     work: WorkItems,
     wakeRequests: HeartbeatWakeRequest[],
@@ -1127,6 +1763,15 @@ export class HeartbeatService extends EventEmitter {
     const immediateWakeRequests = wakeRequests.filter((request) => request.mode === "now");
     if (work.pendingMentions.length > 0) parts.push(`${work.pendingMentions.length} mention(s)`);
     if (work.assignedTasks.length > 0) parts.push(`${work.assignedTasks.length} assigned task(s)`);
+    if ((work.awarenessSummary?.whatMattersNow.length || 0) > 0) {
+      parts.push(`${work.awarenessSummary?.whatMattersNow.length || 0} awareness signal(s)`);
+    }
+    if ((work.awarenessSummary?.dueSoon.length || 0) > 0) {
+      parts.push(`${work.awarenessSummary?.dueSoon.length || 0} due-soon item(s)`);
+    }
+    if (work.autonomyDecisions.length > 0) {
+      parts.push(`${work.autonomyDecisions.length} chief-of-staff intervention(s)`);
+    }
     if (immediateWakeRequests.length > 0) parts.push(`${immediateWakeRequests.length} immediate wake request(s)`);
     if (proactiveTasks.length > 0) parts.push(`${proactiveTasks.length} proactive task(s)`);
     if (checklistItems.length > 0) parts.push(`${checklistItems.length} HEARTBEAT.md check(s)`);
@@ -1152,6 +1797,12 @@ export class HeartbeatService extends EventEmitter {
     let reviewReason: CompanyReviewReason | undefined;
     if (workItems.pendingMentions.length > 0 || workItems.assignedTasks.length > 0) {
       outputType = "work_order";
+    } else if (workItems.autonomyDecisions.length > 0) {
+      outputType = "review_request";
+      reviewRequired = true;
+      reviewReason = "operator_attention";
+    } else if ((workItems.awarenessSummary?.dueSoon.length || 0) > 0) {
+      outputType = "status_digest";
     } else if (proactiveTasks.length > 0 || checklistItems.length > 0) {
       outputType = "review_request";
       reviewRequired = true;
@@ -1178,6 +1829,12 @@ export class HeartbeatService extends EventEmitter {
         type: "heartbeat_check",
         id: item.stateKey,
         label: item.item.title,
+      })),
+      ...this.getAwarenessEvidenceRefs(workItems.awarenessSummary),
+      ...workItems.autonomyDecisions.slice(0, 4).map((decision) => ({
+        type: "autonomy_decision",
+        id: decision.id,
+        label: decision.title,
       })),
       ...immediateWakeRequests.slice(0, 3).map((wake, index) => ({
         type: "wake_request",
@@ -1218,10 +1875,32 @@ export class HeartbeatService extends EventEmitter {
     if (workItems.pendingMentions.length > 0 || workItems.assignedTasks.length > 1) {
       return "high";
     }
+    if ((workItems.awarenessSummary?.dueSoon.length || 0) > 0) {
+      return "high";
+    }
+    if (workItems.autonomyDecisions.some((decision) => decision.priority === "high")) {
+      return "high";
+    }
     if (proactiveTasks.length > 0 || checklistItems.length > 0) {
       return "normal";
     }
+    if ((workItems.awarenessSummary?.whatMattersNow.length || 0) > 0) {
+      return "normal";
+    }
     return "low";
+  }
+
+  private getAwarenessEvidenceRefs(summary: AwarenessSummary | null | undefined): Array<{
+    type: string;
+    id: string;
+    label: string;
+  }> {
+    if (!summary) return [];
+    return [...summary.whatMattersNow, ...summary.dueSoon].slice(0, 6).map((item) => ({
+      type: "awareness_signal",
+      id: item.id,
+      label: item.title,
+    }));
   }
 
   private clearProactiveTaskRunState(agentRoleId: string): void {
