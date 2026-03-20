@@ -1,7 +1,7 @@
 import * as fs from "fs/promises";
 import * as fsSync from "fs";
 import * as path from "path";
-import { Workspace, WorkspacePathAliasPolicy } from "../../../shared/types";
+import { Task, Workspace, WorkspacePathAliasPolicy } from "../../../shared/types";
 import { AgentDaemon } from "../daemon";
 import { GuardrailManager } from "../../guardrails/guardrail-manager";
 import {
@@ -16,6 +16,11 @@ import {
   detectWorkspacePathAlias,
   shouldRewriteWorkspaceAliasPath,
 } from "../path-alias";
+import {
+  buildManagedAutomatedOutputPath,
+  isAlreadyInManagedOutputZone,
+  shouldUseManagedAutomatedOutput,
+} from "../managed-output-paths";
 
 // Limits to prevent context overflow
 const DEFAULT_READ_WINDOW_CHARS = 300 * 1024; // 300KB default read window
@@ -432,6 +437,54 @@ export class FileTools {
       if (parent === current) return null;
       current = parent;
     }
+  }
+
+  private getCurrentTask(): Task | null {
+    const taskGetter = (this.daemon as Any)?.getTask;
+    if (typeof taskGetter !== "function") return null;
+    return (taskGetter.call(this.daemon, this.taskId) as Task | null) || null;
+  }
+
+  private async maybeRedirectAutomatedOutputPath(
+    requestedPath: string,
+  ): Promise<{ requestedPath: string; redirectedFrom?: string }> {
+    const task = this.getCurrentTask();
+    if (!shouldUseManagedAutomatedOutput(task)) {
+      return { requestedPath };
+    }
+
+    let resolvedPath: string;
+    try {
+      resolvedPath = this.resolvePath(requestedPath, "write");
+    } catch {
+      return { requestedPath };
+    }
+
+    const exists = fsSync.existsSync(resolvedPath);
+    if (exists) {
+      return { requestedPath };
+    }
+
+    const workspaceRelative =
+      getWorkspaceRelativePosixPath(this.workspace.path, resolvedPath) ||
+      (path.isAbsolute(requestedPath) ? null : requestedPath.replace(/\\/g, "/"));
+    if (!workspaceRelative) {
+      return { requestedPath };
+    }
+
+    if (isAlreadyInManagedOutputZone(workspaceRelative)) {
+      return { requestedPath };
+    }
+
+    const redirectedPath = buildManagedAutomatedOutputPath(this.taskId, workspaceRelative);
+    this.daemon.logEvent(this.taskId, "log", {
+      message: `Redirected automated task output to managed zone: ${workspaceRelative} -> ${redirectedPath}`,
+      source: "managed_output_policy",
+    });
+    return {
+      requestedPath: redirectedPath,
+      redirectedFrom: workspaceRelative,
+    };
   }
 
   /**
@@ -950,8 +1003,11 @@ export class FileTools {
       throw new Error(`Invalid content: expected string but received ${typeof content}`);
     }
 
+    const redirected = await this.maybeRedirectAutomatedOutputPath(relativePath);
+    const requestedPath = redirected.requestedPath;
+
     this.checkPermission("write");
-    const fullPath = this.resolvePath(relativePath, "write");
+    const fullPath = this.resolvePath(requestedPath, "write");
     await this.enforceProjectAccess(fullPath);
     await this.enforceSymlinkSafeAccess(fullPath, "write");
 
@@ -978,9 +1034,9 @@ export class FileTools {
       let preview =
         content.length > MAX_PREVIEW_CHARS ? content.slice(0, MAX_PREVIEW_CHARS) : content;
       const previewTruncated = content.length > MAX_PREVIEW_CHARS;
-      const ext = path.extname(relativePath).toLowerCase().replace(".", "");
+      const ext = path.extname(requestedPath).toLowerCase().replace(".", "");
       const reportedPath =
-        getWorkspaceRelativePosixPath(this.workspace.path, fullPath) || relativePath;
+        getWorkspaceRelativePosixPath(this.workspace.path, fullPath) || requestedPath;
 
       // Log artifact
       this.daemon.logEvent(this.taskId, "file_created", {
@@ -1211,10 +1267,13 @@ export class FileTools {
       throw new Error("Invalid destPath: must be a non-empty string");
     }
 
+    const redirected = await this.maybeRedirectAutomatedOutputPath(destPath);
+    const requestedDestPath = redirected.requestedPath;
+
     this.checkPermission("read");
     this.checkPermission("write");
     const sourceFullPath = this.resolvePath(sourcePath, "read");
-    const destFullPath = this.resolvePath(destPath, "write");
+    const destFullPath = this.resolvePath(requestedDestPath, "write");
     await this.enforceProjectAccess(sourceFullPath);
     await this.enforceProjectAccess(destFullPath);
     await this.enforceSymlinkSafeAccess(sourceFullPath, "read");
@@ -1228,13 +1287,13 @@ export class FileTools {
       await fs.copyFile(sourceFullPath, destFullPath);
 
       this.daemon.logEvent(this.taskId, "file_created", {
-        path: destPath,
+        path: requestedDestPath,
         copiedFrom: sourcePath,
       });
 
       return {
         success: true,
-        path: destPath,
+        path: requestedDestPath,
       };
     } catch (error: Any) {
       throw new Error(`Failed to copy file: ${error.message}`);
@@ -1341,8 +1400,11 @@ export class FileTools {
       throw new Error("Invalid path: path must be a non-empty string");
     }
 
+    const redirected = await this.maybeRedirectAutomatedOutputPath(relativePath);
+    const requestedPath = redirected.requestedPath;
+
     this.checkPermission("write");
-    const fullPath = this.resolvePath(relativePath, "write");
+    const fullPath = this.resolvePath(requestedPath, "write");
     await this.enforceProjectAccess(fullPath);
     await this.enforceSymlinkSafeAccess(fullPath, "write");
 
@@ -1350,7 +1412,7 @@ export class FileTools {
       await fs.mkdir(fullPath, { recursive: true });
 
       this.daemon.logEvent(this.taskId, "file_created", {
-        path: relativePath,
+        path: requestedPath,
         type: "directory",
       });
 
