@@ -856,6 +856,8 @@ export class ToolCallDeduplicator {
       "task_history",
       "channel_list_chats",
       "channel_history",
+      "channel_fetch_discord_messages",
+      "channel_download_discord_attachment",
       "web_search",
     ];
     if (idempotentTools.includes(toolName)) {
