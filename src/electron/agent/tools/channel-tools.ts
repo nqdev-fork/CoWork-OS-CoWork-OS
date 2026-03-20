@@ -3,8 +3,15 @@ import { AgentDaemon } from "../daemon";
 import { LLMTool } from "../llm/types";
 import { ChannelRepository } from "../../database/repositories";
 import { ChannelType } from "../../gateway/channels/types";
+import { getChannelLiveFetchProvider } from "../../gateway/channel-live-fetch";
 
 type ChannelHistoryDirection = "incoming" | "outgoing" | "both";
+
+/** Discord snowflake IDs are 17–19 digit numeric strings */
+const DISCORD_SNOWFLAKE_REGEX = /^\d{17,19}$/;
+function isValidDiscordSnowflake(id: string): boolean {
+  return DISCORD_SNOWFLAKE_REGEX.test(id);
+}
 
 function parseDurationMs(input: string): number | null {
   const match = input
@@ -157,6 +164,49 @@ export class ChannelTools {
             },
           },
           required: ["channel", "chat_id"],
+        },
+      },
+      {
+        name: "channel_fetch_discord_messages",
+        description:
+          "Fetch recent messages directly from a Discord channel via the live API (not the local gateway log). " +
+          "Use when you need to see messages that have not passed through CoWork yet, or to get full channel context. " +
+          "Requires Discord channel to be configured and connected. Returns up to 100 messages, oldest-first. " +
+          "Messages with attachments are marked with +Natt. Use channel_download_discord_attachment to download attachments.",
+        input_schema: {
+          type: "object",
+          properties: {
+            chat_id: {
+              type: "string",
+              description:
+                "Discord channel or DM chat ID (snowflake). Use channel_list_chats with channel 'discord' to discover IDs.",
+            },
+            limit: {
+              type: "number",
+              description: "Max number of messages to fetch (default: 100, max: 100)",
+            },
+          },
+          required: ["chat_id"],
+        },
+      },
+      {
+        name: "channel_download_discord_attachment",
+        description:
+          "Download all attachments from a specific Discord message to the local inbox. " +
+          "Returns file paths you can read with read_file. Use when channel_fetch_discord_messages shows a message has attachments (+Natt).",
+        input_schema: {
+          type: "object",
+          properties: {
+            chat_id: {
+              type: "string",
+              description: "Discord channel or DM chat ID (snowflake)",
+            },
+            message_id: {
+              type: "string",
+              description: "Discord message ID (snowflake) from channel_fetch_discord_messages",
+            },
+          },
+          required: ["chat_id", "message_id"],
         },
       },
     ];
@@ -437,5 +487,135 @@ export class ChannelTools {
     });
 
     return result;
+  }
+
+  async fetchDiscordMessages(input: {
+    chat_id: unknown;
+    limit?: unknown;
+  }): Promise<Any> {
+    const chatId = typeof input?.chat_id === "string" ? input.chat_id.trim() : "";
+    const limitRaw = typeof input?.limit === "number" ? input.limit : undefined;
+    const limit = Math.min(Math.max(limitRaw ?? 100, 1), 100);
+
+    this.daemon.logEvent(this.taskId, "tool_call", {
+      tool: "channel_fetch_discord_messages",
+      chatId,
+      limit,
+    });
+
+    if (!chatId) {
+      throw new Error('Missing required "chat_id"');
+    }
+    if (!isValidDiscordSnowflake(chatId)) {
+      return {
+        success: false,
+        error: 'Invalid chat_id: must be a Discord channel snowflake ID (17–19 digits)',
+      };
+    }
+
+    const provider = getChannelLiveFetchProvider();
+    if (!provider) {
+      return {
+        success: false,
+        error:
+          "Discord live fetch is unavailable. The gateway may not be initialized yet.",
+      };
+    }
+
+    try {
+      const messages = await provider.fetchDiscordMessages(chatId, limit);
+
+      const formatted = messages.map((m) => {
+        const attCount = m.attachments?.length ?? 0;
+        const attSuffix = attCount > 0 ? ` +${attCount}att` : "";
+        return `[${m.id}] ${m.author.name}: ${m.content || "(no text)"}${attSuffix}`;
+      });
+
+      this.daemon.logEvent(this.taskId, "tool_result", {
+        tool: "channel_fetch_discord_messages",
+        success: true,
+        count: messages.length,
+      });
+
+      return {
+        success: true,
+        chat_id: chatId,
+        messages,
+        formatted,
+        hint: "Use channel_download_discord_attachment(chat_id, message_id) to download attachments from messages marked +Natt.",
+      };
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      return {
+        success: false,
+        error: err.message,
+      };
+    }
+  }
+
+  async downloadDiscordAttachment(input: {
+    chat_id: unknown;
+    message_id: unknown;
+  }): Promise<Any> {
+    const chatId = typeof input?.chat_id === "string" ? input.chat_id.trim() : "";
+    const messageId =
+      typeof input?.message_id === "string" ? input.message_id.trim() : "";
+
+    this.daemon.logEvent(this.taskId, "tool_call", {
+      tool: "channel_download_discord_attachment",
+      chatId,
+      messageId,
+    });
+
+    if (!chatId) {
+      throw new Error('Missing required "chat_id"');
+    }
+    if (!messageId) {
+      throw new Error('Missing required "message_id"');
+    }
+    if (!isValidDiscordSnowflake(chatId) || !isValidDiscordSnowflake(messageId)) {
+      return {
+        success: false,
+        error: 'Invalid chat_id or message_id: must be Discord snowflake IDs (17–19 digits)',
+      };
+    }
+
+    const provider = getChannelLiveFetchProvider();
+    if (!provider) {
+      return {
+        success: false,
+        error:
+          "Discord live fetch is unavailable. The gateway may not be initialized yet.",
+      };
+    }
+
+    try {
+      const files = await provider.downloadDiscordAttachment(chatId, messageId);
+
+      this.daemon.logEvent(this.taskId, "tool_result", {
+        tool: "channel_download_discord_attachment",
+        success: true,
+        count: files.length,
+      });
+
+      return {
+        success: true,
+        chat_id: chatId,
+        message_id: messageId,
+        files: files.map((f) => ({
+          path: f.path,
+          fileName: f.fileName,
+          contentType: f.contentType,
+          size: f.size,
+        })),
+        hint: "Use read_file to read the downloaded files.",
+      };
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      return {
+        success: false,
+        error: err.message,
+      };
+    }
   }
 }
