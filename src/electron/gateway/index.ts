@@ -65,6 +65,12 @@ import {
 } from "../../shared/channelMessages";
 import { DEFAULT_QUIRKS } from "../../shared/types";
 import { createLogger } from "../utils/logger";
+import {
+  registerChannelLiveFetchProvider,
+  unregisterChannelLiveFetchProvider,
+  type DiscordMessage,
+  type DiscordDownloadedAttachment,
+} from "./channel-live-fetch";
 
 export interface GatewayConfig {
   /** Router configuration */
@@ -556,6 +562,8 @@ export class ChannelGateway {
 
     this.startPendingCleanup();
 
+    registerChannelLiveFetchProvider(this);
+
     this.initialized = true;
     logger.debug("Initialized");
   }
@@ -580,9 +588,41 @@ export class ChannelGateway {
     }
 
     await this.router.disconnectAll();
+    unregisterChannelLiveFetchProvider();
     this.stopPendingCleanup();
     this.initialized = false;
     logger.debug("Shutdown complete");
+  }
+
+  /**
+   * Fetch recent messages from a Discord channel via live API (not local log).
+   * For agent tools; requires Discord channel to be configured and connected.
+   */
+  async fetchDiscordMessages(
+    chatId: string,
+    limit = 100,
+  ): Promise<DiscordMessage[]> {
+    const adapter = this.router.getAdapter("discord") as DiscordAdapter | undefined;
+    if (!adapter || adapter.status !== "connected") {
+      throw new Error("Discord channel is not configured or not connected");
+    }
+    return adapter.fetchMessages(chatId, limit);
+  }
+
+  /**
+   * Download attachments from a Discord message to the inbox directory.
+   * Returns local file paths for the agent to read.
+   */
+  async downloadDiscordAttachment(
+    chatId: string,
+    messageId: string,
+  ): Promise<DiscordDownloadedAttachment[]> {
+    const adapter = this.router.getAdapter("discord") as DiscordAdapter | undefined;
+    if (!adapter || adapter.status !== "connected") {
+      throw new Error("Discord channel is not configured or not connected");
+    }
+    const inboxDir = path.join(getUserDataDir(), "channels", "discord", "inbox");
+    return adapter.downloadAttachment(chatId, messageId, inboxDir);
   }
 
   getStartupStats(): { loaded: number; enabled: number; connected: number } {
