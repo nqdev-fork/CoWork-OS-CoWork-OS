@@ -90,7 +90,7 @@ Designate specific groups as link-research channels. Post URLs there and the age
 
 ## Discord
 
-Slash commands, DM support, guild integration.
+Slash commands, DM support, guild integration, embeds, polls, select menus, and live message/attachment API.
 
 ### Setup
 
@@ -105,6 +105,20 @@ Slash commands, DM support, guild integration.
 | Command | Description |
 |---------|-------------|
 | `/task <prompt>` | Run task directly |
+| `/workspace`, `/addworkspace` | Workspace selection |
+| `/approve`, `/deny` | Approve or deny pending actions |
+| `/pair <code>` | Pair with pairing code |
+
+### Agent Tools (Live Discord API)
+
+The agent can fetch messages and download attachments directly from Discord, not just from the local gateway log:
+
+| Tool | Description |
+|------|-------------|
+| `channel_fetch_discord_messages` | Fetch up to 100 recent messages from a channel via the live Discord API. Use when you need messages that have not passed through CoWork yet. Messages with attachments are marked `+Natt`. |
+| `channel_download_discord_attachment` | Download all attachments from a specific message to the local inbox. Returns file paths for `read_file`. Use when `channel_fetch_discord_messages` shows a message has attachments. |
+
+**Typical flow:** Use `channel_list_chats` with `channel: "discord"` to discover chat IDs, then `channel_fetch_discord_messages` for live history, and `channel_download_discord_attachment` for any message with attachments.
 
 ---
 
@@ -397,3 +411,9 @@ Access CoWork OS from mobile devices via local network.
 - Token-based authentication
 - Ensure firewall allows port 18789
 - Both devices must be on the same network
+
+---
+
+## Comparison with Alternative Implementations
+
+See [Channel Comparison](channel-comparison.md) for how CoWork OS channel integrations compare to alternative implementations (e.g. Anthropic Claude Code plugins).
