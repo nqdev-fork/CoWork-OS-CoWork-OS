@@ -61,6 +61,15 @@ export interface AmbientMonitoringServiceDeps {
   }) => void;
   emitTrigger: (event: TriggerEvent) => void;
   wakeHeartbeats: (params: { text: string; mode?: "now" | "next-heartbeat" }) => void;
+  captureAwarenessEvent?: (params: {
+    source: "files" | "git" | "calendar";
+    workspaceId?: string;
+    title: string;
+    summary: string;
+    sensitivity?: "low" | "medium" | "high";
+    payload?: Record<string, unknown>;
+    tags?: string[];
+  }) => void;
   log?: (...args: unknown[]) => void;
 }
 
@@ -256,6 +265,15 @@ export class AmbientMonitoringService {
       text: `Workspace file change detected in ${workspace.name || workspace.workspaceId}: ${activityType} ${relPath}`,
       mode: "next-heartbeat",
     });
+    this.deps.captureAwarenessEvent?.({
+      source: "files",
+      workspaceId: workspace.workspaceId,
+      title: `File ${activityType.replace("file_", "")}`,
+      summary: relPath,
+      sensitivity: "low",
+      payload: { path: relPath, eventType: activityType },
+      tags: ["context"],
+    });
   }
 
   private async pollGit(): Promise<void> {
@@ -287,6 +305,15 @@ export class AmbientMonitoringService {
       this.deps.wakeHeartbeats({
         text: `Git state changed in ${workspace.name || workspace.workspaceId}: ${description}`,
         mode: "next-heartbeat",
+      });
+      this.deps.captureAwarenessEvent?.({
+        source: "git",
+        workspaceId: workspace.workspaceId,
+        title: "Git state changed",
+        summary: description,
+        sensitivity: "low",
+        payload: { branch: snapshot.branch, dirtyCount: snapshot.dirtyCount },
+        tags: ["context"],
       });
     }
   }
@@ -346,6 +373,15 @@ export class AmbientMonitoringService {
     this.deps.wakeHeartbeats({
       text: "Calendar events changed across connected calendars.",
       mode: "next-heartbeat",
+    });
+    this.deps.captureAwarenessEvent?.({
+      source: "calendar",
+      workspaceId,
+      title: "Calendar events changed",
+      summary: "Upcoming events were updated in connected calendars.",
+      sensitivity: "medium",
+      payload: { providers: ["google-calendar", "apple-calendar"] },
+      tags: ["deadline"],
     });
   }
 
