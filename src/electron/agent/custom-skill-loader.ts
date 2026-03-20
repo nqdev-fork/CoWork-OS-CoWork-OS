@@ -520,7 +520,7 @@ export class CustomSkillLoader {
   private normalizeRoutingPhrase(text: string): string {
     return String(text || "")
       .toLowerCase()
-      .replace(/\s+/g, " ")
+      .replace(/[-_\s]+/g, " ")
       .trim();
   }
 
