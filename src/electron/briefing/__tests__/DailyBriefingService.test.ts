@@ -99,8 +99,8 @@ describe("DailyBriefingService", () => {
   it("includes memory highlights when available", async () => {
     const deps = makeDeps({
       searchMemory: () => [
-        { summary: "Learned about caching patterns" },
-        { content: "Users prefer dark mode over light mode" },
+        { summary: "Learned about caching patterns", type: "workflow_pattern" },
+        { content: "Users prefer dark mode over light mode", type: "preference" },
       ],
     });
     const svc = new DailyBriefingService(deps);
@@ -110,14 +110,22 @@ describe("DailyBriefingService", () => {
 
     expect(memSection).toBeDefined();
     expect(memSection!.items).toHaveLength(2);
-    expect(memSection!.items[0].label).toBe("Learned about caching patterns");
+    expect(memSection!.items[0].label).toContain("Workflow pattern:");
   });
 
   // ── Suggestions section ────────────────────────────────────────
 
   it("includes active suggestions", async () => {
     const deps = makeDeps({
-      getActiveSuggestions: () => [{ title: "Optimize CI", description: "CI takes 8 minutes" }],
+      getActiveSuggestions: () => [
+        {
+          title: "Optimize CI",
+          description: "CI takes 8 minutes",
+          confidence: 0.84,
+          recommendedDelivery: "inbox",
+          urgency: "medium",
+        },
+      ],
     });
     const svc = new DailyBriefingService(deps);
 
@@ -126,6 +134,7 @@ describe("DailyBriefingService", () => {
 
     expect(sugSection).toBeDefined();
     expect(sugSection!.items[0].label).toBe("Optimize CI");
+    expect(sugSection!.items[0].detail).toContain("Delivery: inbox");
   });
 
   // ── Upcoming jobs section ──────────────────────────────────────
@@ -160,6 +169,108 @@ describe("DailyBriefingService", () => {
     expect(loopsSection!.items[0].label).toBe("Follow up on API docs");
   });
 
+  it("includes awareness digest when awareness summary is available", async () => {
+    const deps = makeDeps({
+      getAwarenessSummary: async () => ({
+        generatedAt: Date.now(),
+        workspaceId: "ws-1",
+        currentFocus: "VS Code — executor.ts",
+        whatChanged: [],
+        whatMattersNow: [
+          {
+            id: "focus-1",
+            title: "Editing executor.ts",
+            detail: "Recent context shifted into implementation work.",
+            source: "apps",
+            score: 0.8,
+            tags: ["focus"],
+            requiresHeartbeat: true,
+          },
+        ],
+        dueSoon: [
+          {
+            id: "due-1",
+            title: "Review launch checklist",
+            detail: "Due today",
+            source: "tasks",
+            score: 0.9,
+            tags: ["due_soon"],
+            requiresHeartbeat: true,
+          },
+        ],
+        beliefs: [],
+        wakeReasons: ["focus_shift", "deadline_risk"],
+      }),
+    });
+    const svc = new DailyBriefingService(deps);
+
+    const briefing = await svc.generateBriefing("ws-1");
+    const awarenessSection = briefing.sections.find((s) => s.type === "awareness_digest");
+
+    expect(awarenessSection).toBeDefined();
+    expect(awarenessSection!.items.some((item) => item.label.includes("Editing executor.ts"))).toBe(
+      true,
+    );
+    expect(
+      awarenessSection!.items.some((item) => item.label.includes("Review launch checklist")),
+    ).toBe(true);
+  });
+
+  it("includes chief-of-staff state in the awareness digest", async () => {
+    const deps = makeDeps({
+      getAwarenessSummary: async () => ({
+        generatedAt: Date.now(),
+        workspaceId: "ws-1",
+        currentFocus: "Cursor — onboarding.tsx",
+        whatChanged: [],
+        whatMattersNow: [],
+        dueSoon: [],
+        beliefs: [],
+        wakeReasons: ["focus_shift"],
+      }),
+      getAutonomyState: async () => ({
+        goals: [
+          {
+            id: "goal-1",
+            title: "Ship onboarding redesign",
+            status: "active",
+            confidence: 0.92,
+          },
+        ],
+        routines: [
+          {
+            id: "routine-1",
+            title: "editor startup",
+            description: "Prepare local work context when coding begins.",
+          },
+        ],
+      }),
+      getAutonomyDecisions: async () => [
+        {
+          id: "decision-1",
+          title: "Organize next work session",
+          description: "Turn current coding context into a concrete next-step plan.",
+          priority: "normal",
+        },
+      ],
+    });
+    const svc = new DailyBriefingService(deps);
+
+    const briefing = await svc.generateBriefing("ws-1");
+    const awarenessSection = briefing.sections.find((s) => s.type === "awareness_digest");
+
+    expect(awarenessSection).toBeDefined();
+    expect(
+      awarenessSection!.items.some((item) => item.label.includes("Goal: Ship onboarding redesign")),
+    ).toBe(true);
+    expect(
+      awarenessSection!.items.some((item) => item.label.includes("Routine: editor startup")),
+    ).toBe(true);
+    expect(
+      awarenessSection!.items.some((item) => item.label.includes("Next action: Organize next work session")),
+    ).toBe(true);
+  });
+
   // ── Config management ─────────────────────────────────────────
 
   it("returns default config for unknown workspace", () => {
@@ -178,7 +289,7 @@ describe("DailyBriefingService", () => {
         priority_review: true,
         upcoming_jobs: false,
         open_loops: true,
-        channel_digest: false,
+        awareness_digest: false,
       },
       enabled: true,
     });
