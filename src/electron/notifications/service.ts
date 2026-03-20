@@ -64,6 +64,9 @@ export class NotificationService {
     taskId?: string;
     cronJobId?: string;
     workspaceId?: string;
+    suggestionId?: string;
+    recommendedDelivery?: "briefing" | "inbox" | "nudge";
+    companionStyle?: "email" | "note";
   }): Promise<AppNotification> {
     const notification: AppNotification = {
       id: randomUUID(),
@@ -75,6 +78,9 @@ export class NotificationService {
       taskId: params.taskId,
       cronJobId: params.cronJobId,
       workspaceId: params.workspaceId,
+      suggestionId: params.suggestionId,
+      recommendedDelivery: params.recommendedDelivery,
+      companionStyle: params.companionStyle,
     };
 
     this.notifications.unshift(notification);
