@@ -39,6 +39,14 @@ export const STARTER_MISSIONS: StarterMission[] = [
     category: "research",
   },
   {
+    id: "autoresearch-report",
+    title: "Research a science question",
+    prompt:
+      "Use the autoresearch-report skill to research a scientific question I give you. Build a scope, gather evidence, and produce a cited report with an uncertainty section and artifact manifest.",
+    icon: "🔬",
+    category: "research",
+  },
+  {
     id: "review-commit",
     title: "Review my last commit",
     prompt:
@@ -52,6 +60,14 @@ export const STARTER_MISSIONS: StarterMission[] = [
     prompt:
       "Help me draft a project brief. I'll describe the project and you'll create a structured document with goals, scope, timeline, risks, and success criteria.",
     icon: "📋",
+    category: "writing",
+  },
+  {
+    id: "autonovel",
+    title: "Write a novel end-to-end",
+    prompt:
+      "Build a complete novel pipeline from my seed concept. Create the world bible, characters, outline, voice guide, canon, chapter drafts, revision notes, and final publishable artifacts.",
+    icon: "📚",
     category: "writing",
   },
   {
