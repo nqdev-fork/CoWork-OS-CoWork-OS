@@ -67,11 +67,57 @@ const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 
 // Compression delay between items (avoid rate limits)
 const COMPRESSION_DELAY_MS = 200;
+const COMPRESSION_DRAIN_DELAY_MS = 250;
+const COMPRESSION_BUDGET_WINDOW_MS = 15 * 60 * 1000;
+const COMPRESSION_BUDGET_MAX_CALLS = 3;
+const COMPRESSION_RETRY_DELAY_MS = 2 * 60 * 1000;
 const COMPRESSION_RETRY_BASE_DELAY_MS = 5_000;
 const MAX_COMPRESSION_RETRIES = 3;
 const MAX_TEXT_IMPORT_ENTRIES = 3000;
 const MAX_TEXT_IMPORT_ENTRY_CHARS = 12000;
 const PROMPT_RECALL_IGNORE_MARKER = "[cowork:prompt_recall=ignore]";
+const HEARTBEAT_BATCH_WINDOW_MS = 5 * 60 * 1000;
+const LOCAL_SUMMARY_MAX_CHARS = 220;
+
+type MemoryCaptureOrigin =
+  | "task"
+  | "heartbeat"
+  | "tool"
+  | "playbook"
+  | "proactive"
+  | "import"
+  | "system"
+  | "unknown";
+
+type MemoryCompressionPriority = "low" | "normal" | "high";
+
+export interface MemoryCaptureOptions {
+  origin?: MemoryCaptureOrigin;
+  batchKey?: string;
+  priority?: MemoryCompressionPriority;
+  signalFamily?: string;
+  batchable?: boolean;
+}
+
+interface CompressionQueueEntry {
+  workspaceId: string;
+  batchKey: string;
+  origin: MemoryCaptureOrigin;
+  priority: MemoryCompressionPriority;
+  requestedAt: number;
+}
+
+interface CompressionDiagnostics {
+  captures: number;
+  queued: number;
+  skipped: number;
+  localCompressed: number;
+  batchSummaries: number;
+  llmCalls: number;
+  deferred: number;
+  dropped: number;
+  originCounts: Record<string, number>;
+}
 
 export class MemoryService {
   private static memoryRepo: MemoryRepository;
@@ -93,9 +139,13 @@ export class MemoryService {
   private static embeddingBackfillInProgress = new Set<string>();
   private static initialized = false;
   private static compressionQueue: string[] = [];
+  private static compressionQueueEntries = new Map<string, CompressionQueueEntry>();
   private static compressionRetryCounts = new Map<string, number>();
   private static compressionInProgress = false;
   private static compressionPauseCount = 0;
+  private static compressionDrainTimer?: ReturnType<typeof setTimeout>;
+  private static compressionBudgetByWorkspace = new Map<string, number[]>();
+  private static compressionDiagnosticsByWorkspace = new Map<string, CompressionDiagnostics>();
   private static sideChannelPolicyDepth = 0;
   private static sideChannelDuringExecution: "paused" | "limited" | "enabled" = "enabled";
   private static sideChannelMaxCallsPerWindow = 2;
@@ -191,6 +241,7 @@ export class MemoryService {
     type: MemoryType,
     content: string,
     isPrivate = false,
+    options?: MemoryCaptureOptions,
   ): Promise<Memory | null> {
     this.ensureInitialized();
 
@@ -232,25 +283,54 @@ export class MemoryService {
       isPrivate: finalIsPrivate,
     });
 
-    // Best-effort: maintain local semantic index for offline hybrid retrieval.
-    // This is fast and runs locally; failures shouldn't break capture.
-    try {
-      const embedText = this.normalizeForEmbedding(memory.summary, memory.content);
-      const embedding = createLocalEmbedding(embedText);
-      this.embeddingRepo.upsert(workspaceId, memory.id, embedding, memory.updatedAt);
-      this.cacheEmbedding(workspaceId, memory.id, embedding, memory.updatedAt);
-    } catch {
-      // ignore
+    const compressionOrigin = options?.origin ?? (taskId ? "task" : "unknown");
+    this.recordCompressionCapture(workspaceId, compressionOrigin);
+    const compressionPriority = this.deriveCompressionPriority(
+      type,
+      truncatedContent,
+      tokens,
+      compressionOrigin,
+      options?.priority,
+    );
+    const compressionBatchKey = this.buildCompressionBatchKey(
+      workspaceId,
+      taskId,
+      compressionOrigin,
+      memory.createdAt,
+      options?.batchKey,
+      options?.signalFamily,
+    );
+
+    // Best-effort: keep a concise local summary immediately so retrieval and prompts
+    // do not need to consume the full raw payload for low-value entries.
+    const localSummary = this.buildDeterministicSummary(truncatedContent);
+    if (localSummary) {
+      this.updateMemorySummary(memory, workspaceId, localSummary, true);
     }
 
-    // Queue for compression if enabled and large enough.
-    // Observation memories are often verbose tool payloads; use a higher threshold
-    // to avoid a burst of low-value side LLM calls after heavy tool runs.
-    const compressionTokenThreshold =
-      type === "observation" ? MIN_TOKENS_FOR_OBSERVATION_COMPRESSION : MIN_TOKENS_FOR_COMPRESSION;
-    if (settings.compressionEnabled && tokens > compressionTokenThreshold && !finalIsPrivate) {
-      this.compressionQueue.push(memory.id);
-      this.processCompressionQueue();
+    // Queue a batched LLM digest only when the signal is worth it. Routine entries
+    // stay on the local deterministic path and do not fan out into extra calls.
+    if (
+      !finalIsPrivate &&
+      settings.compressionEnabled &&
+      this.shouldQueueCompression({
+        type,
+        content: truncatedContent,
+        tokens,
+        origin: compressionOrigin,
+        batchable: options?.batchable !== false,
+        priority: compressionPriority,
+      })
+    ) {
+      this.enqueueCompression(memory.id, {
+        workspaceId,
+        batchKey: compressionBatchKey,
+        origin: compressionOrigin,
+        priority: compressionPriority,
+        requestedAt: memory.createdAt,
+      });
+    } else {
+      this.recordCompressionDiagnostic(workspaceId, compressionOrigin, "skipped");
     }
 
     // Emit event
@@ -949,6 +1029,11 @@ export class MemoryService {
           // ignore
         }
 
+        const importedSummary = this.buildDeterministicSummary(bounded);
+        if (importedSummary) {
+          this.updateMemorySummary(memory, options.workspaceId, importedSummary, true);
+        }
+
         memoriesCreated += 1;
       } catch (error) {
         errors.push(error instanceof Error ? error.message : String(error));
@@ -990,26 +1075,121 @@ export class MemoryService {
     this.memoryEmbeddingsByWorkspace.delete(workspaceId);
     this.embeddingsLoadedForWorkspace.delete(workspaceId);
     this.embeddingBackfillInProgress.delete(workspaceId);
+    this.clearCompressionStateForWorkspace(workspaceId);
     memoryEvents.emit("memoryChanged", { type: "cleared", workspaceId });
   }
 
+  private static clearCompressionStateForWorkspace(workspaceId: string): void {
+    this.compressionBudgetByWorkspace.delete(workspaceId);
+    this.compressionDiagnosticsByWorkspace.delete(workspaceId);
+
+    const queued = this.compressionQueue.filter((memoryId) => {
+      const entry = this.compressionQueueEntries.get(memoryId);
+      if (entry && entry.workspaceId === workspaceId) {
+        this.compressionQueueEntries.delete(memoryId);
+        return false;
+      }
+      return true;
+    });
+    this.compressionQueue = queued;
+  }
+
+  static getCompressionDiagnostics(workspaceId?: string): CompressionDiagnostics {
+    this.ensureInitialized();
+
+    if (workspaceId) {
+      return this.cloneCompressionDiagnostics(
+        this.compressionDiagnosticsByWorkspace.get(workspaceId) || this.createCompressionDiagnostics(),
+      );
+    }
+
+    const aggregate = this.createCompressionDiagnostics();
+    for (const diagnostics of this.compressionDiagnosticsByWorkspace.values()) {
+      aggregate.captures += diagnostics.captures;
+      aggregate.queued += diagnostics.queued;
+      aggregate.skipped += diagnostics.skipped;
+      aggregate.localCompressed += diagnostics.localCompressed;
+      aggregate.batchSummaries += diagnostics.batchSummaries;
+      aggregate.llmCalls += diagnostics.llmCalls;
+      aggregate.deferred += diagnostics.deferred;
+      aggregate.dropped += diagnostics.dropped;
+      for (const [origin, count] of Object.entries(diagnostics.originCounts)) {
+        aggregate.originCounts[origin] = (aggregate.originCounts[origin] || 0) + count;
+      }
+    }
+    return aggregate;
+  }
+
+  private static createCompressionDiagnostics(): CompressionDiagnostics {
+    return {
+      captures: 0,
+      queued: 0,
+      skipped: 0,
+      localCompressed: 0,
+      batchSummaries: 0,
+      llmCalls: 0,
+      deferred: 0,
+      dropped: 0,
+      originCounts: {},
+    };
+  }
+
+  private static cloneCompressionDiagnostics(
+    diagnostics: CompressionDiagnostics,
+  ): CompressionDiagnostics {
+    return {
+      captures: diagnostics.captures,
+      queued: diagnostics.queued,
+      skipped: diagnostics.skipped,
+      localCompressed: diagnostics.localCompressed,
+      batchSummaries: diagnostics.batchSummaries,
+      llmCalls: diagnostics.llmCalls,
+      deferred: diagnostics.deferred,
+      dropped: diagnostics.dropped,
+      originCounts: { ...diagnostics.originCounts },
+    };
+  }
+
+  private static getCompressionDiagnosticsForWorkspace(workspaceId: string): CompressionDiagnostics {
+    const existing = this.compressionDiagnosticsByWorkspace.get(workspaceId);
+    if (existing) return existing;
+    const created = this.createCompressionDiagnostics();
+    this.compressionDiagnosticsByWorkspace.set(workspaceId, created);
+    return created;
+  }
+
+  private static recordCompressionDiagnostic(
+    workspaceId: string,
+    origin: MemoryCaptureOrigin,
+    field: keyof Omit<CompressionDiagnostics, "originCounts">,
+  ): void {
+    const diagnostics = this.getCompressionDiagnosticsForWorkspace(workspaceId);
+    diagnostics[field] += 1;
+    diagnostics.originCounts[origin] = (diagnostics.originCounts[origin] || 0) + 1;
+  }
+
+  private static recordCompressionCapture(workspaceId: string, origin: MemoryCaptureOrigin): void {
+    const diagnostics = this.getCompressionDiagnosticsForWorkspace(workspaceId);
+    diagnostics.captures += 1;
+    diagnostics.originCounts[origin] = (diagnostics.originCounts[origin] || 0) + 1;
+  }
+
   /**
-   * Pause background LLM compression to avoid contention during active task execution.
-   * Queued items are preserved and processed when resumed.
+   * Pause background compression to avoid contention during active task execution.
    */
   static pauseCompression(): void {
     this.compressionPauseCount += 1;
   }
 
   /**
-   * Resume background LLM compression and drain any queued items.
+   * Resume background compression and drain any queued items.
    */
   static resumeCompression(): void {
     if (this.compressionPauseCount > 0) {
       this.compressionPauseCount -= 1;
     }
     if (!this.isCompressionPaused() && this.compressionQueue.length > 0) {
-      this.processCompressionQueue();
+      this.scheduleCompressionDrain(0);
     }
   }
 
@@ -1039,7 +1219,7 @@ export class MemoryService {
       this.resumeCompression();
     }
     if (this.compressionQueue.length > 0) {
-      void this.processCompressionQueue();
+      this.scheduleCompressionDrain(0);
     }
   }
 
@@ -1056,7 +1236,7 @@ export class MemoryService {
       this.resumeCompression();
     }
     if (this.compressionQueue.length > 0) {
-      void this.processCompressionQueue();
+      this.scheduleCompressionDrain(0);
     }
   }
 
@@ -1070,6 +1250,223 @@ export class MemoryService {
     if (this.sideChannelCallsRemaining <= 0) return false;
     this.sideChannelCallsRemaining -= 1;
     return true;
+  }
+
+  private static shouldQueueCompression(input: {
+    type: MemoryType;
+    content: string;
+    tokens: number;
+    origin: MemoryCaptureOrigin;
+    batchable: boolean;
+    priority: MemoryCompressionPriority;
+  }): boolean {
+    if (!input.batchable) return false;
+    if (input.type === "summary" || input.type === "correction_rule") return false;
+    if (input.priority === "low") return false;
+
+    const structured = this.isStructuredLowValueContent(input.content);
+    if (structured && input.type === "observation") return false;
+
+    if (input.origin === "heartbeat") {
+      return input.tokens >= MIN_TOKENS_FOR_OBSERVATION_COMPRESSION || input.priority === "high";
+    }
+
+    if (input.type === "observation" || input.type === "insight") {
+      return input.tokens >= MIN_TOKENS_FOR_OBSERVATION_COMPRESSION;
+    }
+
+    if (
+      input.type === "decision" ||
+      input.type === "error" ||
+      input.type === "preference" ||
+      input.type === "constraint" ||
+      input.type === "timing_preference" ||
+      input.type === "workflow_pattern"
+    ) {
+      return input.tokens >= MIN_TOKENS_FOR_COMPRESSION;
+    }
+
+    return input.tokens >= MIN_TOKENS_FOR_COMPRESSION;
+  }
+
+  private static deriveCompressionPriority(
+    type: MemoryType,
+    content: string,
+    tokens: number,
+    origin: MemoryCaptureOrigin,
+    explicitPriority?: MemoryCompressionPriority,
+  ): MemoryCompressionPriority {
+    if (explicitPriority) return explicitPriority;
+
+    if (type === "summary" || type === "correction_rule") return "low";
+    if (type === "decision" || type === "error") {
+      return tokens >= MIN_TOKENS_FOR_COMPRESSION ? "high" : "normal";
+    }
+    if (type === "preference" || type === "constraint" || type === "timing_preference") {
+      return tokens >= 60 ? "normal" : "low";
+    }
+    if (type === "workflow_pattern") {
+      return tokens >= 80 ? "normal" : "low";
+    }
+    if (origin === "heartbeat") {
+      return tokens >= MIN_TOKENS_FOR_OBSERVATION_COMPRESSION ? "normal" : "low";
+    }
+    if (this.isStructuredLowValueContent(content) && tokens < MIN_TOKENS_FOR_OBSERVATION_COMPRESSION) {
+      return "low";
+    }
+    if (tokens >= MIN_TOKENS_FOR_OBSERVATION_COMPRESSION) return "normal";
+    return "low";
+  }
+
+  private static buildCompressionBatchKey(
+    workspaceId: string,
+    taskId: string | undefined,
+    origin: MemoryCaptureOrigin,
+    createdAt: number,
+    explicitBatchKey?: string,
+    signalFamily?: string,
+  ): string {
+    if (explicitBatchKey) return explicitBatchKey;
+    if (taskId) return `task:${taskId}`;
+    if (origin === "heartbeat") {
+      const family = signalFamily?.trim() || "heartbeat";
+      return `heartbeat:${workspaceId}:${family}:${Math.floor(createdAt / HEARTBEAT_BATCH_WINDOW_MS)}`;
+    }
+    return `${origin}:${workspaceId}:${Math.floor(createdAt / HEARTBEAT_BATCH_WINDOW_MS)}`;
+  }
+
+  private static isHighSignalMemoryType(type: MemoryType): boolean {
+    return (
+      type === "decision" ||
+      type === "error" ||
+      type === "preference" ||
+      type === "constraint" ||
+      type === "timing_preference" ||
+      type === "workflow_pattern" ||
+      type === "correction_rule" ||
+      type === "summary"
+    );
+  }
+
+  private static isStructuredLowValueContent(content: string): boolean {
+    const trimmed = content.trim();
+    if (!trimmed) return true;
+    if (trimmed.includes("```")) return true;
+    if (trimmed.length <= 80) return false;
+
+    const lines = trimmed.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (lines.length >= 4) {
+      const bulletCount = lines.filter((line) => /^([-*]|\d+[.)])\s+/.test(line)).length;
+      if (bulletCount >= 2) return true;
+    }
+
+    const colonCount = (trimmed.match(/:/g) || []).length;
+    if (colonCount >= 6 && lines.length >= 3) return true;
+
+    return false;
+  }
+
+  private static buildDeterministicSummary(content: string): string {
+    const trimmed = this.stripPromptRecallIgnoreMarker(content).trim();
+    if (!trimmed) return "";
+
+    const lines = trimmed.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    let summary = lines.find((line) => !line.startsWith("```")) || lines[0] || trimmed;
+    summary = summary.replace(/\s+/g, " ").trim();
+    if (summary.length > LOCAL_SUMMARY_MAX_CHARS) {
+      summary = `${summary.slice(0, LOCAL_SUMMARY_MAX_CHARS - 3)}...`;
+    }
+    return summary;
+  }
+
+  private static normalizeSummaryStorageText(content: string, maxChars = 1200): string {
+    const trimmed = this.stripPromptRecallIgnoreMarker(content).trim();
+    if (!trimmed) return "";
+    const normalized = trimmed.replace(/\n{3,}/g, "\n\n");
+    if (normalized.length <= maxChars) return normalized;
+    return `${normalized.slice(0, maxChars - 3)}...`;
+  }
+
+  private static updateMemorySummary(
+    memory: Memory,
+    workspaceId: string,
+    summary: string,
+    compressed: boolean,
+  ): void {
+    const finalSummary = this.buildDeterministicSummary(summary);
+    if (!finalSummary) return;
+
+    const summaryTokens = estimateTokens(finalSummary);
+    const updatedAt = Date.now();
+    this.memoryRepo.update(memory.id, {
+      summary: finalSummary,
+      tokens: summaryTokens,
+      isCompressed: compressed,
+    });
+    memory.summary = finalSummary;
+    memory.tokens = summaryTokens;
+    memory.isCompressed = compressed;
+    memory.updatedAt = updatedAt;
+
+    try {
+      const embedText = this.normalizeForEmbedding(finalSummary, finalSummary);
+      const embedding = createLocalEmbedding(embedText);
+      this.embeddingRepo.upsert(workspaceId, memory.id, embedding, updatedAt);
+      this.cacheEmbedding(workspaceId, memory.id, embedding, updatedAt);
+    } catch {
+      // ignore
+    }
+  }
+
+  private static enqueueCompression(memoryId: string, entry: CompressionQueueEntry): void {
+    if (this.compressionQueueEntries.has(memoryId)) return;
+    this.compressionQueueEntries.set(memoryId, entry);
+    this.compressionQueue.push(memoryId);
+    this.recordCompressionDiagnostic(entry.workspaceId, entry.origin, "queued");
+    this.scheduleCompressionDrain();
+  }
+
+  private static scheduleCompressionDrain(delayMs = COMPRESSION_DRAIN_DELAY_MS): void {
+    if (this.compressionDrainTimer) {
+      if (delayMs === 0) {
+        clearTimeout(this.compressionDrainTimer);
+        this.compressionDrainTimer = undefined;
+      } else {
+        return;
+      }
+    }
+    this.compressionDrainTimer = setTimeout(() => {
+      this.compressionDrainTimer = undefined;
+      void this.processCompressionQueue();
+    }, delayMs);
+  }
+
+  private static canSpendCompressionBudget(workspaceId: string): {
+    allowed: boolean;
+    retryAfterMs: number;
+  } {
+    const now = Date.now();
+    const history = this.compressionBudgetByWorkspace.get(workspaceId) || [];
+    const recent = history.filter((timestamp) => now - timestamp < COMPRESSION_BUDGET_WINDOW_MS);
+    this.compressionBudgetByWorkspace.set(workspaceId, recent);
+
+    if (recent.length < COMPRESSION_BUDGET_MAX_CALLS) {
+      return { allowed: true, retryAfterMs: 0 };
+    }
+
+    const oldest = recent[0] ?? now;
+    const retryAfterMs = Math.max(1_000, COMPRESSION_BUDGET_WINDOW_MS - (now - oldest));
+    return { allowed: false, retryAfterMs };
+  }
+
+  private static recordCompressionBudgetUse(workspaceId: string): void {
+    const now = Date.now();
+    const history = this.compressionBudgetByWorkspace.get(workspaceId) || [];
+    history.push(now);
+    this.compressionBudgetByWorkspace.set(
+      workspaceId,
+      history.filter((timestamp) => now - timestamp < COMPRESSION_BUDGET_WINDOW_MS),
+    );
   }
 
   /**
@@ -1087,29 +1484,92 @@ export class MemoryService {
     this.compressionInProgress = true;
 
     try {
-      // Process in batches
       const batch = this.compressionQueue.splice(0, COMPRESSION_BATCH_SIZE);
+      const grouped = new Map<
+        string,
+        {
+          workspaceId: string;
+          batchKey: string;
+          origin: MemoryCaptureOrigin;
+          priority: MemoryCompressionPriority;
+          memoryIds: string[];
+          requestedAt: number;
+        }
+      >();
 
-      for (let i = 0; i < batch.length; i += 1) {
-        const memoryId = batch[i];
-        // Check pause flag between items to yield promptly when a task starts.
+      for (const memoryId of batch) {
+        const entry = this.compressionQueueEntries.get(memoryId);
+        if (!entry) continue;
+        const key = `${entry.workspaceId}:${entry.batchKey}`;
+        const group = grouped.get(key) || {
+          workspaceId: entry.workspaceId,
+          batchKey: entry.batchKey,
+          origin: entry.origin,
+          priority: entry.priority,
+          memoryIds: [],
+          requestedAt: entry.requestedAt,
+        };
+        group.memoryIds.push(memoryId);
+        if (entry.priority === "high") group.priority = "high";
+        else if (entry.priority === "normal" && group.priority === "low") group.priority = "normal";
+        if (entry.requestedAt < group.requestedAt) group.requestedAt = entry.requestedAt;
+        grouped.set(key, group);
+      }
+
+      const deferred: string[] = [];
+
+      for (const group of grouped.values()) {
         if (this.isCompressionPaused()) {
-          this.compressionQueue.unshift(...batch.slice(i));
-          break;
+          deferred.push(...group.memoryIds);
+          continue;
         }
-        if (!this.canExecuteSideChannelCall()) {
-          this.compressionQueue.unshift(...batch.slice(i));
-          break;
+
+        const memories = group.memoryIds
+          .map((memoryId) => this.memoryRepo.findById(memoryId))
+          .filter((memory): memory is Memory => Boolean(memory));
+
+        if (memories.length === 0) {
+          for (const memoryId of group.memoryIds) {
+            this.compressionQueueEntries.delete(memoryId);
+          }
+          continue;
         }
-        await this.compressMemory(memoryId);
-        this.compressionRetryCounts.delete(memoryId);
-        // Small delay to avoid overwhelming the LLM
+
+        const budget = this.canSpendCompressionBudget(group.workspaceId);
+        const shouldUseLlm = this.shouldUseLlmForCompressionBatch(group, memories);
+
+        if (!shouldUseLlm) {
+          await this.finalizeCompressionBatchLocally(group, memories);
+        } else if (!budget.allowed) {
+          if (group.priority === "high") {
+            this.recordCompressionDiagnostic(group.workspaceId, group.origin, "deferred");
+            this.scheduleCompressionRetry(group, budget.retryAfterMs);
+            continue;
+          }
+          await this.finalizeCompressionBatchLocally(group, memories);
+          this.recordCompressionDiagnostic(group.workspaceId, group.origin, "dropped");
+        } else if (!this.canExecuteSideChannelCall()) {
+          this.recordCompressionDiagnostic(group.workspaceId, group.origin, "deferred");
+          this.scheduleCompressionRetry(group, COMPRESSION_RETRY_DELAY_MS);
+          continue;
+        } else {
+          await this.compressMemoryBatch(group, memories);
+          this.recordCompressionBudgetUse(group.workspaceId);
+        }
+
+        for (const memoryId of group.memoryIds) {
+          this.compressionQueueEntries.delete(memoryId);
+        }
+        this.compressionRetryCounts.delete(group.batchKey);
         await new Promise((resolve) => setTimeout(resolve, COMPRESSION_DELAY_MS));
       }
 
-      // Continue if more items (and not paused)
+      if (deferred.length > 0) {
+        this.compressionQueue.unshift(...deferred);
+      }
+
       if (this.compressionQueue.length > 0 && !this.isCompressionPaused()) {
-        setTimeout(() => this.processCompressionQueue(), 1000);
+        this.scheduleCompressionDrain();
       }
     } catch (error) {
       console.error("[MemoryService] Compression queue error:", error);
@@ -1118,18 +1578,182 @@ export class MemoryService {
     }
   }
 
-  /**
-   * Compress a single memory using LLM
-   */
-  private static async compressMemory(memoryId: string): Promise<void> {
-    const memory = this.memoryRepo.findById(memoryId);
-    if (!memory || memory.isCompressed || memory.summary) return;
+  private static shouldUseLlmForCompressionBatch(
+    group: {
+      workspaceId: string;
+      batchKey: string;
+      origin: MemoryCaptureOrigin;
+      priority: MemoryCompressionPriority;
+      memoryIds: string[];
+      requestedAt: number;
+    },
+    memories: Memory[],
+  ): boolean {
+    if (group.priority === "low") return false;
+    if (memories.length > 1) return true;
+    const memory = memories[0];
+    if (!memory) return false;
+    if (memory.type === "summary" || memory.type === "correction_rule") return false;
+    if (this.isStructuredLowValueContent(memory.content)) return false;
+    if (this.isHighSignalMemoryType(memory.type)) {
+      return memory.tokens >= MIN_TOKENS_FOR_COMPRESSION;
+    }
+    return memory.tokens >= MIN_TOKENS_FOR_OBSERVATION_COMPRESSION;
+  }
+
+  private static async finalizeCompressionBatchLocally(
+    group: {
+      workspaceId: string;
+      batchKey: string;
+      origin: MemoryCaptureOrigin;
+      priority: MemoryCompressionPriority;
+      memoryIds: string[];
+      requestedAt: number;
+    },
+    memories: Memory[],
+  ): Promise<void> {
+    for (const memory of memories) {
+      if (!memory.summary) {
+        this.updateMemorySummary(memory, group.workspaceId, this.buildDeterministicSummary(memory.content), true);
+      }
+    }
+
+    if (memories.length > 1) {
+      const digest = this.buildBatchDigest(group, memories);
+      await this.createBatchSummaryMemory(group, memories, digest, false);
+    }
+
+    for (const memoryId of group.memoryIds) {
+      this.compressionQueueEntries.delete(memoryId);
+    }
+
+    this.recordCompressionDiagnostic(group.workspaceId, group.origin, "localCompressed");
+    console.log(
+      `[MemoryService] Compression batch workspace=${group.workspaceId} origin=${group.origin} batchKey=${group.batchKey} items=${memories.length} mode=local`,
+    );
+  }
+
+  private static buildBatchDigest(
+    group: {
+      workspaceId: string;
+      batchKey: string;
+      origin: MemoryCaptureOrigin;
+      priority: MemoryCompressionPriority;
+      memoryIds: string[];
+      requestedAt: number;
+    },
+    memories: Memory[],
+  ): string {
+    const lines = memories.slice(0, 8).map((memory) => {
+      const summary = memory.summary || this.buildDeterministicSummary(memory.content);
+      return `- [${memory.type}] ${summary}`;
+    });
+    const extraCount = memories.length - lines.length;
+    const header = `[${group.origin} digest] ${group.batchKey}`;
+    const suffix = extraCount > 0 ? `- ... ${extraCount} more` : "";
+    return [header, ...lines, suffix].filter(Boolean).join("\n");
+  }
+
+  private static buildBatchSummaryPrompt(
+    group: {
+      workspaceId: string;
+      batchKey: string;
+      origin: MemoryCaptureOrigin;
+      priority: MemoryCompressionPriority;
+      memoryIds: string[];
+      requestedAt: number;
+    },
+    memories: Memory[],
+  ): { system: string; user: string } {
+    const lines = memories.slice(0, 12).map((memory) => {
+      const summary = this.buildDeterministicSummary(memory.summary || memory.content);
+      return `- [${memory.type}] ${summary}`;
+    });
+    const truncatedCount = Math.max(0, memories.length - lines.length);
+    const user = [
+      `Workspace: ${group.workspaceId}`,
+      `Batch key: ${group.batchKey}`,
+      `Origin: ${group.origin}`,
+      `Items: ${memories.length}`,
+      truncatedCount > 0 ? `Additional items omitted: ${truncatedCount}` : "",
+      "",
+      "Summaries:",
+      ...lines,
+      "",
+      "Write a concise durable memory digest with:",
+      "Title:",
+      "- one short line",
+      "Highlights:",
+      "- 1-4 bullets focused on durable outcomes, decisions, or blockers",
+      "Open loops:",
+      "- optional bullets only if there are unresolved items",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    return {
+      system: "You write compact durable memory digests for agent work. Be factual, concise, and avoid filler.",
+      user,
+    };
+  }
+
+  private static async compressMemoryBatch(
+    group: {
+      workspaceId: string;
+      batchKey: string;
+      origin: MemoryCaptureOrigin;
+      priority: MemoryCompressionPriority;
+      memoryIds: string[];
+      requestedAt: number;
+    },
+    memories: Memory[],
+  ): Promise<void> {
+    const { summaryText, usedLlm } = await this.generateBatchSummaryText(group, memories);
+    const storageSummary = this.normalizeSummaryStorageText(summaryText);
+    if (memories.length === 1) {
+      this.updateMemorySummary(memories[0], group.workspaceId, storageSummary, true);
+      this.recordCompressionDiagnostic(group.workspaceId, group.origin, "batchSummaries");
+      if (usedLlm) {
+        this.recordCompressionDiagnostic(group.workspaceId, group.origin, "llmCalls");
+      }
+      for (const memoryId of group.memoryIds) {
+        this.compressionQueueEntries.delete(memoryId);
+      }
+      return;
+    }
+
+    await this.createBatchSummaryMemory(group, memories, storageSummary, true);
+    for (const memoryId of group.memoryIds) {
+      this.compressionQueueEntries.delete(memoryId);
+    }
+    this.recordCompressionDiagnostic(group.workspaceId, group.origin, "batchSummaries");
+    if (usedLlm) {
+      this.recordCompressionDiagnostic(group.workspaceId, group.origin, "llmCalls");
+    }
+    console.log(
+      `[MemoryService] Compression batch workspace=${group.workspaceId} origin=${group.origin} batchKey=${group.batchKey} items=${memories.length} mode=${usedLlm ? "llm" : "deterministic"}`,
+    );
+  }
+
+  private static async generateBatchSummaryText(
+    group: {
+      workspaceId: string;
+      batchKey: string;
+      origin: MemoryCaptureOrigin;
+      priority: MemoryCompressionPriority;
+      memoryIds: string[];
+      requestedAt: number;
+    },
+    memories: Memory[],
+  ): Promise<{ summaryText: string; usedLlm: boolean }> {
+    const { system, user } = this.buildBatchSummaryPrompt(group, memories);
 
     try {
-      // Get LLM provider for compression
       const provider = LLMProviderFactory.createProvider();
       const settings = LLMProviderFactory.getSettings();
       const azureDeployment = settings.azure?.deployment || settings.azure?.deployments?.[0];
+      const azureAnthropicDeployment =
+        settings.azureAnthropic?.deployment || settings.azureAnthropic?.deployments?.[0];
       const modelId = LLMProviderFactory.getModelId(
         settings.modelKey,
         settings.providerType,
@@ -1138,6 +1762,7 @@ export class MemoryService {
         settings.openrouter?.model,
         settings.openai?.model,
         azureDeployment,
+        azureAnthropicDeployment,
         settings.groq?.model,
         settings.xai?.model,
         settings.kimi?.model,
@@ -1147,70 +1772,116 @@ export class MemoryService {
 
       const response = await provider.createMessage({
         model: modelId,
-        maxTokens: 100,
-        system: "You are a helpful assistant that summarizes text concisely.",
+        maxTokens: 160,
+        system,
         messages: [
           {
             role: "user",
-            content: `Summarize this observation in 1-2 sentences (max 50 words). Focus on the key insight, decision, or action taken. Be concise and factual.
-
-Observation:
-${memory.content}
-
-Summary:`,
+            content: user,
           },
         ],
       });
 
-      // Extract summary from response
       let summary = "";
       for (const content of response.content) {
-        if (content.type === "text") {
-          summary += content.text;
-        }
+        if (content.type === "text") summary += content.text;
       }
-      summary = summary.trim();
-
-      if (summary) {
-        const summaryTokens = estimateTokens(summary);
-        this.memoryRepo.update(memoryId, {
-          summary,
-          tokens: summaryTokens,
-          isCompressed: true,
-        });
-      }
+      summary = this.buildDeterministicSummary(summary);
+      if (summary) return { summaryText: summary, usedLlm: true };
     } catch (error) {
-      // Log but don't fail - compression is optional enhancement
-      console.warn("[MemoryService] Compression failed for memory:", memoryId, error);
-      const retryable = (error as Any)?.retryable === true;
-      if (retryable) {
-        this.scheduleCompressionRetry(memoryId);
-      } else {
-        this.compressionRetryCounts.delete(memoryId);
-      }
+      console.warn("[MemoryService] Batch compression failed:", group.batchKey, error);
+    }
+
+    return { summaryText: this.buildBatchDigest(group, memories), usedLlm: false };
+  }
+
+  private static async createBatchSummaryMemory(
+    group: {
+      workspaceId: string;
+      batchKey: string;
+      origin: MemoryCaptureOrigin;
+      priority: MemoryCompressionPriority;
+      memoryIds: string[];
+      requestedAt: number;
+    },
+    memories: Memory[],
+    summaryText: string,
+    compressed: boolean,
+  ): Promise<void> {
+    const summary = this.normalizeSummaryStorageText(summaryText);
+    if (!summary) return;
+
+    const taskId = this.extractSharedTaskId(memories);
+    const batchMemory = this.memoryRepo.create({
+      workspaceId: group.workspaceId,
+      taskId,
+      type: "summary",
+      content: summary,
+      summary,
+      tokens: estimateTokens(summary),
+      isCompressed: compressed,
+      isPrivate: false,
+    });
+
+    this.updateEmbeddingForMemory(batchMemory, group.workspaceId, summary);
+  }
+
+  private static extractSharedTaskId(memories: Memory[]): string | undefined {
+    if (memories.length === 0) return undefined;
+    const firstTaskId = memories[0].taskId;
+    if (!firstTaskId) return undefined;
+    for (const memory of memories) {
+      if (memory.taskId !== firstTaskId) return undefined;
+    }
+    return firstTaskId;
+  }
+
+  private static updateEmbeddingForMemory(
+    memory: Memory,
+    workspaceId: string,
+    summary: string,
+  ): void {
+    try {
+      const embedText = this.normalizeForEmbedding(summary, summary);
+      const embedding = createLocalEmbedding(embedText);
+      this.embeddingRepo.upsert(workspaceId, memory.id, embedding, memory.updatedAt);
+      this.cacheEmbedding(workspaceId, memory.id, embedding, memory.updatedAt);
+    } catch {
+      // ignore
     }
   }
 
-  private static scheduleCompressionRetry(memoryId: string): void {
-    const attempts = (this.compressionRetryCounts.get(memoryId) || 0) + 1;
+  private static scheduleCompressionRetry(
+    group: {
+      workspaceId: string;
+      batchKey: string;
+      origin: MemoryCaptureOrigin;
+      priority: MemoryCompressionPriority;
+      memoryIds: string[];
+      requestedAt: number;
+    },
+    delayMs: number,
+  ): void {
+    const attempts = (this.compressionRetryCounts.get(group.batchKey) || 0) + 1;
     if (attempts > MAX_COMPRESSION_RETRIES) {
-      this.compressionRetryCounts.delete(memoryId);
+      this.compressionRetryCounts.delete(group.batchKey);
+      this.recordCompressionDiagnostic(group.workspaceId, group.origin, "dropped");
       console.warn(
-        `[MemoryService] Compression retry limit reached for memory ${memoryId}; giving up.`,
+        `[MemoryService] Compression retry limit reached for batch ${group.batchKey}; giving up.`,
       );
       return;
     }
 
-    this.compressionRetryCounts.set(memoryId, attempts);
-    const delayMs = COMPRESSION_RETRY_BASE_DELAY_MS * 2 ** (attempts - 1);
+    this.compressionRetryCounts.set(group.batchKey, attempts);
+    const retryDelayMs = Math.max(delayMs, COMPRESSION_RETRY_BASE_DELAY_MS * 2 ** (attempts - 1));
     setTimeout(() => {
-      if (!this.compressionQueue.includes(memoryId)) {
-        this.compressionQueue.push(memoryId);
+      for (const memoryId of group.memoryIds) {
+        if (!this.compressionQueue.includes(memoryId)) {
+          this.compressionQueue.push(memoryId);
+        }
       }
-      if (!this.isCompressionPaused()) {
-        void this.processCompressionQueue();
-      }
-    }, delayMs);
+      this.scheduleCompressionDrain(0);
+    }, retryDelayMs);
   }
 
   /**
@@ -1449,6 +2120,10 @@ Summary:`,
       clearInterval(this.cleanupIntervalHandle);
       this.cleanupIntervalHandle = undefined;
     }
+    if (this.compressionDrainTimer) {
+      clearTimeout(this.compressionDrainTimer);
+      this.compressionDrainTimer = undefined;
+    }
     memoryEvents.removeAllListeners();
     this.memoryEmbeddingsByWorkspace.clear();
     this.importedEmbeddings.clear();
@@ -1457,6 +2132,11 @@ Summary:`,
     this.importedEmbeddingBackfillInProgress = false;
     this.embeddingsLoadedForWorkspace.clear();
     this.embeddingBackfillInProgress.clear();
+    this.compressionQueue = [];
+    this.compressionQueueEntries.clear();
+    this.compressionRetryCounts.clear();
+    this.compressionBudgetByWorkspace.clear();
+    this.compressionDiagnosticsByWorkspace.clear();
     this.initialized = false;
     console.log("[MemoryService] Shutdown complete");
   }
