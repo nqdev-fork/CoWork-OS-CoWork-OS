@@ -106,11 +106,13 @@ export class ImageTools {
     return [
       {
         name: "generate_image",
-        description: `Generate an image from a text description using AI. CoWork OS will pick the best configured provider by default (Gemini/OpenAI/Azure OpenAI), unless you specify a provider/model.
+        description: `Generate an image from a text description using AI. CoWork OS will pick the best configured provider by default (Gemini/OpenAI/Azure/OpenRouter), unless you specify a provider/model.
 
 Providers/models:
 - OpenAI: gpt-image-1, gpt-image-1.5, dall-e-3, dall-e-2 (also accepts "gpt-1.5" alias)
 - Azure OpenAI: model maps to a deployment name (configured in Settings)
+- OpenRouter: gpt-image-1.5 via openai/gpt-image-1.5
+- Gemini: nano-banana-2 (gemini-3.1-flash-image-preview), gemini-image-pro, gemini-image-fast
 
 The generated images are saved to the workspace folder.`,
         input_schema: {
@@ -123,7 +125,7 @@ The generated images are saved to the workspace folder.`,
             },
             provider: {
               type: "string",
-              enum: ["auto", "gemini", "openai", "azure"],
+              enum: ["auto", "gemini", "openai", "azure", "openrouter"],
               description:
                 'Optional provider override. "auto" uses the configured default with fallbacks (default: auto).',
             },
