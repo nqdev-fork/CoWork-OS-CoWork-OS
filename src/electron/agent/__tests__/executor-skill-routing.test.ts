@@ -11,14 +11,18 @@ vi.mock("../custom-skill-loader", () => ({
 import { TaskExecutor } from "../executor";
 
 describe("TaskExecutor high-confidence natural-language skill routing", () => {
-  function createExecutor(prompt: string) {
+  function createExecutor(prompt: string, taskOverrides: Any = {}) {
     const executor = Object.create(TaskExecutor.prototype) as Any;
 
     executor.task = {
       id: "task-skill-route-1",
       title: "Routing test",
       prompt,
+      rawPrompt: taskOverrides.rawPrompt,
+      parentTaskId: taskOverrides.parentTaskId,
+      agentType: taskOverrides.agentType,
       createdAt: Date.now() - 1000,
+      ...taskOverrides,
     };
 
     executor.getAvailableTools = vi.fn(() => [{ name: "use_skill" }]);
@@ -176,6 +180,9 @@ describe("TaskExecutor high-confidence natural-language skill routing", () => {
       parameters: {},
     });
     expect(executor.task.prompt).toBe("Expanded dual-agent review workflow");
+    expect(executor.task.rawPrompt).toBe(
+      "Use the autonovel skill. Seed: a climatologist discovers a fog city.",
+    );
   });
 
   it("explicitly routes when the prompt names the autoresearch-report skill", async () => {
@@ -215,5 +222,34 @@ describe("TaskExecutor high-confidence natural-language skill routing", () => {
       parameters: {},
     });
     expect(executor.task.prompt).toBe("Expanded dual-agent review workflow");
+  });
+
+  it("does not deterministically auto-route delegated child tasks", async () => {
+    rankModelInvocableSkillsForQuery.mockReturnValue([
+      {
+        skill: {
+          id: "usecase-chief-of-staff-briefing",
+          name: "Chief of Staff Briefing",
+          description: "Produce a morning chief-of-staff briefing.",
+          parameters: [],
+        },
+        score: 0.97,
+      },
+    ]);
+
+    const prompt =
+      "Your mission is to found, design, and launch a public micro-state with working institutions.";
+    const executor = createExecutor(prompt, {
+      parentTaskId: "parent-1",
+      agentType: "sub",
+    });
+
+    const handled = await (TaskExecutor as Any).prototype.maybeHandleHighConfidenceSkillRouting.call(
+      executor,
+    );
+
+    expect(handled).toBe(false);
+    expect(executor.toolRegistry.executeTool).not.toHaveBeenCalled();
+    expect(executor.task.prompt).toBe(prompt);
   });
 });
