@@ -75,7 +75,10 @@ export class PlaybookService {
     }
 
     try {
-      await MemoryService.capture(workspaceId, taskId, "insight", content);
+      await MemoryService.capture(workspaceId, taskId, "insight", content, false, {
+        origin: "playbook",
+        batchable: false,
+      });
     } catch (err) {
       console.warn("[PlaybookService] Failed to capture playbook entry:", err);
     }
