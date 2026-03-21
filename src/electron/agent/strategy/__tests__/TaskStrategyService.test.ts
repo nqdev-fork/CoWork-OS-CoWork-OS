@@ -79,13 +79,14 @@ describe("TaskStrategyService applyToAgentConfig", () => {
     expect(config.executionMode).toBe("plan");
   });
 
-  it("downshifts stale execute mode for chat intent", () => {
+  it("keeps execute mode for chat intent so chat-like tasks still use the task pipeline", () => {
     const route = makeRoute({ intent: "chat" });
     const strategy = TaskStrategyService.derive(route, { executionMode: "execute" });
-    expect(strategy.executionMode).toBe("chat");
+    expect(strategy.executionMode).toBe("execute");
 
     const config = TaskStrategyService.applyToAgentConfig({ executionMode: "execute" }, strategy);
-    expect(config.executionMode).toBe("chat");
+    expect(config.executionMode).toBe("execute");
+    expect(config.executionModeSource).toBe("strategy");
   });
 
   it("preserves explicit non-execute override for execution intent", () => {
@@ -190,11 +191,12 @@ describe("TaskStrategyService applyToAgentConfig", () => {
     expect(config.mutationCheckpointRetryBudget).toBe(1);
   });
 
-  it("returns chat mode and no tools for chat intent", () => {
+  it("keeps chat intent conversationMode but leaves executionMode on execute", () => {
     const route = makeRoute({ intent: "chat" });
     const strategy = TaskStrategyService.derive(route);
-    expect(strategy.executionMode).toBe("chat");
-    expect(TaskStrategyService.getRelevantToolSet("chat").size).toBe(0);
+    expect(strategy.conversationMode).toBe("chat");
+    expect(strategy.executionMode).toBe("execute");
+    expect(strategy.answerFirst).toBe(false);
   });
 
   it("forces execute mode and at least 80 turns for build+verify+render artifact prompts", () => {
