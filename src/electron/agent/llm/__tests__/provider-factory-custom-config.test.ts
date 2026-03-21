@@ -24,7 +24,9 @@ function getModelIdWithCustomProviders(
     undefined,
     undefined,
     undefined,
+    undefined,
     customProviders,
+    undefined,
   );
 }
 
@@ -82,6 +84,8 @@ describe("LLMProviderFactory custom provider config resolution", () => {
       undefined,
       undefined,
       undefined,
+      undefined,
+      undefined,
     );
 
     expect(modelId).toBe("my-deployment");
@@ -91,6 +95,8 @@ describe("LLMProviderFactory custom provider config resolution", () => {
     const modelId = LLMProviderFactory.getModelId(
       "sonnet-3-5",
       "bedrock",
+      undefined,
+      undefined,
       undefined,
       undefined,
       undefined,
