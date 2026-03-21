@@ -133,7 +133,7 @@ export class TaskStrategyService {
         conversationMode: "chat",
         maxTurns: 16,
         qualityPasses: 1,
-        answerFirst: true,
+        answerFirst: false,
         boundedResearch: true,
         timeoutFinalizeBias: true,
         preflightRequired: false,
@@ -268,8 +268,8 @@ export class TaskStrategyService {
       buildVerifyRenderArtifactRequested ||
       buildRenderArtifactRequested
         ? "execute"
-        : route.intent === "chat" || route.intent === "thinking"
-          ? "chat"
+      : route.intent === "chat" || route.intent === "thinking"
+          ? "execute"
           : "plan";
     const existingExecutionMode = existing?.executionMode;
     // Verified mode is always user-selected; preserve it and force planning.
