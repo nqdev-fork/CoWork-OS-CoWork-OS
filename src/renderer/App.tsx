@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { useReplayMode } from "./hooks/useReplayMode";
 import { Sidebar } from "./components/Sidebar";
 import { MainContent } from "./components/MainContent";
 import { RightPanel } from "./components/RightPanel";
@@ -1880,6 +1881,7 @@ export function App() {
   };
 
   const selectedTask = remoteTaskView?.task || tasks.find((t) => t.id === selectedTaskId);
+  const replayControls = useReplayMode(events, selectedTask);
   const activeInputRequest = useMemo(() => {
     if (remoteTaskView) return null;
     if (!selectedTaskId) return null;
@@ -2835,7 +2837,8 @@ export function App() {
                 task={selectedTask}
                 selectedTaskId={selectedTaskId}
                 workspace={currentWorkspace}
-                events={events}
+                events={replayControls.replayEvents}
+                replayControls={replayControls}
                 childTasks={remoteTaskView ? [] : childTasks}
                 childEvents={remoteTaskView ? [] : childEvents}
                 onSelectChildTask={(taskId) => {
