@@ -7,6 +7,11 @@
 
 import { describe, it, expect, beforeEach as _beforeEach, vi as _vi } from "vitest";
 import type { Task, AgentConfig, AgentType, Workspace as _Workspace } from "../../../../shared/types";
+import {
+  isExplicitCodexSpawnRequest,
+  resolveExternalRuntimePermissionMode,
+  resolveSpawnAgentExternalRuntime,
+} from "../registry";
 
 // Helper functions that mirror the implementation in registry.ts
 function resolveModelPreference(preference: string | undefined, currentModelKey?: string): string {
@@ -265,6 +270,96 @@ describe("spawn_agent AgentConfig building", () => {
       maxTurns: 15,
       retainMemory: false,
     });
+  });
+
+  it("detects explicit Codex spawn requests from runtime_agent", () => {
+    expect(
+      isExplicitCodexSpawnRequest({
+        runtime_agent: "codex",
+        prompt: "Review the diff",
+      }),
+    ).toBe(true);
+  });
+
+  it("detects explicit Codex spawn requests from prompt/title hints", () => {
+    expect(
+      isExplicitCodexSpawnRequest({
+        title: "Codex CLI Agent",
+        prompt: "Review the diff",
+      }),
+    ).toBe(true);
+    expect(
+      isExplicitCodexSpawnRequest({
+        prompt: "Use codex to audit this patch",
+      }),
+    ).toBe(true);
+  });
+
+  it("maps autonomous external runtime tasks to approve-all", () => {
+    expect(
+      resolveExternalRuntimePermissionMode({
+        prompt: "Implement the fix",
+        autonomousMode: true,
+      }),
+    ).toBe("approve-all");
+  });
+
+  it("maps read-mostly Codex tasks to approve-reads", () => {
+    expect(
+      resolveExternalRuntimePermissionMode({
+        prompt: "Analyze the code and review the patch",
+      }),
+    ).toBe("approve-reads");
+  });
+
+  it("maps mutating Codex tasks to deny-all by default", () => {
+    expect(
+      resolveExternalRuntimePermissionMode({
+        prompt: "Implement the fix and edit the files",
+      }),
+    ).toBe("deny-all");
+  });
+
+  it("builds acpx external runtime from an explicit runtime override", () => {
+    expect(
+      resolveSpawnAgentExternalRuntime({
+        runtime: "acpx",
+        runtime_agent: "codex",
+        prompt: "Review the patch",
+        defaultCodexRuntimeMode: "native",
+      }),
+    ).toEqual({
+      kind: "acpx",
+      agent: "codex",
+      sessionMode: "persistent",
+      outputMode: "json",
+      permissionMode: "approve-reads",
+    });
+  });
+
+  it("builds acpx external runtime from the default Codex runtime setting for explicit Codex flows", () => {
+    expect(
+      resolveSpawnAgentExternalRuntime({
+        title: "Codex CLI Agent",
+        prompt: "Review the patch",
+        defaultCodexRuntimeMode: "acpx",
+      }),
+    ).toEqual({
+      kind: "acpx",
+      agent: "codex",
+      sessionMode: "persistent",
+      outputMode: "json",
+      permissionMode: "approve-reads",
+    });
+  });
+
+  it("does not opt generic child tasks into acpx from the Codex default alone", () => {
+    expect(
+      resolveSpawnAgentExternalRuntime({
+        prompt: "Analyze the codebase",
+        defaultCodexRuntimeMode: "acpx",
+      }),
+    ).toBeUndefined();
   });
 });
 
