@@ -224,6 +224,7 @@ export function fromOpenAICompatibleResponse(response: Any): LLMResponse {
       ? {
           inputTokens: response.usage.prompt_tokens || 0,
           outputTokens: response.usage.completion_tokens || 0,
+          cachedTokens: response.usage.prompt_tokens_details?.cached_tokens || undefined,
         }
       : undefined,
   };
