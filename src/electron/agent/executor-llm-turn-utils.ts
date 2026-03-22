@@ -36,7 +36,7 @@ export async function requestLLMResponseWithAdaptiveBudget(opts: {
     timeoutMs: number,
     operation: string,
   ) => Promise<Any>;
-  updateTracking: (inputTokens: number, outputTokens: number) => void;
+  updateTracking: (inputTokens: number, outputTokens: number, cachedTokens?: number) => void;
   log: (message: string) => void;
 }): Promise<{ response: Any; availableTools: Any[] }> {
   const availableTools = opts.getAvailableTools();
@@ -90,11 +90,11 @@ export async function requestLLMResponseWithAdaptiveBudget(opts: {
   opts.log(
     `  │ LLM call done | duration=${llmCallDuration}s | stopReason=${response.stopReason} | ` +
       `toolUseBlocks=${toolUseBlocks.length} | textLen=${textLen} | ` +
-      `inputTokens=${response.usage?.inputTokens ?? "?"} | outputTokens=${response.usage?.outputTokens ?? "?"}`,
+      `inputTokens=${response.usage?.inputTokens ?? "?"} | outputTokens=${response.usage?.outputTokens ?? "?"} | cachedTokens=${response.usage?.cachedTokens ?? 0}`,
   );
 
   if (response.usage) {
-    opts.updateTracking(response.usage.inputTokens, response.usage.outputTokens);
+    opts.updateTracking(response.usage.inputTokens, response.usage.outputTokens, response.usage.cachedTokens);
   }
 
   return { response, availableTools };
