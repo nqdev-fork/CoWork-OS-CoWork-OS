@@ -202,6 +202,7 @@ vi.mock("../builtin-settings", () => ({
     isToolEnabled: vi.fn().mockReturnValue(true),
     getToolCategory: vi.fn().mockReturnValue("skills"),
     getToolPriority: vi.fn().mockReturnValue("normal"),
+    getCodexRuntimeMode: vi.fn().mockReturnValue("native"),
   },
 }));
 
@@ -228,6 +229,7 @@ vi.mock("../mention-tools", () => {
 
 // Import after mocking
 import { ToolRegistry } from "../registry";
+import { BuiltinToolsSettingsManager } from "../builtin-settings";
 import type { Workspace } from "../../../../shared/types";
 
 // Helper to create a test skill
@@ -581,6 +583,84 @@ describe("use_skill tool", () => {
       expect(result.success).toBe(true);
       expect(result.skill_id).toBe("codex-cli");
       expect(result.expanded_prompt).toContain("codex");
+    });
+
+    it("should expand codex-cli into an acpx-backed child task when the setting prefers acpx", async () => {
+      const runtimeSpy = vi
+        .spyOn(BuiltinToolsSettingsManager, "getCodexRuntimeMode")
+        .mockReturnValue("acpx");
+      const skill = createTestSkill({
+        id: "codex-cli",
+        name: "Codex CLI Agent",
+        prompt: "legacy prompt should be bypassed",
+        parameters: [],
+        metadata: {
+          routing: {
+            keywords: ["codex"],
+          },
+        },
+      });
+      mockSkills.set("codex-cli", skill);
+      mockDaemon.getTaskById.mockResolvedValue({
+        id: "test-task-123",
+        title: "Review workspace diff",
+        prompt:
+          'Review the current workspace changes by spawning a child agent titled "Codex review" and have it inspect the diff.',
+      });
+
+      try {
+        const result = await registry.executeTool("use_skill", {
+          skill_id: "codex-cli",
+        });
+
+        expect(result.success).toBe(true);
+        expect(result.expanded_prompt).toContain("spawn_agent");
+        expect(result.expanded_prompt).toContain('`runtime`: `"acpx"`');
+        expect(result.expanded_prompt).toContain('`runtime_agent`: `"codex"`');
+        expect(result.expanded_prompt).toContain("Review the current workspace changes and inspect the diff.");
+        expect(result.expanded_prompt).not.toContain("legacy prompt should be bypassed");
+        expect(result.expanded_prompt).not.toContain("Phase 0");
+        expect(result.expanded_prompt).not.toContain("Read `{baseDir}/SKILL.md`");
+      } finally {
+        runtimeSpy.mockRestore();
+      }
+    });
+
+    it("should expand codex-cli into a native child task when the setting prefers native", async () => {
+      const runtimeSpy = vi
+        .spyOn(BuiltinToolsSettingsManager, "getCodexRuntimeMode")
+        .mockReturnValue("native");
+      const skill = createTestSkill({
+        id: "codex-cli",
+        name: "Codex CLI Agent",
+        prompt: "legacy prompt should be bypassed",
+        parameters: [],
+        metadata: {
+          routing: {
+            keywords: ["codex"],
+          },
+        },
+      });
+      mockSkills.set("codex-cli", skill);
+      mockDaemon.getTaskById.mockResolvedValue({
+        id: "test-task-123",
+        title: "Use codex to fix the failing test",
+        prompt: "Use codex to fix the failing test in the current workspace",
+      });
+
+      try {
+        const result = await registry.executeTool("use_skill", {
+          skill_id: "codex-cli",
+        });
+
+        expect(result.success).toBe(true);
+        expect(result.expanded_prompt).toContain("spawn_agent");
+        expect(result.expanded_prompt).toContain("Omit `runtime` so the child uses the native Codex CLI path.");
+        expect(result.expanded_prompt).not.toContain('`runtime`: `"acpx"`');
+        expect(result.expanded_prompt).toContain("fix the failing test in the current workspace.");
+      } finally {
+        runtimeSpy.mockRestore();
+      }
     });
   });
 
