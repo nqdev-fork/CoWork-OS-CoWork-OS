@@ -18,6 +18,7 @@ import {
   ComparisonSessionStatus,
   ComparisonResult,
 } from "../../shared/types";
+import { isActiveTaskStatus, normalizeTaskLifecycleState } from "../../shared/task-status";
 import { isTimelineEventType, normalizeTaskEventToTimelineV2 } from "../../shared/timeline-v2";
 
 /**
@@ -309,10 +310,23 @@ export class TaskRepository {
   ]);
 
   update(id: string, updates: Partial<Task>): void {
+    const normalizedUpdates: Partial<Task> = { ...updates };
+    if (isActiveTaskStatus(normalizedUpdates.status)) {
+      if (!Object.prototype.hasOwnProperty.call(normalizedUpdates, "completedAt")) {
+        normalizedUpdates.completedAt = undefined;
+      }
+      if (!Object.prototype.hasOwnProperty.call(normalizedUpdates, "terminalStatus")) {
+        normalizedUpdates.terminalStatus = undefined;
+      }
+      if (!Object.prototype.hasOwnProperty.call(normalizedUpdates, "failureClass")) {
+        normalizedUpdates.failureClass = undefined;
+      }
+    }
+
     const fields: string[] = [];
     const values: Any[] = [];
 
-    Object.entries(updates).forEach(([key, value]) => {
+    Object.entries(normalizedUpdates).forEach(([key, value]) => {
       // Validate field name against whitelist
       if (!TaskRepository.ALLOWED_UPDATE_FIELDS.has(key)) {
         console.warn(`Ignoring unknown field in task update: ${key}`);
@@ -588,7 +602,7 @@ export class TaskRepository {
   }
 
   private mapRowToTask(row: Any): Task {
-    return {
+    return normalizeTaskLifecycleState({
       id: row.id,
       title: row.title,
       prompt: row.prompt,
@@ -680,7 +694,7 @@ export class TaskRepository {
         typeof row.request_depth === "number" ? row.request_depth : undefined,
       billingCode: row.billing_code || undefined,
       targetNodeId: row.target_node_id || undefined,
-    };
+    });
   }
 
   findByTargetNodeId(nodeId: string, limit = 50): Task[] {
