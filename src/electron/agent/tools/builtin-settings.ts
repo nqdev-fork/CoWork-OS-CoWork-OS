@@ -192,6 +192,7 @@ const TOOL_CATEGORIES: Record<string, keyof BuiltinToolsSettings["categories"]> 
   create_document: "skill",
   generate_document: "skill",
   edit_document: "skill",
+  edit_pdf_region: "skill",
   create_presentation: "skill",
   generate_presentation: "skill",
   organize_folder: "skill",

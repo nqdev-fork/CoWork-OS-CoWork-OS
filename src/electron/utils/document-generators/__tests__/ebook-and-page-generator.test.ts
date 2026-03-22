@@ -46,7 +46,7 @@ describe("ebook and landing page generators", () => {
       subtitle: "A fiction project",
       description: "A short landing page for a story pipeline.",
       author: "CoWork OS",
-      badge: "Autonovel",
+      badge: "Novelist",
       callToAction: { label: "Read more", href: "#details" },
       sections: [{ title: "Overview", content: "This is a story project." }],
     });
@@ -55,7 +55,7 @@ describe("ebook and landing page generators", () => {
     const html = fs.readFileSync(outputPath, "utf8");
     expect(html).toContain("Test Novel");
     expect(html).toContain("A fiction project");
-    expect(html).toContain("Autonovel");
+    expect(html).toContain("Novelist");
     expect(html).toContain('href="#details"');
   });
 

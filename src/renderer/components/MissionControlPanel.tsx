@@ -51,6 +51,15 @@ interface HeartbeatStatusInfo {
   heartbeatStatus: HeartbeatStatus;
   lastHeartbeatAt?: number;
   nextHeartbeatAt?: number;
+  lastPulseResult?: import("../../shared/types").HeartbeatPulseResultKind;
+  lastDispatchKind?: string;
+  deferred?: import("../../shared/types").HeartbeatDeferredState;
+  compressedSignalCount?: number;
+  dueProactiveCount?: number;
+  checklistDueCount?: number;
+  dispatchCooldownUntil?: number;
+  dispatchesToday?: number;
+  maxDispatchesPerDay?: number;
 }
 
 const BOARD_COLUMNS: MissionColumn[] = [
@@ -1333,6 +1342,17 @@ export function MissionControlPanel({
                           {agentContext.getUiCopy("mcHeartbeatNext", {
                             time: formatRelativeTime(statusInfo.nextHeartbeatAt),
                           })}
+                        </span>
+                      )}
+                      {statusInfo?.heartbeatEnabled && (
+                        <span className="mc-heartbeat-time">
+                          {statusInfo.deferred?.active
+                            ? `Deferred · ${statusInfo.deferred.compressedSignalCount || 0} compressed`
+                            : `Pulse ${statusInfo.lastPulseResult || "idle"}${
+                                statusInfo.lastDispatchKind
+                                  ? ` · dispatch ${statusInfo.lastDispatchKind}`
+                                  : ""
+                              }`}
                         </span>
                       )}
                     </div>

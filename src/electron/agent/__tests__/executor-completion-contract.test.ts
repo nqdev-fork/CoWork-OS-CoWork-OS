@@ -163,7 +163,11 @@ describe("TaskExecutor completion contract integration", () => {
     expect(executor.daemon.completeTask).toHaveBeenCalledTimes(1);
   });
 
-  it("does not complete the task when a direct answer is required but missing", async () => {
+  it("completes with partial success when a direct answer is required but missing and an artifact was created", async () => {
+    // "Task missing direct answer" no longer hard-blocks completion: when a task is resumed
+    // after an app restart with no snapshot the answer may have already been delivered.
+    // If substantive evidence exists (e.g. a created file) the executor completes via
+    // partial success rather than failing outright.
     const executor = createExecuteHarness({
       title: "Video decision",
       prompt:
@@ -175,12 +179,14 @@ describe("TaskExecutor completion contract integration", () => {
 
     await (executor as Any).execute();
 
-    expect(executor.daemon.completeTask).not.toHaveBeenCalled();
-    expect(executor.daemon.updateTask).toHaveBeenCalledWith(
+    expect(executor.daemon.completeTask).toHaveBeenCalledWith(
       "task-1",
+      expect.any(String),
       expect.objectContaining({
-        status: "failed",
-        error: expect.stringContaining("missing direct answer"),
+        bestKnownOutcome: expect.objectContaining({
+          terminalStatus: "partial_success",
+          failureClass: "contract_error",
+        }),
       }),
     );
   });
@@ -302,7 +308,10 @@ DOCUMENT CREATION BEST PRACTICES:
     );
   });
 
-  it("does not complete canvas build tasks when write_file and canvas_push evidence is missing", async () => {
+  it("completes canvas build tasks with partial success when canvas_push evidence is missing but an artifact was created", async () => {
+    // "Task missing required tool evidence" no longer hard-blocks completion.
+    // When a file artifact was created the executor falls through to partial success
+    // rather than failing, matching the same semantics as the direct-answer case.
     const executor = createExecuteHarness({
       title: "Competition demo",
       prompt: "Build something to win this competition and show it in canvas.",
@@ -314,12 +323,13 @@ DOCUMENT CREATION BEST PRACTICES:
 
     await (executor as Any).execute();
 
-    expect(executor.daemon.completeTask).not.toHaveBeenCalled();
-    expect(executor.daemon.updateTask).toHaveBeenCalledWith(
+    expect(executor.daemon.completeTask).toHaveBeenCalledWith(
       "task-1",
+      expect.any(String),
       expect.objectContaining({
-        status: "failed",
-        error: expect.stringContaining("missing required tool evidence"),
+        bestKnownOutcome: expect.objectContaining({
+          terminalStatus: "partial_success",
+        }),
       }),
     );
   });

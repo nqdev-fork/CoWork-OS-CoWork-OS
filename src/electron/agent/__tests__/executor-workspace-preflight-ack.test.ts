@@ -24,7 +24,7 @@ describe("TaskExecutor workspace preflight acknowledgement", () => {
     })),
   });
 
-  it("pauses on workspace mismatch when acknowledgement is not set", () => {
+  it("does not pause on workspace mismatch — proceeds without asking", () => {
     const pauseForUserInput = vi.fn();
     const fakeThis: Any = {
       ...buildBase(),
@@ -33,9 +33,8 @@ describe("TaskExecutor workspace preflight acknowledgement", () => {
     };
 
     const shouldPause = (TaskExecutor as Any).prototype.preflightWorkspaceCheck.call(fakeThis);
-    expect(shouldPause).toBe(true);
-    expect(pauseForUserInput).toHaveBeenCalledTimes(1);
-    expect(pauseForUserInput.mock.calls[0][1]).toBe("workspace_mismatch");
+    expect(shouldPause).toBe(false);
+    expect(pauseForUserInput).not.toHaveBeenCalled();
   });
 
   it("does not pause when the selected workspace is empty", () => {

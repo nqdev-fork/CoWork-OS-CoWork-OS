@@ -6,11 +6,13 @@ import { getUserDataDir } from "../utils/user-data-dir";
 
 const KIT_DIRNAME = ".cowork";
 const STATE_FILENAME = "heartbeat-maintenance-state.json";
+const checklistCache = new Map<string, { revisionHash: string; items: HeartbeatChecklistItem[] }>();
 
 export type HeartbeatChecklistCadence = "heartbeat" | "hourly" | "daily" | "weekly" | "monthly";
 
 export interface HeartbeatChecklistItem {
   id: string;
+  workspaceId?: string;
   title: string;
   sectionTitle: string;
   cadence: HeartbeatChecklistCadence;
@@ -81,25 +83,33 @@ export function getHeartbeatChecklistPath(workspacePath?: string): string | unde
   return path.join(root, KIT_DIRNAME, "HEARTBEAT.md");
 }
 
-export function readHeartbeatChecklist(workspacePath?: string): HeartbeatChecklistItem[] {
+export function readHeartbeatChecklist(
+  workspacePath?: string,
+  workspaceId?: string,
+): HeartbeatChecklistItem[] {
   const root = typeof workspacePath === "string" ? workspacePath.trim() : "";
   if (!root) return [];
+  const sourcePath = getHeartbeatChecklistPath(root) || path.join(root, KIT_DIRNAME, "HEARTBEAT.md");
+  const rawText = readTextFile(sourcePath, Number.MAX_SAFE_INTEGER);
+  const revisionHash = rawText ? createHash("sha1").update(rawText).digest("hex") : "";
+  const cached = checklistCache.get(root);
+  if (cached && cached.revisionHash === revisionHash) {
+    return cached.items.map((item) => ({ ...item, workspaceId }));
+  }
 
   const heartbeatSection = buildWorkspaceKitSections({
     workspacePath: root,
     scopes: ["heartbeat"],
   }).find((section) => section.file === "HEARTBEAT.md");
   if (!heartbeatSection) return [];
-
-  const sourcePath = getHeartbeatChecklistPath(root) || path.join(root, KIT_DIRNAME, "HEARTBEAT.md");
   const tasks = parseHeartbeatChecklist(heartbeatSection.parsed.body);
-
-  return tasks.map((task) => {
+  const items = tasks.map((task) => {
     const sectionTitle = task.cadence || "Heartbeat";
     const normalizedTitle = normalizeBullet(task.check);
     const { cadence, cadenceMs } = getCadence(sectionTitle);
     return {
       id: hashId(`${sectionTitle}\n${normalizedTitle}`),
+      workspaceId,
       title: normalizedTitle,
       sectionTitle,
       cadence,
@@ -107,6 +117,14 @@ export function readHeartbeatChecklist(workspacePath?: string): HeartbeatCheckli
       sourcePath,
     };
   });
+  checklistCache.set(
+    root,
+    {
+      revisionHash,
+      items: items.map((item) => ({ ...item, workspaceId: undefined })),
+    },
+  );
+  return items.map((item) => ({ ...item, workspaceId }));
 }
 
 export function buildHeartbeatWorkspaceContext(workspacePath?: string, now = new Date()): string {

@@ -179,6 +179,14 @@ const TRANSIENT_MAIN_PROCESS_ERROR_RE =
   /(ECONNRESET|ETIMEDOUT|EPIPE|ENOTFOUND|ENETUNREACH|EHOSTUNREACH|socket hang up|Timed Out|Connection Closed)/i;
 let processErrorGuardsInstalled = false;
 
+const submitHeartbeatSignalForAll = (input: {
+  text?: string;
+  mode?: "now" | "next-heartbeat";
+  source?: "hook" | "cron" | "api" | "manual";
+}): void => {
+  heartbeatService?.submitWakeForAll(input);
+};
+
 function getDevServerUrl(): string {
   const configured = String(process.env.COWORK_DEV_SERVER_URL || "").trim();
   if (configured.length > 0) {
@@ -433,6 +441,7 @@ if (!gotTheLock) {
                 "img-src 'self' data: https:; " + // Allow images from self, data URIs, and HTTPS
                 "font-src 'self' data:; " + // Allow fonts from self and data URIs
                 "connect-src 'self' https:; " + // Allow API calls to HTTPS endpoints
+                "media-src 'self' data: blob: media: https:; " + // Allow inline video previews via blob/data URLs and the media:// protocol
                 "worker-src 'self' blob:; " + // Allow web workers from blob URLs
                 "frame-ancestors 'none'; " + // Prevent embedding in iframes
                 "form-action 'self';", // Restrict form submissions
@@ -1155,6 +1164,7 @@ if (!gotTheLock) {
 
       // Initialize HeartbeatService with dependencies
       const heartbeatDeps: HeartbeatServiceDeps = {
+        db,
         agentRoleRepo,
         mentionRepo,
         activityRepo,
@@ -1169,6 +1179,7 @@ if (!gotTheLock) {
               ...(options?.agentConfig ?? {}),
             },
             ...(options?.source ? { source: options.source } : {}),
+            ...(options?.taskOverrides ? { taskOverrides: options.taskOverrides } : {}),
           });
           if (_agentRoleId) {
             taskRepo.update(task.id, {
@@ -1248,11 +1259,7 @@ if (!gotTheLock) {
       await heartbeatService.start();
 
       setHeartbeatWakeSubmitter(async ({ text, mode }) => {
-        heartbeatService?.submitWakeForAll({
-          text,
-          mode,
-          source: "hook",
-        });
+        submitHeartbeatSignalForAll({ text, mode, source: "hook" });
       });
 
       autonomyEngine = AutonomyEngine.initialize({
@@ -1289,11 +1296,7 @@ if (!gotTheLock) {
           });
         },
         wakeHeartbeats: ({ text, mode }) => {
-          heartbeatService?.submitWakeForAll({
-            text,
-            mode,
-            source: "hook",
-          });
+          submitHeartbeatSignalForAll({ text, mode, source: "hook" });
         },
         log: (...args: unknown[]) => logger.debug("[Autonomy]", ...args),
       });
@@ -1316,11 +1319,7 @@ if (!gotTheLock) {
             }
           },
           onWakeHeartbeats: ({ text, mode }) => {
-            heartbeatService?.submitWakeForAll({
-              text,
-              mode,
-              source: "hook",
-            });
+            submitHeartbeatSignalForAll({ text, mode, source: "hook" });
           },
           onEventCaptured: (event) => {
             autonomyEngine?.notifyEvent(event);
@@ -1614,11 +1613,7 @@ if (!gotTheLock) {
           void triggerService.evaluateEvent(event);
         },
         wakeHeartbeats: ({ text, mode }) => {
-          heartbeatService?.submitWakeForAll({
-            text,
-            mode,
-            source: "hook",
-          });
+          submitHeartbeatSignalForAll({ text, mode, source: "hook" });
         },
         captureAwarenessEvent: ({ source, workspaceId, title, summary, sensitivity, payload, tags }) => {
           awarenessService?.captureEvent({

@@ -171,6 +171,11 @@ export function setupMissionControlHandlers(deps: MissionControlDeps): void {
       heartbeatEnabled: role.heartbeatEnabled,
       heartbeatIntervalMinutes: role.heartbeatIntervalMinutes,
       heartbeatStaggerOffset: role.heartbeatStaggerOffset,
+      pulseEveryMinutes: role.pulseEveryMinutes,
+      dispatchCooldownMinutes: role.dispatchCooldownMinutes,
+      maxDispatchesPerDay: role.maxDispatchesPerDay,
+      heartbeatProfile: role.heartbeatProfile,
+      activeHours: role.activeHours,
       lastHeartbeatAt: role.lastHeartbeatAt,
       heartbeatStatus: role.heartbeatStatus,
     };

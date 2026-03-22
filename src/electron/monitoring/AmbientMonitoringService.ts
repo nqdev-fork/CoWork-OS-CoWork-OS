@@ -82,6 +82,9 @@ type GitSnapshot = {
 export class AmbientMonitoringService {
   private readonly watchers = new Map<string, FSWatcher>();
   private readonly gitSnapshots = new Map<string, GitSnapshot>();
+  private readonly blockedRootSkips = new Set<string>();
+  private readonly noProjectMarkerSkips = new Set<string>();
+  private skipSummaryLogged = false;
   private calendarFingerprint = "";
   private gitTimer: NodeJS.Timeout | null = null;
   private calendarTimer: NodeJS.Timeout | null = null;
@@ -112,6 +115,13 @@ export class AmbientMonitoringService {
   }
 
   private startFileWatchers(): void {
+    // Reset skip-tracking so each invocation produces an accurate summary of
+    // paths skipped during that specific call (rather than accumulating across
+    // multiple startFileWatchers calls when workspaces are added dynamically).
+    this.blockedRootSkips.clear();
+    this.noProjectMarkerSkips.clear();
+    this.skipSummaryLogged = false;
+
     for (const workspace of this.getMonitoredWorkspaces()) {
       if (!workspace.workspacePath || this.watchers.has(workspace.workspaceId)) continue;
       const watchTargets = this.resolveWatchTargets(workspace.workspacePath);
@@ -145,6 +155,7 @@ export class AmbientMonitoringService {
       });
       this.watchers.set(workspace.workspaceId, watcher);
     }
+    this.logSkipSummary();
   }
 
   private getMonitoredWorkspaces(): AmbientWorkspaceContext[] {
@@ -177,7 +188,7 @@ export class AmbientMonitoringService {
     if (!workspacePath) return false;
     const normalized = path.resolve(workspacePath);
     if (this.isBlockedRootPath(normalized)) {
-      this.deps.log?.(`[AmbientMonitoring] Skipping broad workspace root: ${normalized}`);
+      this.blockedRootSkips.add(normalized);
       return false;
     }
     try {
@@ -229,7 +240,7 @@ export class AmbientMonitoringService {
     });
 
     if (!hasProjectMarker) {
-      this.deps.log?.(`[AmbientMonitoring] Skipping root-level watch for ${workspacePath}: no project markers found`);
+      this.noProjectMarkerSkips.add(path.resolve(workspacePath));
       return null;
     }
 
@@ -237,6 +248,25 @@ export class AmbientMonitoringService {
       paths: [workspacePath],
       depth: ROOT_WATCH_DEPTH,
     };
+  }
+
+  private logSkipSummary(): void {
+    if (this.skipSummaryLogged) return;
+    this.skipSummaryLogged = true;
+
+    if (this.blockedRootSkips.size > 0) {
+      const blockedRoots = Array.from(this.blockedRootSkips).sort();
+      this.deps.log?.(
+        `[AmbientMonitoring] Skipped ${blockedRoots.length} broad workspace root(s): ${blockedRoots.join(", ")}`,
+      );
+    }
+
+    if (this.noProjectMarkerSkips.size > 0) {
+      const skippedRoots = Array.from(this.noProjectMarkerSkips).sort();
+      this.deps.log?.(
+        `[AmbientMonitoring] Skipped ${skippedRoots.length} root-level workspace watch(es) with no project markers: ${skippedRoots.join(", ")}`,
+      );
+    }
   }
 
   private handleFileChange(

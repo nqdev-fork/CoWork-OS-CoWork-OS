@@ -99,7 +99,7 @@ export const AgentConfigSchema = z
     allowSharedContextMemory: z.boolean().optional(),
     conversationMode: z.enum(["task", "chat", "hybrid"]).optional(),
     executionMode: z.enum(["execute", "chat", "plan", "analyze", "verified"]).optional(),
-    taskDomain: z.enum(["auto", "code", "research", "operations", "writing", "general"]).optional(),
+    taskDomain: z.enum(["auto", "code", "research", "operations", "writing", "general", "media"]).optional(),
     autonomousMode: z.boolean().optional(),
     qualityPasses: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional(),
     collaborativeMode: z.boolean().optional(),
@@ -134,6 +134,7 @@ export const AgentConfigSchema = z
     globalNoProgressCircuitBreaker: z.number().int().min(1).max(1000).optional(),
     sideChannelDuringExecution: z.enum(["paused", "limited", "enabled"]).optional(),
     sideChannelMaxCallsPerWindow: z.number().int().min(0).max(100).optional(),
+    videoGenerationMode: z.boolean().optional(),
   })
   .strict();
 
@@ -255,6 +256,36 @@ export const FileImportDataSchema = z.object({
     )
     .min(1)
     .max(20),
+});
+
+export const DocumentEditorOpenSessionSchema = z.object({
+  filePath: z.string().min(1).max(MAX_PATH_LENGTH * 4),
+  workspacePath: z.string().max(MAX_PATH_LENGTH * 4).optional(),
+});
+
+export const DocumentEditorListVersionsSchema = DocumentEditorOpenSessionSchema;
+
+export const DocumentEditRequestSchema = z.object({
+  sessionId: z.string().uuid(),
+  instruction: z.string().min(1).max(MAX_PROMPT_LENGTH),
+  selection: z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("pdf"),
+      pageIndex: z.number().int().min(0),
+      x: z.number().min(0).max(1),
+      y: z.number().min(0).max(1),
+      w: z.number().positive().max(1),
+      h: z.number().positive().max(1),
+      excerpt: z.string().max(10_000).optional(),
+    }),
+    z.object({
+      kind: z.literal("docx"),
+      startBlockId: z.string().max(100).optional(),
+      endBlockId: z.string().max(100).optional(),
+      blockIds: z.array(z.string().max(100)).min(1).max(200),
+      excerpt: z.string().max(10_000).optional(),
+    }),
+  ]),
 });
 
 // ============ Approval Schemas ============
@@ -425,6 +456,63 @@ export const CustomProviderConfigSchema = z.object({
 
 export const CustomProvidersSchema = z.record(z.string(), CustomProviderConfigSchema).optional();
 
+// ============ Video Generation Settings Schema ============
+
+export const VideoGenerationSettingsSchema = z
+  .object({
+    defaultProvider: z.enum(["openai", "azure", "gemini", "vertex", "kling"]).optional(),
+    fallbackProvider: z.enum(["openai", "azure", "gemini", "vertex", "kling"]).optional(),
+    openai: z
+      .object({
+        defaultModel: z.string().max(200).optional(),
+        defaultDuration: z.number().int().min(1).max(60).optional(),
+        defaultAspectRatio: z.enum(["16:9", "9:16", "1:1"]).optional(),
+        defaultResolution: z.enum(["480p", "720p", "1080p"]).optional(),
+      })
+      .optional(),
+    azure: z
+      .object({
+        videoApiKey: z.string().max(500).optional(),
+        videoEndpoint: z.string().max(500).optional(),
+        videoDeployment: z.string().max(200).optional(),
+        videoApiVersion: z.string().max(50).optional(),
+        defaultDuration: z.number().int().min(1).max(60).optional(),
+        defaultAspectRatio: z.enum(["16:9", "9:16", "1:1"]).optional(),
+        defaultResolution: z.enum(["480p", "720p", "1080p"]).optional(),
+      })
+      .optional(),
+    gemini: z
+      .object({
+        defaultModel: z
+          .enum(["veo-3.1", "veo-3.1-fast-preview", "veo-3.0"])
+          .optional(),
+        defaultDuration: z.number().int().min(1).max(60).optional(),
+        defaultAspectRatio: z.enum(["16:9", "9:16", "1:1"]).optional(),
+      })
+      .optional(),
+    vertex: z
+      .object({
+        model: z.enum(["veo-3", "veo-3.1"]).optional(),
+        projectId: z.string().max(200).optional(),
+        location: z.string().max(100).optional(),
+        outputGcsUri: z.string().max(1000).optional(),
+        accessToken: z.string().max(4000).optional(),
+        defaultDuration: z.number().int().min(1).max(60).optional(),
+        defaultAspectRatio: z.enum(["16:9", "9:16", "1:1"]).optional(),
+      })
+      .optional(),
+    kling: z
+      .object({
+        apiKey: z.string().max(500).optional(),
+        baseUrl: z.string().max(500).optional(),
+        model: z.string().max(200).optional(),
+        defaultDuration: z.number().int().min(1).max(60).optional(),
+        defaultAspectRatio: z.enum(["16:9", "9:16", "1:1"]).optional(),
+      })
+      .optional(),
+  })
+  .optional();
+
 export const LLMSettingsSchema = z.object({
   providerType: LLMProviderTypeSchema,
   modelKey: z.string().max(200),
@@ -441,6 +529,13 @@ export const LLMSettingsSchema = z.object({
   kimi: KimiSettingsSchema,
   openaiCompatible: OpenAICompatibleSettingsSchema,
   customProviders: CustomProvidersSchema,
+  imageGeneration: z
+    .object({
+      defaultModel: z.enum(["gpt-image-1.5", "nano-banana-2"]).optional(),
+      backupModel: z.enum(["gpt-image-1.5", "nano-banana-2"]).optional(),
+    })
+    .optional(),
+  videoGeneration: VideoGenerationSettingsSchema,
 });
 
 // ============ Search Settings Schemas ============

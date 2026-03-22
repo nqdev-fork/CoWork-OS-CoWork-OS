@@ -196,6 +196,7 @@ describe("AmbientMonitoringService", () => {
       cb(null, { stdout: "" }),
     );
 
+    const log = vi.fn();
     const { AmbientMonitoringService } = await import("../AmbientMonitoringService");
     const projectPath = createWorkspaceDir("eligible-project");
     const service = new AmbientMonitoringService({
@@ -208,7 +209,7 @@ describe("AmbientMonitoringService", () => {
       recordActivity: vi.fn(),
       emitTrigger: vi.fn(),
       wakeHeartbeats: vi.fn(),
-      log: vi.fn(),
+      log,
     });
 
     await service.start();
@@ -217,6 +218,77 @@ describe("AmbientMonitoringService", () => {
     expect(watchMock).toHaveBeenCalledWith(
       [path.join(projectPath, "src")],
       expect.objectContaining({ ignoreInitial: true }),
+    );
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining("Skipped 2 broad workspace root(s)"),
+    );
+
+    await service.stop();
+  });
+
+  it("deduplicates repeated blocked-root skip logging into one summary", async () => {
+    watchMock.mockReturnValue({
+      on: vi.fn(),
+      close: vi.fn().mockResolvedValue(undefined),
+    });
+    execFileMock.mockImplementation((_cmd, _args, _opts, cb: (err: null, result: { stdout: string }) => void) =>
+      cb(null, { stdout: "" }),
+    );
+
+    const log = vi.fn();
+    const { AmbientMonitoringService } = await import("../AmbientMonitoringService");
+    const service = new AmbientMonitoringService({
+      listWorkspaces: () => [
+        { workspaceId: "downloads-1", workspacePath: path.join(os.homedir(), "Downloads") },
+        { workspaceId: "downloads-2", workspacePath: path.join(os.homedir(), "Downloads") },
+        { workspaceId: "home", workspacePath: os.homedir() },
+      ],
+      getDefaultWorkspaceId: () => undefined,
+      recordActivity: vi.fn(),
+      emitTrigger: vi.fn(),
+      wakeHeartbeats: vi.fn(),
+      log,
+    });
+
+    await service.start();
+    await (service as unknown as { pollGit: () => Promise<void> }).pollGit();
+
+    const messages = log.mock.calls.map((call) => String(call[0]));
+    expect(
+      messages.filter((message) => message.includes("Skipped 2 broad workspace root(s)")),
+    ).toHaveLength(1);
+    expect(messages.some((message) => message.includes("Downloads"))).toBe(true);
+    expect(messages.some((message) => message.includes(os.homedir()))).toBe(true);
+
+    await service.stop();
+  });
+
+  it("summarizes root-level watch skips with no project markers", async () => {
+    watchMock.mockReturnValue({
+      on: vi.fn(),
+      close: vi.fn().mockResolvedValue(undefined),
+    });
+    execFileMock.mockImplementation((_cmd, _args, _opts, cb: (err: null, result: { stdout: string }) => void) =>
+      cb(null, { stdout: "" }),
+    );
+
+    const log = vi.fn();
+    const emptyWorkspace = createWorkspaceDir("empty-workspace", []);
+    const { AmbientMonitoringService } = await import("../AmbientMonitoringService");
+    const service = new AmbientMonitoringService({
+      listWorkspaces: () => [{ workspaceId: "empty", workspacePath: emptyWorkspace, name: "Empty" }],
+      getDefaultWorkspaceId: () => "empty",
+      recordActivity: vi.fn(),
+      emitTrigger: vi.fn(),
+      wakeHeartbeats: vi.fn(),
+      log,
+    });
+
+    await service.start();
+
+    expect(watchMock).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining("Skipped 1 root-level workspace watch(es) with no project markers"),
     );
 
     await service.stop();

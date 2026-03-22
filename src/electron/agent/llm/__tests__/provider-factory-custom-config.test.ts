@@ -95,18 +95,17 @@ describe("LLMProviderFactory custom provider config resolution", () => {
     const modelId = LLMProviderFactory.getModelId(
       "sonnet-3-5",
       "bedrock",
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      "us.anthropic.claude-opus-4-6-20260115-v1:0",
+      undefined, // ollamaModel
+      undefined, // geminiModel
+      undefined, // openrouterModel
+      undefined, // openaiModel
+      undefined, // azureDeployment
+      undefined, // azureAnthropicDeployment
+      undefined, // groqModel
+      undefined, // xaiModel
+      undefined, // kimiModel
+      undefined, // customProviders
+      "us.anthropic.claude-opus-4-6-20260115-v1:0", // bedrockModel
     );
 
     expect(modelId).toBe("us.anthropic.claude-opus-4-6-20260115-v1:0");

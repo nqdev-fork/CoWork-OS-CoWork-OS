@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef, type ComponentType } from "react";
 import { Task, Workspace, TaskEvent, PlanStep, QueueStatus } from "../../shared/types";
 import { isVerificationStepDescription } from "../../shared/plan-utils";
-import { FileViewer } from "./FileViewer";
+import { DocumentAwareFileModal } from "./DocumentAwareFileModal";
 import { useAgentContext } from "../hooks/useAgentContext";
 import {
   deriveTaskOutputSummaryFromEvents,
@@ -97,6 +97,44 @@ function resolveConnectorLucideIcon(name: string, emoji: string): ComponentType<
 /** Resolve a Lucide icon component for a skill from its emoji, falling back to Zap. */
 function resolveSkillLucideIcon(emoji: string): ComponentType<LucideProps> {
   return getEmojiIcon(emoji) || Zap;
+}
+
+/**
+ * Strips technical tool-call language from LLM-generated plan step descriptions.
+ * Converts e.g. "Use the `use_skill` tool with skill ID `novelist`..." into
+ * "Run the Novelist skill" so the Progress panel stays readable.
+ */
+function humanizeStepDescription(description: string): string {
+  if (!description) return description;
+
+  // "Use the `use_skill` tool with skill ID `<id>`..." → "Run the <Id> skill"
+  const useSkillMatch = description.match(
+    /use\s+the\s+`?use_skill`?\s+tool\s+with\s+skill\s+(?:ID\s+)?`?([a-z0-9_-]+)`?/i,
+  );
+  if (useSkillMatch) {
+    const skillId = useSkillMatch[1];
+    const skillName = skillId
+      .replace(/[-_]/g, " ")
+      .replace(/\b\w/g, (c) => c.toUpperCase());
+    // Append any meaningful context after the skill ID match
+    const rest = description.slice(description.indexOf(useSkillMatch[0]) + useSkillMatch[0].length).trim();
+    const suffix = rest.replace(/^[^a-zA-Z]*/, "").split(/[.]/)[0].trim();
+    return suffix.length > 4 ? `Run the ${skillName} skill — ${suffix}` : `Run the ${skillName} skill`;
+  }
+
+  // "Use request_user_input to collect..." → "Collect details from you"
+  if (/use\s+request_user_input\b/i.test(description)) {
+    const rest = description.replace(/use\s+request_user_input\s+(to\s+)?/i, "").trim();
+    const clean = rest.replace(/`[^`]+`/g, "").trim();
+    return clean.length > 4 ? capitalize(clean) : "Collect details from you";
+  }
+
+  // Strip any remaining backtick-wrapped tool names from descriptions
+  return description.replace(/`([^`]+)`/g, "$1");
+}
+
+function capitalize(str: string): string {
+  return str.charAt(0).toUpperCase() + str.slice(1);
 }
 
 // Clickable file path component - opens file viewer on click, shows in Finder on right-click
@@ -603,7 +641,7 @@ export function RightPanel({
                       {getStatusIndicator(step.status)}
                     </span>
                     <span className="cli-progress-text" title={step.description}>
-                      {step.description}
+                      {humanizeStepDescription(step.description)}
                     </span>
                   </div>
                 ))}
@@ -946,6 +984,14 @@ export function RightPanel({
           Completed with preserved outputs
         </div>
       )}
+      {task?.status === "failed" && outputSummary && outputSummary.outputCount > 0 && (
+        <div
+          className="right-panel-preserved-line"
+          title={preservedOutputsTooltip}
+        >
+          Output created, final verification failed
+        </div>
+      )}
 
       {/* Footer note */}
       <div className="cli-panel-footer">
@@ -961,7 +1007,7 @@ export function RightPanel({
 
       {/* File Viewer Modal */}
       {viewerFilePath && workspace?.path && (
-        <FileViewer
+        <DocumentAwareFileModal
           filePath={viewerFilePath}
           workspacePath={workspace.path}
           onClose={() => setViewerFilePath(null)}

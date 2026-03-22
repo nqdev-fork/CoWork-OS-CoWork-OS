@@ -58,7 +58,8 @@ export type SessionMode =
   | "multi-llm"
   | "scheduled"
   | "think"
-  | "comparison";
+  | "comparison"
+  | "video";
 
 const SESSION_MODE_META: Record<SessionMode, { label: string; shortLabel: string; color: string }> =
   {
@@ -69,10 +70,12 @@ const SESSION_MODE_META: Record<SessionMode, { label: string; shortLabel: string
     scheduled: { label: "Scheduled", shortLabel: "SCHED", color: "scheduled" },
     think: { label: "Think", shortLabel: "THINK", color: "think" },
     comparison: { label: "Comparison", shortLabel: "CMP", color: "comparison" },
+    video: { label: "Video", shortLabel: "VID", color: "video" },
   };
 
 /** Derive the primary session mode from task metadata */
 export function getSessionMode(task: Task): SessionMode {
+  if (task.agentConfig?.videoGenerationMode || task.agentConfig?.taskDomain === "media") return "video";
   if (task.agentConfig?.collaborativeMode) return "collab";
   if (task.agentConfig?.multiLlmMode) return "multi-llm";
   if (task.agentConfig?.autonomousMode) return "autonomous";

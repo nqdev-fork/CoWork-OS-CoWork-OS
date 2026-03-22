@@ -150,8 +150,8 @@ describe("TaskExecutor high-confidence natural-language skill routing", () => {
     rankModelInvocableSkillsForQuery.mockReturnValue([
       {
         skill: {
-          id: "autonovel",
-          name: "Autonovel",
+          id: "novelist",
+          name: "Novelist",
           description: "Run an autonomous fiction pipeline.",
           parameters: [],
         },
@@ -168,7 +168,7 @@ describe("TaskExecutor high-confidence natural-language skill routing", () => {
       },
     ]);
 
-    const executor = createExecutor("Use the autonovel skill. Seed: a climatologist discovers a fog city.");
+    const executor = createExecutor("Use the novelist skill. Seed: a climatologist discovers a fog city.");
     executor.getAvailableTools = vi.fn(() => [{ name: "read_file" }]);
     const handled = await (TaskExecutor as Any).prototype.maybeHandleHighConfidenceSkillRouting.call(
       executor,
@@ -176,12 +176,12 @@ describe("TaskExecutor high-confidence natural-language skill routing", () => {
 
     expect(handled).toBe(true);
     expect(executor.toolRegistry.executeTool).toHaveBeenCalledWith("use_skill", {
-      skill_id: "autonovel",
+      skill_id: "novelist",
       parameters: {},
     });
     expect(executor.task.prompt).toBe("Expanded dual-agent review workflow");
     expect(executor.task.rawPrompt).toBe(
-      "Use the autonovel skill. Seed: a climatologist discovers a fog city.",
+      "Use the novelist skill. Seed: a climatologist discovers a fog city.",
     );
   });
 

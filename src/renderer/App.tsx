@@ -1763,6 +1763,7 @@ export function App() {
       verificationAgent?: boolean;
       executionMode?: ExecutionMode;
       taskDomain?: TaskDomain;
+      videoGenerationMode?: boolean;
       llmProfile?: LlmProfile;
       llmProfileForced?: boolean;
     },
@@ -1808,6 +1809,7 @@ export function App() {
     const verificationAgent = options?.verificationAgent === true;
     const executionMode = options?.executionMode;
     const taskDomain = options?.taskDomain;
+    const videoGenerationMode = options?.videoGenerationMode === true;
     const llmProfile = options?.llmProfile;
     const llmProfileForced = options?.llmProfileForced;
     const trimmedSessionModelOverride = sessionModelOverride.trim();
@@ -1824,6 +1826,7 @@ export function App() {
       verificationAgent ||
       executionMode ||
       taskDomain ||
+      videoGenerationMode ||
       effectiveLlmProfile
         ? {
             ...(effectiveSessionModelOverride ? { modelKey: effectiveSessionModelOverride } : {}),
@@ -1835,6 +1838,7 @@ export function App() {
             ...(verificationAgent ? { verificationAgent: true } : {}),
             ...(executionMode ? { executionMode } : {}),
             ...(taskDomain ? { taskDomain } : {}),
+            ...(videoGenerationMode ? { videoGenerationMode: true } : {}),
             ...(effectiveLlmProfile ? { llmProfile: effectiveLlmProfile } : {}),
             ...(effectiveLlmProfileForced ? { llmProfileForced: true } : {}),
           }
@@ -2065,7 +2069,7 @@ export function App() {
       }
     }
     const title = prompt.slice(0, 50) + (prompt.length > 50 ? "..." : "");
-    await handleCreateTask(title, prompt, undefined, undefined, workspace);
+    await handleCreateTask(title, prompt, undefined, undefined, workspace || undefined);
   };
 
   const handleNewSession = async () => {

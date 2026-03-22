@@ -97,7 +97,7 @@ CoWork OS can also be configured as a founder-directed autonomous company shell 
 - **Venture operator workspace kit**: initializes `.cowork/` with `COMPANY.md`, `OPERATIONS.md`, `KPIS.md`, `PRIORITIES.md`, and `HEARTBEAT.md`
 - **Companies control surface**: `Settings > Companies` centralizes company creation, company-graph editing, linked operators, and direct handoff into Digital Twins or Mission Control
 - **Operator twins**: venture-oriented personas such as `Founder Office Operator`, `Company Planner`, `Growth Operator`, and `Customer Ops Lead`
-- **Heartbeat-driven follow-up**: lead operators can proactively run recurring checks defined in `HEARTBEAT.md`
+- **Heartbeat v3 follow-up**: operator and dispatcher twins can proactively review recurring checks defined in `HEARTBEAT.md`, while cheap Pulse cycles stay non-LLM until escalation is justified
 - **Strategic planner**: turns company goals, projects, and stalled work into planner-managed issues and optionally auto-dispatches them into tasks
 - **Mission Control ops view**: exposes planner config, planner runs, goals, projects, issues, linked tasks, issue comments, and run events
 - **Autonomy policy integration**: operator roles can carry reusable autonomy presets instead of relying on one global all-or-nothing mode
@@ -207,13 +207,15 @@ The runtime now includes a set of decision and recovery contracts aimed at keepi
 Pre-built AI agent templates that create role-specific digital twins for team members. Each twin absorbs cognitively draining work so the human can stay in deep focus.
 
 - **Built-in templates across engineering, management, product, data, operations, and venture/operator roles**: including Software Engineer, Engineering Manager, Product Manager, Company Planner, Founder Office Operator, Growth Operator, and Customer Ops Lead
-- **Proactive heartbeat tasks**: PR triage, status digests, dependency scans, test coverage checks — run automatically on a configurable interval
+- **Heartbeat v3 default**: twins use cheap deterministic Pulse checks by default and escalate via Dispatch only when signals, cadence, or manual intervention justify visible work
+- **Profile-based execution**: `observer`, `operator`, and `dispatcher` profiles control maintenance eligibility and escalation authority
+- **Proactive task modes**: `pulse_only`, `dispatch`, and `cron_handoff`
 - **10 cognitive offload categories**: context-switching, status-reporting, information-triage, decision-preparation, documentation, review-preparation, dependency-tracking, compliance-checks, knowledge-curation, routine-automation
 - **4 bundled skills**: `twin-status-report`, `twin-pr-triage`, `twin-meeting-prep`, `twin-decision-prep`
-- **One-click activation**: Browse gallery, customize name and heartbeat interval, toggle proactive tasks, create
+- **One-click activation**: Browse gallery, customize name, Pulse cadence, heartbeat profile, and proactive tasks, then create
 - **Enterprise scaling**: Activate one twin per team member across the organization
 
-Access from **Mission Control** > **Add Digital Twin**. See [Digital Twins](digital-twins.md) for full documentation.
+Access from **Mission Control** > **Add Digital Twin**. See [Digital Twins](digital-twins.md) and [Heartbeat v3](heartbeat-v3.md) for the current runtime model.
 
 ---
 
@@ -227,7 +229,7 @@ Role-specific bundles that group skills, agent roles, connectors, and slash comm
 - **Search & filter**: Real-time sidebar search across pack names, descriptions, categories, and skill names
 - **Per-skill toggles**: Enable or disable individual skills within a pack without toggling the entire pack
 - **Persistent state**: Pack and skill toggle states survive app restarts (stored in `pack-states.json`)
-- **Digital Twin integration**: 7 packs link to persona templates for proactive heartbeat-driven automation
+- **Digital Twin integration**: 7 packs link to persona templates that inherit Heartbeat v3 for proactive automation
 - **Recommended connectors**: Packs display clickable connector chips that navigate to connector settings
 - **Update detection**: Background check against the remote registry with orange dot indicators on packs with newer versions
 - **"Try asking" in chat**: Empty chat state shows randomized prompt suggestions from enabled packs for one-click task creation
@@ -428,7 +430,7 @@ The workspace kit is contract-driven: every tracked markdown file has a declared
 | `OPERATIONS.md` | Operating Model | `company-ops` | `sectioned` | auto-allowed actions, approvals, escalation paths |
 | `KPIS.md` | Business Metrics | `company-ops` | `sectioned` | metrics, targets, and guardrails |
 | `BOOTSTRAP.md` | Bootstrap Instructions | `bootstrap` | `checklist` | one-time onboarding checklist |
-| `HEARTBEAT.md` | Heartbeat Checklist | `heartbeat` | `checklist` | recurring heartbeat-only checks |
+| `HEARTBEAT.md` | Heartbeat Checklist | `heartbeat` | `checklist` | recurring Heartbeat v3 checklist work |
 
 ### Project and role subdirectories
 
@@ -458,7 +460,7 @@ updated: 2026-03-14
 - `BOOTSTRAP.md` is onboarding-only context, not a durable memory file
 - When `BOOTSTRAP.md` is first present, CoWork OS records `bootstrapSeededAt` in `.cowork/workspace-state.json`
 - When `BOOTSTRAP.md` is later removed, CoWork OS records `onboardingCompletedAt` and does not recreate it during missing-only init flows
-- `HEARTBEAT.md` is reserved for recurring heartbeat work and is intentionally separate from general task/session context
+- `HEARTBEAT.md` is reserved for recurring Heartbeat v3 checklist work and is intentionally separate from general task/session context
 
 ### Health, linting, and revisions
 
@@ -513,7 +515,7 @@ Centralized agent orchestration and monitoring dashboard. Access from **Settings
 
 | Panel | Purpose |
 |-------|---------|
-| **Agents** | Active agents list with status dots (working/idle/offline), heartbeat info, and manual wake controls |
+| **Agents** | Active agents list with status dots, Pulse/Dispatch state, cadence, and manual trigger controls |
 | **Mission Queue** | 5-column Kanban board (Inbox → Assigned → In Progress → Review → Done) with drag-and-drop |
 | **Feed & Details** | Real-time activity feed with event type and agent filters, plus task detail view with comments and mentions |
 
@@ -552,7 +554,7 @@ Create role-specific AI digital twins from pre-built persona templates. Each twi
 |-----------|-------------|
 | **System Prompt** | Role-tailored persona with behavior guidelines |
 | **Capabilities** | Skill tags (code, review, test, analyze, document, etc.) |
-| **Proactive Tasks** | Heartbeat-triggered background tasks (PR triage, dependency checks, sprint health, etc.) |
+| **Proactive Tasks** | Heartbeat v3 tasks evaluated in Pulse and escalated only when justified |
 | **Cognitive Offload** | Categorized by mental burden relieved: context switching, status reporting, review prep, decision prep, documentation, dependency tracking |
 | **Recommended Skills** | Pre-mapped skills with required/optional flags |
 | **Autonomy Level** | `specialist` (IC roles) or `lead` (management roles) |
@@ -562,10 +564,10 @@ Create role-specific AI digital twins from pre-built persona templates. Each twi
 1. Click **"Add Digital Twin"** in Mission Control agents panel
 2. Browse the **template gallery** — filter by category or search by name/tags
 3. Click a template card to open the **activation dialog**
-4. Customize: twin name, heartbeat interval (5min–4hr), toggle proactive tasks
-5. Click **"Create Digital Twin"** — creates a new AgentRole with background heartbeat tasks
+4. Customize: twin name, Pulse cadence (5min–4hr), heartbeat profile, and proactive tasks
+5. Click **"Create Digital Twin"** — creates a new AgentRole with Heartbeat v3 defaults
 
-The twin appears in the agents panel and begins running proactive tasks on the configured heartbeat interval.
+The twin appears in the agents panel and begins running cheap Pulse checks on the configured cadence, escalating only when Dispatch is warranted.
 
 ---
 

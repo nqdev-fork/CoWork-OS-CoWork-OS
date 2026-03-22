@@ -63,10 +63,10 @@ export const STARTER_MISSIONS: StarterMission[] = [
     category: "writing",
   },
   {
-    id: "autonovel",
+    id: "novelist",
     title: "Write a novel end-to-end",
     prompt:
-      "Build a complete novel pipeline from my seed concept. Create the world bible, characters, outline, voice guide, canon, chapter drafts, revision notes, and final publishable artifacts.",
+      "Use the novelist skill. Build a complete novel pipeline from my seed concept. Create the world bible, characters, outline, voice guide, canon, chapter drafts, revision notes, and final publishable artifacts.",
     icon: "📚",
     category: "writing",
   },

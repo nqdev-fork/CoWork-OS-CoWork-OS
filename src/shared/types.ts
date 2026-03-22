@@ -1018,7 +1018,7 @@ export type VerificationArtifactPathPolicy =
   | "always_inline";
 export type WorkspacePathAliasPolicy = "rewrite_and_retry" | "strict_fail" | "disabled";
 export type TaskPathRootPolicy = "pin_and_rewrite" | "strict_fail" | "disabled";
-export type TaskDomain = "auto" | "code" | "research" | "operations" | "writing" | "general";
+export type TaskDomain = "auto" | "code" | "research" | "operations" | "writing" | "general" | "media";
 export type ToolDecision = "allow" | "deny" | "ask";
 export type LlmProfile = "strong" | "cheap";
 export type ReviewPolicy = "off" | "balanced" | "strict";
@@ -1202,6 +1202,11 @@ export interface AgentConfig {
    * When set (and modelKey is absent), selects a model suited for the given capability.
    */
   capabilityHint?: ModelCapability;
+  /**
+   * When true, the task is a video generation task (taskDomain should also be "media").
+   * Video tools are strongly preferred; unrelated workflows are suppressed.
+   */
+  videoGenerationMode?: boolean;
 }
 
 /**
@@ -2051,6 +2056,63 @@ export interface Artifact {
   createdAt: number;
 }
 
+export interface DocumentVersionEntry {
+  path: string;
+  fileName: string;
+  createdAt: number;
+  taskId?: string;
+  artifactId?: string;
+  isCurrent?: boolean;
+}
+
+export interface DocumentEditorDocxBlock {
+  id: string;
+  type: "heading" | "paragraph" | "table";
+  text: string;
+  level?: number;
+  rows?: string[][];
+  order: number;
+}
+
+export interface PdfRegionSelection {
+  kind: "pdf";
+  pageIndex: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  excerpt?: string;
+}
+
+export interface DocxBlockSelection {
+  kind: "docx";
+  startBlockId?: string;
+  endBlockId?: string;
+  blockIds: string[];
+  excerpt?: string;
+}
+
+export type DocumentEditSelection = PdfRegionSelection | DocxBlockSelection;
+
+export interface DocumentEditorSession {
+  sessionId: string;
+  filePath: string;
+  workspacePath?: string;
+  currentPath: string;
+  currentFileName: string;
+  fileType: "pdf" | "docx";
+  sourceTaskId?: string;
+  versions: DocumentVersionEntry[];
+  pdfDataBase64?: string;
+  docxBlocks?: DocumentEditorDocxBlock[];
+}
+
+export interface DocumentEditRequest {
+  sessionId: string;
+  selection: DocumentEditSelection;
+  instruction: string;
+}
+
 export interface Workspace {
   id: string;
   name: string;
@@ -2294,6 +2356,33 @@ export type AgentAutonomyLevel = "intern" | "specialist" | "lead";
  * Heartbeat status for tracking agent wake cycles
  */
 export type HeartbeatStatus = "idle" | "running" | "sleeping" | "error";
+export type HeartbeatProfile = "observer" | "operator" | "dispatcher";
+export type HeartbeatRunType = "pulse" | "dispatch";
+export type HeartbeatDispatchKind = "silent" | "suggestion" | "task" | "runbook" | "cron_handoff";
+export type HeartbeatPulseResultKind =
+  | "idle"
+  | "deferred"
+  | "suggestion"
+  | "dispatch_task"
+  | "dispatch_runbook"
+  | "handoff_to_cron";
+export type HeartbeatSignalUrgency = "low" | "medium" | "high" | "critical";
+export type HeartbeatSignalSource =
+  | "hook"
+  | "cron"
+  | "api"
+  | "manual"
+  | "awareness"
+  | "git"
+  | "files"
+  | "tasks"
+  | "system";
+export interface HeartbeatActiveHours {
+  timezone?: string;
+  startHour: number;
+  endHour: number;
+  weekdays?: number[];
+}
 
 // ============ Agent Performance Reviews (Mission Control) ============
 
@@ -2399,7 +2488,16 @@ export interface AgentRole {
   heartbeatEnabled?: boolean; // Whether agent participates in heartbeat system
   heartbeatIntervalMinutes?: number; // How often agent wakes up (default: 15)
   heartbeatStaggerOffset?: number; // Offset in minutes to stagger wakeups
+  pulseEveryMinutes?: number; // V3 pulse cadence (default: heartbeatIntervalMinutes or 15)
+  dispatchCooldownMinutes?: number; // Minimum gap between dispatch runs
+  maxDispatchesPerDay?: number; // Daily dispatch budget
+  heartbeatProfile?: HeartbeatProfile; // V3 execution profile
+  activeHours?: HeartbeatActiveHours; // Optional active window for pulse/dispatch
   lastHeartbeatAt?: number; // Timestamp of last heartbeat
+  lastPulseAt?: number; // Timestamp of last pulse run
+  lastDispatchAt?: number; // Timestamp of last dispatch run
+  lastPulseResult?: HeartbeatPulseResultKind; // Structured result of latest pulse
+  lastDispatchKind?: HeartbeatDispatchKind; // Structured result of latest dispatch
   heartbeatStatus?: HeartbeatStatus; // Current heartbeat state
   monthlyBudgetCost?: number; // Monthly cost budget in USD; null = unlimited
   autoPausedAt?: number | null; // Timestamp when agent was auto-paused by budget enforcement
@@ -2434,6 +2532,11 @@ export interface CreateAgentRoleRequest {
   heartbeatEnabled?: boolean;
   heartbeatIntervalMinutes?: number;
   heartbeatStaggerOffset?: number;
+  pulseEveryMinutes?: number;
+  dispatchCooldownMinutes?: number;
+  maxDispatchesPerDay?: number;
+  heartbeatProfile?: HeartbeatProfile;
+  activeHours?: HeartbeatActiveHours;
   monthlyBudgetCost?: number;
   operatorMandate?: string;
   allowedLoopTypes?: CompanyLoopType[];
@@ -2468,6 +2571,11 @@ export interface UpdateAgentRoleRequest {
   heartbeatEnabled?: boolean;
   heartbeatIntervalMinutes?: number;
   heartbeatStaggerOffset?: number;
+  pulseEveryMinutes?: number;
+  dispatchCooldownMinutes?: number;
+  maxDispatchesPerDay?: number;
+  heartbeatProfile?: HeartbeatProfile;
+  activeHours?: HeartbeatActiveHours | null;
   autoPausedAt?: number | null;
   operatorMandate?: string;
   allowedLoopTypes?: CompanyLoopType[];
@@ -2887,6 +2995,8 @@ export interface ProactiveTaskDefinition {
   category: CognitiveOffloadCategory;
   promptTemplate: string;
   frequencyMinutes: number;
+  executionMode?: "pulse_only" | "dispatch" | "cron_handoff";
+  minSignalStrength?: number;
   priority: number; // Lower = higher priority (1-10)
   enabled: boolean;
 }
@@ -3012,6 +3122,8 @@ export interface StandupReport {
 export interface HeartbeatResult {
   agentRoleId: string;
   status: "ok" | "work_done" | "error";
+  runId?: string;
+  runType?: HeartbeatRunType;
   pendingMentions: number;
   assignedTasks: number;
   relevantActivities: number;
@@ -3033,6 +3145,18 @@ export interface HeartbeatResult {
   confidence?: number;
   interruptionRisk?: number;
   workspaceScope?: HeartbeatWorkspaceScope;
+  pulseOutcome?: HeartbeatPulseResultKind;
+  dispatchKind?: HeartbeatDispatchKind;
+  deferred?: boolean;
+  deferredReason?: string;
+  compressedSignalCount?: number;
+  signalCount?: number;
+  dueProactiveCount?: number;
+  checklistDueCount?: number;
+  cooldownUntil?: number;
+  dispatchesToday?: number;
+  maxDispatchesPerDay?: number;
+  evidenceRefsV3?: string[];
   error?: string;
 }
 
@@ -3057,6 +3181,35 @@ export type HeartbeatSignalFamily =
 
 export type HeartbeatWorkspaceScope = "single" | "all";
 
+export interface HeartbeatSignal {
+  id: string;
+  agentRoleId: string;
+  workspaceId?: string;
+  agentScope: "agent" | "workspace";
+  workspaceScope: HeartbeatWorkspaceScope;
+  signalFamily: HeartbeatSignalFamily;
+  source: HeartbeatSignalSource;
+  fingerprint: string;
+  urgency: HeartbeatSignalUrgency;
+  confidence: number;
+  expiresAt: number;
+  evidenceRefs?: string[];
+  mergedCount: number;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  reason?: string;
+  payload?: Record<string, unknown>;
+}
+
+export interface HeartbeatDeferredState {
+  active: boolean;
+  reason?: string;
+  summary?: string;
+  deferredAt?: number;
+  resumeAfterAt?: number;
+  compressedSignalCount: number;
+}
+
 /**
  * Heartbeat configuration for an agent
  */
@@ -3064,6 +3217,11 @@ export interface HeartbeatConfig {
   heartbeatEnabled?: boolean;
   heartbeatIntervalMinutes?: number;
   heartbeatStaggerOffset?: number;
+  pulseEveryMinutes?: number;
+  dispatchCooldownMinutes?: number;
+  maxDispatchesPerDay?: number;
+  heartbeatProfile?: HeartbeatProfile;
+  activeHours?: HeartbeatActiveHours | null;
 }
 
 /**
@@ -3079,7 +3237,15 @@ export interface HeartbeatEvent {
     | "wake_queued"
     | "wake_coalesced"
     | "wake_queue_saturated"
-    | "wake_immediate_deferred";
+    | "wake_immediate_deferred"
+    | "signal_received"
+    | "signal_merged"
+    | "pulse_started"
+    | "pulse_completed"
+    | "pulse_deferred"
+    | "dispatch_started"
+    | "dispatch_completed"
+    | "dispatch_skipped";
   agentRoleId: string;
   agentName: string;
   timestamp: number;
@@ -3092,6 +3258,11 @@ export interface HeartbeatEvent {
     deferredMs?: number;
     reason?: "ready" | "drain";
   };
+  runId?: string;
+  runType?: HeartbeatRunType;
+  dispatchKind?: HeartbeatDispatchKind;
+  deferred?: HeartbeatDeferredState;
+  signal?: HeartbeatSignal;
 }
 
 /**
@@ -3487,6 +3658,9 @@ export const IPC_CHANNELS = {
   TASK_CONTINUE: "task:continue",
   TASK_RENAME: "task:rename",
   TASK_DELETE: "task:delete",
+  DOCUMENT_OPEN_EDITOR_SESSION: "document:openEditorSession",
+  DOCUMENT_LIST_VERSIONS: "document:listVersions",
+  DOCUMENT_START_EDIT_TASK: "document:startEditTask",
 
   // Sub-Agent / Parallel Agent operations
   AGENT_GET_CHILDREN: "agent:getChildren", // Get child tasks for a parent
@@ -4416,6 +4590,49 @@ export interface LLMSettingsData {
     defaultModel?: "gpt-image-1.5" | "nano-banana-2";
     /** Fallback model when default fails */
     backupModel?: "gpt-image-1.5" | "nano-banana-2";
+  };
+  /** Text-to-video generation settings. Provider-specific config + routing. */
+  videoGeneration?: {
+    defaultProvider?: "openai" | "azure" | "gemini" | "vertex" | "kling";
+    fallbackProvider?: "openai" | "azure" | "gemini" | "vertex" | "kling";
+    openai?: {
+      defaultModel?: string;
+      defaultDuration?: number;
+      defaultAspectRatio?: "16:9" | "9:16" | "1:1";
+      defaultResolution?: "480p" | "720p" | "1080p";
+    };
+    azure?: {
+      /** Dedicated API key for video (overrides the main Azure chat API key if set) */
+      videoApiKey?: string;
+      /** Dedicated endpoint for video (overrides the main Azure chat endpoint if set) */
+      videoEndpoint?: string;
+      videoDeployment?: string;
+      videoApiVersion?: string;
+      defaultDuration?: number;
+      defaultAspectRatio?: "16:9" | "9:16" | "1:1";
+      defaultResolution?: "480p" | "720p" | "1080p";
+    };
+    gemini?: {
+      defaultModel?: "veo-3.1" | "veo-3.1-fast-preview" | "veo-3.0";
+      defaultDuration?: number;
+      defaultAspectRatio?: "16:9" | "9:16" | "1:1";
+    };
+    vertex?: {
+      model?: "veo-3" | "veo-3.1";
+      projectId?: string;
+      location?: string;
+      outputGcsUri?: string;
+      accessToken?: string;
+      defaultDuration?: number;
+      defaultAspectRatio?: "16:9" | "9:16" | "1:1";
+    };
+    kling?: {
+      apiKey?: string;
+      baseUrl?: string;
+      model?: string;
+      defaultDuration?: number;
+      defaultAspectRatio?: "16:9" | "9:16" | "1:1";
+    };
   };
   // Cached models from API (populated when user refreshes)
   cachedGeminiModels?: CachedModelInfo[];
@@ -7546,14 +7763,19 @@ export interface IssueComment {
 
 export interface HeartbeatRun {
   id: string;
-  issueId: string;
+  issueId?: string;
   taskId?: string;
   agentRoleId?: string;
   workspaceId?: string;
+  runType?: HeartbeatRunType;
+  dispatchKind?: HeartbeatDispatchKind;
+  reason?: string;
   status: "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
   summary?: string;
   error?: string;
   metadata?: Record<string, unknown>;
+  costStats?: Record<string, unknown>;
+  evidenceRefs?: string[];
   resumedFromRunId?: string;
   createdAt: number;
   updatedAt: number;

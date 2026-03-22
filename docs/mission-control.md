@@ -2,6 +2,8 @@
 
 Mission Control is a centralized agent orchestration and monitoring dashboard. It provides a command center for managing agents, tracking tasks across a Kanban board, monitoring real-time activity, and overseeing team-based collaboration.
 
+Heartbeat v3 is the default background automation model exposed here. Mission Control should be read as pulse/defer/dispatch truth, not as a wake-queue monitor. See [Heartbeat v3](heartbeat-v3.md) for the runtime model.
+
 Access it from **Settings** > **Mission Control**. For company-ops workflows, you can also jump into it directly from **Settings** > **Companies** with the selected company preloaded.
 
 Mission Control now sits alongside two other operational entry points:
@@ -16,7 +18,7 @@ Mission Control is split into three panels:
 
 | Panel | Purpose |
 |-------|---------|
-| **Left — Agents** | Active agents list with status, heartbeat info, and wake controls |
+| **Left — Agents** | Active agents list with Pulse/Dispatch state, cadence, and manual trigger controls |
 | **Center — Mission Queue** | Kanban board with 5 columns for task lifecycle management |
 | **Right — Feed & Details** | Live activity feed and selected task details with comments/mentions |
 
@@ -34,8 +36,11 @@ Each agent card shows:
 - Display name, role description, and avatar
 - Current active task title (or "No active task")
 - **Autonomy level badge**: LEAD, SPC (Specialist), or INT (Intern)
+- **Heartbeat profile**: `observer`, `operator`, or `dispatcher`
 - **Status indicator**: green dot (working), gray dot (idle), disabled (offline)
-- Next scheduled heartbeat time
+- Next scheduled Pulse time
+- Latest Pulse result and latest Dispatch result
+- Deferred, cooldown, and dispatch-budget state when relevant
 
 ### Agent Actions
 
@@ -43,7 +48,7 @@ Each agent card shows:
 |--------|--------|
 | **Click** agent | Select/deselect — filters the activity feed to that agent |
 | **Double-click** agent | Open Agent Role Editor to edit configuration |
-| **"Wake Agent"** button | Manually trigger heartbeat immediately |
+| **Trigger Pulse** button | Manually trigger Heartbeat v3 review immediately |
 | **"Add Agent"** button | Create a new agent role with configuration modal |
 
 ### Agent Role Editor
@@ -53,7 +58,7 @@ Configure agent roles with:
 - Personality and model preferences
 - Capabilities and tool restrictions
 - Autonomy level (lead / specialist / intern)
-- Heartbeat settings (enabled, interval, stagger offset)
+- Heartbeat v3 settings (`heartbeatEnabled`, `pulseEveryMinutes`, `dispatchCooldownMinutes`, `maxDispatchesPerDay`, `activeHours`, `heartbeatProfile`, plus stagger support for Pulse cadence)
 
 ---
 
@@ -101,7 +106,8 @@ Real-time activity stream for the current workspace.
 **Filter by agent:** Click agent chips to show only that agent's activity.
 
 **Event types shown:**
-- Agent heartbeat events (started, found work, completed, errors)
+- Pulse results (`idle`, `deferred`, `suggestion`, `dispatch_task`, `dispatch_runbook`, `handoff_to_cron`)
+- Dispatch results (`silent`, `suggestion`, `task`, `runbook`, `cron_handoff`)
 - Task comments and mentions
 - Task status changes
 - Agent assignments
@@ -181,7 +187,7 @@ Access from the **Add Digital Twin** button in the agents panel (next to Add Age
 
 Browse pre-built persona templates — Software Engineer, Engineering Manager, Product Manager, and more — and activate them in one click. Each twin comes pre-configured with:
 
-- **Proactive heartbeat tasks** that run automatically (PR triage, status digests, dependency scans)
+- **Heartbeat v3 proactive tasks** evaluated in Pulse and escalated only when justified
 - **Cognitive offload categories** targeting the mental work that fragments focus
 - **Recommended skills** for on-demand use (meeting prep, decision packages, status reports)
 
@@ -225,7 +231,7 @@ Mission Control subscribes to live event streams — no manual refresh needed:
 
 | Event Stream | What It Updates |
 |-------------|-----------------|
-| **Heartbeat events** | Agent status dots (working/idle/offline), feed items |
+| **Heartbeat v3 events** | Agent status dots, pulse/dispatch indicators, deferred state, feed items |
 | **Activity events** | Comments, mentions, assignments in the feed |
 | **Task events** | New tasks, status changes on the Kanban board |
 | **Task board events** | Column moves, priority changes, label/date updates |
@@ -245,7 +251,7 @@ Mission Control subscribes to live event streams — no manual refresh needed:
 | Configure the company planner | Use the planner strip above the board |
 | Inspect company ops | Open the `Ops` tab in the right panel |
 | Edit an agent | Double-click the agent card |
-| Wake an idle agent | Click "Wake Agent" on the agent card |
+| Trigger immediate heartbeat review | Click `Trigger Pulse` on the agent card |
 | Move a task to a new stage | Drag the task card to the target column |
 | View task details | Click any task card |
 | Post an update on a task | Select task, type in the comment box, click "Post Update" |

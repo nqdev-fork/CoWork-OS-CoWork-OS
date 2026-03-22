@@ -69,12 +69,36 @@ const TOOL_SEMANTICS_TABLE: ToolSemantics[] = [
     requiredInputSchemaKey: "sourcePath",
   },
   {
+    canonicalName: "edit_pdf_region",
+    aliases: ["edit_pdf_region"],
+    mutatesFile: true,
+    artifactKind: "document",
+    dedupeClass: "document_edit",
+    requiredInputSchemaKey: "sourcePath",
+  },
+  {
     canonicalName: "create_directory",
     aliases: ["create_directory"],
     mutatesFile: true,
     artifactKind: "file",
     dedupeClass: "directory_create",
     requiredInputSchemaKey: "path",
+  },
+  {
+    canonicalName: "generate_video",
+    aliases: ["generate_video"],
+    mutatesFile: true,
+    artifactKind: "file",
+    dedupeClass: "video_generation",
+    requiredInputSchemaKey: "prompt",
+  },
+  {
+    canonicalName: "get_video_generation_job",
+    aliases: ["get_video_generation_job"],
+    mutatesFile: true,
+    artifactKind: "file",
+    dedupeClass: "video_job_poll",
+    requiredInputSchemaKey: "jobId",
   },
 ];
 

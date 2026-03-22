@@ -72,29 +72,15 @@ export function preflightWorkspaceCheck<W extends WorkspaceLike>(opts: {
   }
 
   if (!isTemp && workspaceNeed === "needs_existing" && !looksLikeProject) {
-    if (!signals.hasEntries) {
-      if (signals.readFailed) {
-        opts.pauseForUserInput(
-          "I couldn't read the workspace directory (permission denied or invalid path). " +
-            "Please check the folder path and permissions, or select a different workspace.",
-          "workspace_read_failed",
-        );
-        return true;
-      }
-      return false;
+    if (signals.readFailed) {
+      opts.pauseForUserInput(
+        "I couldn't read the workspace directory (permission denied or invalid path). " +
+          "Please check the folder path and permissions, or select a different workspace.",
+        "workspace_read_failed",
+      );
+      return true;
     }
-
-    if (opts.tryAutoSwitchToPreferredWorkspaceForAmbiguousTask("workspace_mismatch_auto_switch")) {
-      return false;
-    }
-
-    opts.pauseForUserInput(
-      "I am in the selected workspace, but I do not see typical project files here. " +
-        "If this task targets an existing project, please confirm the correct folder or provide its path. " +
-        "If this is a new project, tell me to scaffold it here.",
-      "workspace_mismatch",
-    );
-    return true;
+    return false;
   }
 
   return false;

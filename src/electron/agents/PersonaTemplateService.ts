@@ -233,7 +233,9 @@ export class PersonaTemplateService {
       heartbeatEnabled: template.heartbeat.enabled,
       heartbeatIntervalMinutes:
         customization.heartbeatIntervalMinutes || template.heartbeat.intervalMinutes,
+      pulseEveryMinutes: customization.heartbeatIntervalMinutes || template.heartbeat.intervalMinutes,
       heartbeatStaggerOffset: template.heartbeat.staggerOffset,
+      heartbeatProfile: template.role.autonomyLevel === "lead" ? "dispatcher" : "operator",
     };
 
     // Create the agent role

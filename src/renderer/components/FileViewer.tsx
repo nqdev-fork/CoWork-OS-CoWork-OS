@@ -4,6 +4,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { FileViewerResult } from "../../electron/preload";
 import { useAgentContext } from "../hooks/useAgentContext";
+import { createVideoObjectUrl } from "../utils/videoPlayback";
 import { ThemeIcon } from "./ThemeIcon";
 import {
   AlertTriangleIcon,
@@ -17,13 +18,14 @@ import {
 
 interface FileViewerProps {
   filePath: string;
-  workspacePath: string;
+  workspacePath?: string;
   onClose: () => void;
 }
 
 export function FileViewer({ filePath, workspacePath, onClose }: FileViewerProps) {
   const [loading, setLoading] = useState(true);
   const [fileData, setFileData] = useState<FileViewerResult["data"] | null>(null);
+  const [videoPlaybackUrl, setVideoPlaybackUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const agentContext = useAgentContext();
 
@@ -58,6 +60,30 @@ export function FileViewer({ filePath, workspacePath, onClose }: FileViewerProps
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
+
+  useEffect(() => {
+    const nextUrl = fileData?.fileType === "video" ? fileData.playbackUrl : null;
+    if (!nextUrl) {
+      setVideoPlaybackUrl(null);
+      return;
+    }
+
+    const resolvedUrl = createVideoObjectUrl(nextUrl);
+    if (!resolvedUrl) {
+      setVideoPlaybackUrl(null);
+      setError("Failed to prepare video playback.");
+      return;
+    }
+
+    setVideoPlaybackUrl(resolvedUrl);
+    setError((current) => (current === "Failed to prepare video playback." ? null : current));
+
+    return () => {
+      if (resolvedUrl !== nextUrl) {
+        URL.revokeObjectURL(resolvedUrl);
+      }
+    };
+  }, [fileData]);
 
   // Open in external app
   const handleOpenExternal = async () => {
@@ -159,10 +185,11 @@ export function FileViewer({ filePath, workspacePath, onClose }: FileViewerProps
         return (
           <div className="file-viewer-video-container">
             <video
-              src={fileData.playbackUrl || ""}
+              key={videoPlaybackUrl || fileData.playbackUrl || ""}
+              src={videoPlaybackUrl || ""}
               className="file-viewer-video"
               controls
-              preload="metadata"
+              preload="auto"
               playsInline
               poster={fileData.posterDataUrl}
             />

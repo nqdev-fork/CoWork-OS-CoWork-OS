@@ -2,9 +2,11 @@
 
 Digital Twin Personas are pre-built AI agent templates that create role-specific digital twins for team members. Each twin absorbs cognitively draining work — status reporting, PR triage, meeting prep, dependency tracking — so the human can stay in deep focus.
 
-A persona template bundles everything needed: agent role configuration, proactive heartbeat-driven tasks, recommended skills, a deep system prompt, and cognitive offload categories. Activating a template creates a fully configured agent in one click.
+A persona template bundles everything needed: agent role configuration, Heartbeat v3 defaults, proactive tasks, recommended skills, a deep system prompt, and cognitive offload categories. Activating a template creates a fully configured agent in one click.
 
 Access from **Settings** > **Digital Twins** or **Mission Control** > **Add Digital Twin**. For company-ops workflows, you can also open Digital Twins from **Settings** > **Companies** to create operators in company context. Digital twins can also be activated through [Plugin Packs](plugin-packs.md) — 7 of the 10 bundled packs link directly to a persona template.
+
+Heartbeat v3 is the default runtime for all heartbeat-enabled twins. See [Heartbeat v3](heartbeat-v3.md) for the architecture source of truth.
 
 ---
 
@@ -17,11 +19,32 @@ A JSON blueprint defining a digital twin. Each template specifies:
 | Field | Purpose |
 |-------|---------|
 | **Role config** | Capabilities, autonomy level, personality, system prompt |
-| **Heartbeat config** | Wake interval, stagger offset |
+| **Heartbeat config** | `pulseEveryMinutes`, `dispatchCooldownMinutes`, `maxDispatchesPerDay`, `heartbeatProfile`, active hours, and stagger support |
 | **Cognitive offload** | Which categories of mental work the twin absorbs |
-| **Proactive tasks** | Heartbeat-driven tasks with prompt templates, frequency, and priority |
+| **Proactive tasks** | Tasks with cadence, execution mode, signal threshold, and priority |
 | **Skills** | Recommended skill references with reasons |
 | **Metadata** | Category, tags, seniority range, industry-agnostic flag |
+
+### Heartbeat v3 Model
+
+Twins use a two-lane heartbeat model:
+
+- **Pulse** is cheap, deterministic, and non-LLM. It reduces signals, due proactive work, due checklist items, foreground state, and recent dispatch state into one decision.
+- **Dispatch** is the escalation lane. It only runs when Pulse decides the situation justifies visible work.
+
+Pulse can return `idle`, `deferred`, `suggestion`, `dispatch_task`, `dispatch_runbook`, or `handoff_to_cron`.
+
+This matters because a twin no longer treats every wake as task work. Quiet `idle` and `deferred` pulses are normal.
+
+### Heartbeat Profiles
+
+Heartbeat behavior is profile-driven:
+
+| Profile | Behavior |
+|---------|----------|
+| `observer` | Awareness only. Cheap silent checks, no checklist execution. |
+| `operator` | Awareness plus checklist and proactive review. |
+| `dispatcher` | Full escalation profile. Can create heartbeat tasks, runbooks, and cron handoffs. |
 
 ### Cognitive Offload Categories
 
@@ -42,19 +65,22 @@ Each template targets specific categories of work that fragment attention:
 
 ### Proactive Tasks
 
-Tasks that run automatically on the twin's heartbeat interval. Each proactive task has:
+Tasks that Heartbeat v3 evaluates during Pulse. Each proactive task has:
 
-- **Prompt template**: Injected into the heartbeat prompt
-- **Frequency**: How often it runs (in minutes)
+- **Prompt template**: Used when Dispatch or a follow-up execution path needs task context
+- **Frequency**: How often it becomes due (in minutes)
+- **Execution mode**: `pulse_only`, `dispatch`, or `cron_handoff`
+- **Minimum signal strength**: Optional threshold before the task is considered relevant
 - **Priority**: Execution order when multiple tasks are due
 - **Enabled flag**: Toggled during activation or at runtime via the agent's soul config
 
 Execution contract:
 
-- Proactive tasks run only when due (`frequencyMinutes`), not on every heartbeat wake
-- If `frequencyMinutes` is missing/invalid, runtime defaults to 15 minutes
-- Minimum effective frequency is 1 minute
-- Due-task tracking is keyed by `agentId + proactiveTaskId` and reset when heartbeat is stopped/canceled for that agent
+- Proactive tasks are cadence-checked in Pulse, not blindly turned into work on every wake
+- `pulse_only` tasks stay cheap and local to heartbeat review
+- `dispatch` tasks require a Dispatch escalation before visible work is created
+- `cron_handoff` tasks are moved toward exact-time or heavyweight runbook scheduling
+- Tasks can be ignored when signal strength is below `minSignalStrength`
 
 ---
 
@@ -110,7 +136,9 @@ Execution contract:
 4. Click a template card to open the activation dialog
 5. Customize:
    - **Twin Name** — e.g., "Sarah's SW Twin" or "Backend Team Twin"
-   - **Heartbeat Interval** — how often the twin wakes up (5 min to 4 hours)
+   - **Pulse cadence** — how often the twin performs its cheap review cycle
+   - **Heartbeat profile** — `observer`, `operator`, or `dispatcher`
+   - **Dispatch controls** — cooldown, daily budget, and active hours when exposed
    - **Proactive Tasks** — toggle individual tasks on/off
 6. Click **Create Digital Twin**
 
@@ -146,7 +174,7 @@ These templates are intended to pair with the `Venture operator kit` workspace p
 
 - A new **AgentRole** record with the template's capabilities, personality, and system prompt
 - Optional persisted **company assignment** when activation happens in company context
-- **Heartbeat** configured at your chosen interval
+- **Heartbeat v3** configured with Pulse cadence and profile defaults
 - **Cognitive offload config** embedded in the agent's soul JSON, including enabled proactive tasks
 - Warnings if any recommended skills are not installed (non-blocking — the twin works without them)
 
@@ -156,11 +184,19 @@ These templates are intended to pair with the `Venture operator kit` workspace p
 
 Once activated, a twin operates in two modes.
 
-### Proactive Mode (Heartbeat-Driven)
+### Proactive Mode (Heartbeat v3)
 
-The twin wakes up on its configured interval and automatically runs enabled proactive tasks. Results appear as completed tasks in Mission Control.
+The twin runs Heartbeat v3 on its configured Pulse cadence. Pulse reviews merged signals, pending mentions/tasks, due proactive work, due checklist items, foreground contention, and dispatch guardrails before deciding whether anything should escalate.
 
-For venture/operator twins, lead roles can also use `.cowork/HEARTBEAT.md` as a recurring company-ops checklist when heartbeat maintenance is enabled in `Memory Hub`.
+For venture/operator twins, `.cowork/HEARTBEAT.md` acts as a recurring checklist input when the twin's `heartbeatProfile` allows maintenance execution. This is no longer controlled by `autonomyLevel`.
+
+Results may appear as:
+
+- no visible action (`idle` or `deferred`)
+- an internal suggestion
+- a heartbeat task
+- a runbook request
+- a cron handoff for exact-time or heavyweight work
 
 When a twin is linked to a company, the product can also surface it as part of that company's operator set in:
 
@@ -168,7 +204,7 @@ When a twin is linked to a company, the product can also surface it as part of t
 - `Settings > Digital Twins`
 - `Mission Control`
 
-**Software Engineer Twin (30-minute heartbeat):**
+**Software Engineer Twin (30-minute Pulse cadence):**
 
 | Task | Frequency | What It Does |
 |------|-----------|-------------|
@@ -176,7 +212,7 @@ When a twin is linked to a company, the product can also surface it as part of t
 | Test Coverage Scan | Every 4 hours | Checks recent code changes for files lacking test coverage |
 | Dependency Health | Every 8 hours | Runs dependency check for vulnerabilities and outdated packages |
 
-**Engineering Manager Twin (30-minute heartbeat):**
+**Engineering Manager Twin (30-minute Pulse cadence):**
 
 | Task | Frequency | What It Does |
 |------|-----------|-------------|
@@ -184,7 +220,7 @@ When a twin is linked to a company, the product can also surface it as part of t
 | Sprint Health Check | Every 4 hours | Monitors sprint progress, flags at-risk items, surfaces blockers |
 | Cross-Team Dependency Scan | Every 8 hours | Tracks dependencies between teams, flags blockers early |
 
-**VP of Engineering Twin (60-minute heartbeat):**
+**VP of Engineering Twin (60-minute Pulse cadence):**
 
 | Task | Frequency | What It Does |
 |------|-----------|-------------|
@@ -295,7 +331,8 @@ Heartbeat results can be delivered to channels — e.g., post the daily PR triag
 ### At Activation Time
 
 - **Name**: Any display name for the twin
-- **Heartbeat interval**: 5 minutes to 4 hours
+- **Pulse cadence**: 5 minutes to 4 hours
+- **Heartbeat profile**: `observer`, `operator`, or `dispatcher`
 - **Proactive tasks**: Enable/disable individual tasks
 - All other role properties (capabilities, autonomy, personality) come from the template defaults
 
@@ -304,7 +341,7 @@ Heartbeat results can be delivered to channels — e.g., post the daily PR triag
 The twin is a standard AgentRole — all properties can be edited via the Agent Role Editor in Mission Control:
 
 - Change capabilities, autonomy level, or personality
-- Adjust heartbeat interval
+- Adjust Pulse cadence, Dispatch controls, or active hours
 - Edit the system prompt or soul configuration
 - Modify proactive task settings in the soul JSON
 
@@ -326,10 +363,13 @@ Templates are JSON files in `resources/persona-templates/`. To add a custom temp
 PersonaTemplate (JSON)
     ↓ activate()
 AgentRole (SQLite)
-    ↓ heartbeat
-HeartbeatService → extractProactiveTasks() → buildHeartbeatPrompt()
+    ↓ pulse cadence
+Heartbeat v3
+  ├─ Signal ledger + checklist cache + proactive cadence evaluation
+  ├─ Pulse (non-LLM, no task creation)
+  └─ Dispatch (suggestion/task/runbook/cron handoff when justified)
     ↓
-Agent Executor → Skills → Results in Mission Control
+Mission Control + Task system + Run records
 ```
 
 ### Where Data Lives
@@ -403,4 +443,5 @@ For the full founder-operated autonomous-company workflow, see [Zero-Human Compa
 | Assign work to a twin | Drag task to twin's column, or @mention the twin |
 | Edit twin after activation | Double-click the twin in Mission Control agents panel |
 | Adjust proactive tasks | Edit agent > soul JSON > cognitiveOffload.proactiveTasks |
+| Review heartbeat behavior | Open [Heartbeat v3](heartbeat-v3.md) |
 | Use a twin skill on-demand | @mention twin + skill prompt (e.g., "prepare meeting brief for X") |

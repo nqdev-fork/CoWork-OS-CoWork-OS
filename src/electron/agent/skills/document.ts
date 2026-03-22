@@ -954,6 +954,70 @@ export class DocumentBuilder {
     };
   }
 
+  async replaceBlocksById(
+    inputPath: string,
+    outputPath: string,
+    blockIds: string[],
+    newContent: ContentBlock[],
+  ): Promise<{ success: boolean; message: string; sectionsAdded: number }> {
+    const uniqueBlockIds = Array.from(new Set(blockIds.map((value) => value.trim()).filter(Boolean)));
+    if (uniqueBlockIds.length === 0) {
+      return { success: false, message: "No blockIds provided", sectionsAdded: 0 };
+    }
+
+    const docxBuffer = await fsPromises.readFile(inputPath);
+    const zip = await JSZip.loadAsync(docxBuffer);
+    const documentXml = zip.file("word/document.xml");
+    if (!documentXml) {
+      throw new Error("Invalid DOCX file: missing word/document.xml");
+    }
+
+    let xmlContent = await documentXml.async("text");
+    const { parseDocxBlocksFromXml } = await import("../../documents/docx-blocks");
+    const blocks = parseDocxBlocksFromXml(xmlContent);
+    const selectedBlocks = blocks.filter((block) => uniqueBlockIds.includes(block.id));
+
+    if (selectedBlocks.length !== uniqueBlockIds.length) {
+      const foundIds = new Set(selectedBlocks.map((block) => block.id));
+      const missing = uniqueBlockIds.filter((id) => !foundIds.has(id));
+      return {
+        success: false,
+        message: `Could not find blockIds: ${missing.join(", ")}`,
+        sectionsAdded: 0,
+      };
+    }
+
+    const orderedSelection = [...selectedBlocks].sort((a, b) => a.order - b.order);
+    const first = orderedSelection[0];
+    const last = orderedSelection[orderedSelection.length - 1];
+    const isContiguous = orderedSelection.every((block, index) => block.order === first.order + index);
+    if (!isContiguous) {
+      return {
+        success: false,
+        message: "Selected DOCX blocks must be contiguous",
+        sectionsAdded: 0,
+      };
+    }
+
+    const replacementXml = this.contentBlocksToOoxml(newContent);
+    xmlContent =
+      xmlContent.slice(0, first.startIndex) + replacementXml + xmlContent.slice(last.endIndex);
+    zip.file("word/document.xml", xmlContent);
+
+    const outputBuffer = await zip.generateAsync({
+      type: "nodebuffer",
+      compression: "DEFLATE",
+      compressionOptions: { level: 9 },
+    });
+    await fsPromises.writeFile(outputPath, outputBuffer);
+
+    return {
+      success: true,
+      message: `Replaced ${orderedSelection.length} block(s)`,
+      sectionsAdded: newContent.length,
+    };
+  }
+
   /**
    * Lists all sections in a document
    */

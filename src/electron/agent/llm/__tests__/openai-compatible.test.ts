@@ -16,11 +16,15 @@ describe("toOpenAICompatibleMessages", () => {
           },
         ],
       },
+      {
+        role: "user" as const,
+        content: [{ type: "tool_result" as const, tool_use_id: "tool-1", content: "done" }],
+      },
     ];
 
     const result = toOpenAICompatibleMessages(input);
 
-    expect(result).toHaveLength(1);
+    expect(result).toHaveLength(2);
     expect(result[0]).toMatchObject({
       role: "assistant",
       content: "Preparing your summary.",
@@ -35,6 +39,7 @@ describe("toOpenAICompatibleMessages", () => {
         },
       ],
     });
+    expect(result[1]).toMatchObject({ role: "tool", tool_call_id: "tool-1", content: "done" });
   });
 
   it("does not drop text when image and tool_use are both present for an assistant message", () => {
@@ -56,6 +61,10 @@ describe("toOpenAICompatibleMessages", () => {
           },
         ],
       },
+      {
+        role: "user" as const,
+        content: [{ type: "tool_result" as const, tool_use_id: "tool-2", content: "done" }],
+      },
     ];
 
     const result = toOpenAICompatibleMessages(input);
@@ -70,8 +79,9 @@ describe("toOpenAICompatibleMessages", () => {
         },
       ],
     });
-    expect(result).toHaveLength(1);
+    expect(result).toHaveLength(2);
     expect(result[0].content).toContain("[Image attached: image/png");
+    expect(result[1]).toMatchObject({ role: "tool", tool_call_id: "tool-2", content: "done" });
   });
 
   it("falls back to text for assistant image content", () => {
@@ -135,11 +145,15 @@ describe("toOpenAICompatibleMessages", () => {
           },
         ],
       },
+      {
+        role: "user" as const,
+        content: [{ type: "tool_result" as const, tool_use_id: "tool-3", content: "done" }],
+      },
     ];
 
     const result = toOpenAICompatibleMessages(input);
 
-    expect(result).toHaveLength(1);
+    expect(result).toHaveLength(2);
     expect(result[0]).toMatchObject({
       role: "assistant",
       tool_calls: [
@@ -154,6 +168,7 @@ describe("toOpenAICompatibleMessages", () => {
       ],
     });
     expect(result[0].content).toContain("[Image attached: image/jpeg");
+    expect(result[1]).toMatchObject({ role: "tool", tool_call_id: "tool-3", content: "done" });
   });
 
   it("does not emit image_url for assistant messages with text, tool calls, and images", () => {
@@ -171,11 +186,15 @@ describe("toOpenAICompatibleMessages", () => {
           { type: "image" as const, mimeType: "image/png", data: "AQIDBA==" },
         ],
       },
+      {
+        role: "user" as const,
+        content: [{ type: "tool_result" as const, tool_use_id: "tool-4", content: "done" }],
+      },
     ];
 
     const result = toOpenAICompatibleMessages(input, undefined, { supportsImages: true });
 
-    expect(result).toHaveLength(1);
+    expect(result).toHaveLength(2);
     expect(result[0]).toMatchObject({
       role: "assistant",
       content:
@@ -192,6 +211,7 @@ describe("toOpenAICompatibleMessages", () => {
       ],
     });
     expect(result[0].content).not.toContain("image_url");
+    expect(result[1]).toMatchObject({ role: "tool", tool_call_id: "tool-4", content: "done" });
   });
 
   it("skips orphaned tool_result when preceding message has no tool_calls (compaction edge case)", () => {
@@ -205,6 +225,55 @@ describe("toOpenAICompatibleMessages", () => {
         content: [{ type: "tool_result" as const, tool_use_id: "call_1", content: "result" }],
       },
     ];
+
+    const result = toOpenAICompatibleMessages(input);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ role: "user", content: "task context" });
+    expect(result.some((m) => m.role === "tool")).toBe(false);
+  });
+
+  it("drops unexpected tool_call_id entries from an otherwise valid tool response block", () => {
+    const input = [
+      {
+        role: "assistant" as const,
+        content: [
+          {
+            type: "tool_use" as const,
+            id: "call_1",
+            name: "search_web",
+            input: { query: "status" },
+          },
+        ],
+      },
+      {
+        role: "user" as const,
+        content: [
+          { type: "tool_result" as const, tool_use_id: "call_1", content: "ok" },
+          { type: "tool_result" as const, tool_use_id: "call_orphan", content: "stale" },
+        ],
+      },
+    ];
+
+    const result = toOpenAICompatibleMessages(input);
+
+    expect(result).toHaveLength(2);
+    expect(result[0]).toMatchObject({
+      role: "assistant",
+      tool_calls: [{ id: "call_1" }],
+    });
+    expect(result[1]).toMatchObject({
+      role: "tool",
+      tool_call_id: "call_1",
+      content: "ok",
+    });
+  });
+
+  it("drops standalone raw tool messages left behind by malformed restored history", () => {
+    const input = [
+      { role: "user", content: "task context" },
+      { role: "tool", content: "stale tool output", tool_call_id: "call_orphan" },
+    ] as unknown as Parameters<typeof toOpenAICompatibleMessages>[0];
 
     const result = toOpenAICompatibleMessages(input);
 

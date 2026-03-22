@@ -291,6 +291,7 @@ const TASK_DOMAIN_LABEL: Record<TaskDomain, string> = {
   operations: "Operations",
   writing: "Writing",
   general: "General",
+  media: "Video",
 };
 
 export function DevicesPanel({

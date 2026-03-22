@@ -30,3 +30,7 @@ When a user reports a failure, error, or unexpected behavior:
 
 - `npm run build` now includes `npm run build:healthkit-bridge` before Electron/daemon/connectors builds.
 - Use `npm run build:healthkit-bridge` to isolate HealthKit bridge build failures.
+- `npm run build:healthkit-bridge` is a no-op on non-macOS platforms (`[healthkit-bridge] Skipping build on non-macOS platform.`).
+- On macOS, `npm run build:healthkit-bridge` attempts an Xcode app build first and falls back to SwiftPM packaging if the app bundle is not produced.
+- For macOS signing/provisioning overrides during `build:healthkit-bridge`, use `COWORK_HEALTHKIT_DEVELOPMENT_TEAM` and `COWORK_HEALTHKIT_PROVISIONING_PROFILE` if needed.
+- `build:healthkit-bridge` also accepts `DEVELOPMENT_TEAM` and `HEALTHKIT_BRIDGE_PROVISIONING_PROFILE` as fallback environment variable names.

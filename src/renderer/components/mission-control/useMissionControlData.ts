@@ -43,6 +43,15 @@ export interface HeartbeatStatusInfo {
   heartbeatStatus: HeartbeatStatus;
   lastHeartbeatAt?: number;
   nextHeartbeatAt?: number;
+  lastPulseResult?: import("../../../shared/types").HeartbeatPulseResultKind;
+  lastDispatchKind?: string;
+  deferred?: import("../../../shared/types").HeartbeatDeferredState;
+  compressedSignalCount?: number;
+  dueProactiveCount?: number;
+  checklistDueCount?: number;
+  dispatchCooldownUntil?: number;
+  dispatchesToday?: number;
+  maxDispatchesPerDay?: number;
 }
 
 export const BOARD_COLUMNS: MissionColumn[] = [

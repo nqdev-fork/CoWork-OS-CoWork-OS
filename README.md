@@ -38,7 +38,7 @@
 - **30+ LLM providers** — Anthropic, OpenAI, Google, Ollama, AWS Bedrock, OpenRouter, and more. Bring your own keys.
 - **15 messaging channels** — WhatsApp, Telegram, Discord, Slack, Teams, iMessage, Signal, X, and more. Chat with your AI from anywhere.
 - **139 built-in skills** — Documents, code review, web search, image generation, cloud integrations, game development, mobile development, financial analysis, infrastructure-as-code, and more.
-- **Digital Twin Personas** — Pre-built AI twins for every role (engineer, manager, PM, director). Each twin absorbs cognitively draining work — PR triage, meeting prep, status reports, dependency tracking — so the human stays in flow.
+- **Digital Twin Personas** — Pre-built AI twins for every role (engineer, manager, PM, director). Heartbeat v3 keeps them cheap by default: deterministic Pulse checks run quietly, and Dispatch escalates only when signals, cadence, or manual intervention justify visible work.
 - **Zero-Human Company Ops** — Configure CoWork OS as a founder-directed autonomous company shell with venture workspace kits, a dedicated Companies tab, persistent operator twins, strategic planner loops, and Mission Control ops monitoring.
 - **Managed Devices** — Run and inspect tasks across saved remote machines from a dedicated Devices tab with connection controls, summaries, remote task feeds, and remote file attachment picking.
 - **Automations Control Center** — A single Automations section now groups task queueing, scheduled tasks, event triggers, webhooks, daily briefings, and the self-improvement loop.
@@ -152,7 +152,7 @@ Long-running tasks now have clearer operator handoffs and stronger recovery defa
 
 ### Mission Control
 
-Centralized agent orchestration dashboard with a Kanban task board, real-time activity feed, agent heartbeat monitoring, standup reports, and performance reviews. [Learn more](docs/mission-control.md)
+Centralized agent orchestration dashboard with a Kanban task board, real-time activity feed, and Heartbeat v3 monitoring for pulse, defer, dispatch, cooldown, and budget state. [Learn more](docs/mission-control.md) | [Heartbeat v3](docs/heartbeat-v3.md)
 
 ### Devices
 
@@ -164,11 +164,11 @@ Automations are now organized as a first-class operating surface instead of a sc
 
 ### Zero-Human Company Ops
 
-CoWork OS can be configured as a founder-operated autonomous company shell: venture workspace kit context, a dedicated `Settings > Companies` control surface, persistent company-linked operator agents, heartbeat-driven proactive work, strategic planner issue generation, and Mission Control ops monitoring. Create the company in `Companies`, activate operator twins such as `Company Planner` and `Founder Office Operator`, then run and monitor the company loop from Mission Control. [Learn more](docs/zero-human-company.md)
+CoWork OS can be configured as a founder-operated autonomous company shell: venture workspace kit context, a dedicated `Settings > Companies` control surface, persistent company-linked operator agents, Heartbeat v3 operator loops, strategic planner issue generation, and Mission Control ops monitoring. Create the company in `Companies`, activate operator twins such as `Company Planner` and `Founder Office Operator`, then run and monitor the company loop from Mission Control. [Learn more](docs/zero-human-company.md) | [Heartbeat v3](docs/heartbeat-v3.md)
 
 ### Digital Twin Personas
 
-Role-specific AI twins that proactively handle cognitive overhead. Pick a template (Software Engineer, Engineering Manager, Product Manager, VP, Founder Office Operator, Company Planner, and more), customize it, and activate — the twin runs on a heartbeat, automatically executing tasks like PR triage, status digests, meeting prep, dependency scans, and company-ops follow-up. Built-in templates span engineering, management, product, data, operations, and venture/operator roles, and can now be persistently linked to a company for company-aware operations. [Learn more](docs/digital-twins.md)
+Role-specific AI twins that proactively handle cognitive overhead. Pick a template (Software Engineer, Engineering Manager, Product Manager, VP, Founder Office Operator, Company Planner, and more), customize it, and activate — Heartbeat v3 runs cheap non-LLM Pulse checks by default, evaluates proactive cadence and checklist state, and only Dispatches into suggestions, tasks, runbooks, or cron handoff when justified. Built-in templates span engineering, management, product, data, operations, and venture/operator roles, and can now be persistently linked to a company for company-aware operations. [Learn more](docs/digital-twins.md) | [Heartbeat v3](docs/heartbeat-v3.md)
 
 ### Live Canvas & Build Mode
 
@@ -259,7 +259,7 @@ Built-in structured entity and relationship memory backed by SQLite. The agent b
 
 ### Memory & Context
 
-Persistent memory with privacy protection, FTS5 search, LLM compression, and a contract-driven workspace kit (`.cowork/`) for durable human-edited context. The workspace kit now separates workspace-wide files such as `AGENTS.md`, `USER.md`, `MEMORY.md`, `TOOLS.md`, `SOUL.md`, `IDENTITY.md`, `RULES.md`, `VIBES.md`, and `LORE.md` from project-scoped files such as `.cowork/projects/<projectId>/CONTEXT.md` and `.cowork/projects/<projectId>/ACCESS.md`. Special files get dedicated lifecycle handling: `BOOTSTRAP.md` is a one-time onboarding checklist tracked through `.cowork/workspace-state.json`, while `HEARTBEAT.md` is reserved for recurring heartbeat-only checks instead of general task context.
+Persistent memory with privacy protection, FTS5 search, LLM compression, and a contract-driven workspace kit (`.cowork/`) for durable human-edited context. The workspace kit now separates workspace-wide files such as `AGENTS.md`, `USER.md`, `MEMORY.md`, `TOOLS.md`, `SOUL.md`, `IDENTITY.md`, `RULES.md`, `VIBES.md`, and `LORE.md` from project-scoped files such as `.cowork/projects/<projectId>/CONTEXT.md` and `.cowork/projects/<projectId>/ACCESS.md`. Special files get dedicated lifecycle handling: `BOOTSTRAP.md` is a one-time onboarding checklist tracked through `.cowork/workspace-state.json`, while `HEARTBEAT.md` is reserved for recurring Heartbeat v3 checklist work instead of general task context.
 
 Every tracked file follows a shared parser/linter model with freshness windows, secret detection, missing-file status, and revision snapshots stored under `.cowork/**/.history/`. Workspace kit health is surfaced in the app and can be checked locally with `npm run kit:lint` for human-readable output or JSON export. **Import your ChatGPT history** to eliminate the cold-start problem — CoWork OS knows you from day one. All imported data is stored locally and encrypted on your machine. **Proactive session compaction** automatically generates comprehensive structured summaries when context reaches 90% capacity — preserving user messages, decisions, file changes, errors, and pending work so the agent continues seamlessly without losing critical context. [Learn more](docs/features.md#persistent-memory-system) | [Context Compaction](docs/context-compaction.md)
 
@@ -386,6 +386,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full history of completed features.
 | [Migration Guide](docs/migration.md) | Migration checklist and compatibility notes |
 | [Development](docs/development.md) | Build from source, project structure |
 | [Architecture](docs/architecture.md) | Technical architecture deep-dive |
+| [Heartbeat v3](docs/heartbeat-v3.md) | Default two-lane heartbeat architecture, signals, Pulse, Dispatch, and operator semantics |
 | [Security Guide](docs/security-guide.md) | Security model and best practices |
 | [Enterprise Connectors](docs/enterprise-connectors.md) | MCP connector development |
 | [Self-Hosting](docs/self-hosting.md) | Docker and systemd deployment |

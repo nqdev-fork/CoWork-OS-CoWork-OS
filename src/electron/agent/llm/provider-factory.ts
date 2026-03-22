@@ -723,6 +723,49 @@ export interface LLMSettings {
     defaultModel?: "gpt-image-1.5" | "nano-banana-2";
     backupModel?: "gpt-image-1.5" | "nano-banana-2";
   };
+  /** Text-to-video generation settings. Provider-specific config + routing. */
+  videoGeneration?: {
+    defaultProvider?: "openai" | "azure" | "gemini" | "vertex" | "kling";
+    fallbackProvider?: "openai" | "azure" | "gemini" | "vertex" | "kling";
+    openai?: {
+      defaultModel?: string;
+      defaultDuration?: number;
+      defaultAspectRatio?: "16:9" | "9:16" | "1:1";
+      defaultResolution?: "480p" | "720p" | "1080p";
+    };
+    azure?: {
+      /** Dedicated API key for video (overrides the main Azure chat API key if set) */
+      videoApiKey?: string;
+      /** Dedicated endpoint for video (overrides the main Azure chat endpoint if set) */
+      videoEndpoint?: string;
+      videoDeployment?: string;
+      videoApiVersion?: string;
+      defaultDuration?: number;
+      defaultAspectRatio?: "16:9" | "9:16" | "1:1";
+      defaultResolution?: "480p" | "720p" | "1080p";
+    };
+    gemini?: {
+      defaultModel?: "veo-3.1" | "veo-3.1-fast-preview" | "veo-3.0";
+      defaultDuration?: number;
+      defaultAspectRatio?: "16:9" | "9:16" | "1:1";
+    };
+    vertex?: {
+      model?: "veo-3" | "veo-3.1";
+      projectId?: string;
+      location?: string;
+      outputGcsUri?: string;
+      accessToken?: string;
+      defaultDuration?: number;
+      defaultAspectRatio?: "16:9" | "9:16" | "1:1";
+    };
+    kling?: {
+      apiKey?: string;
+      baseUrl?: string;
+      model?: string;
+      defaultDuration?: number;
+      defaultAspectRatio?: "16:9" | "9:16" | "1:1";
+    };
+  };
   // Cached models from API (populated when user refreshes)
   cachedGeminiModels?: CachedModelInfo[];
   cachedOpenRouterModels?: CachedModelInfo[];

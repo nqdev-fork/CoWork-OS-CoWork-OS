@@ -143,6 +143,8 @@ describe("ProactiveSuggestionsService", () => {
       undefined,
       "insight",
       expect.stringContaining("\"workspaceScope\":\"all\""),
+      false,
+      expect.objectContaining({ batchable: false }),
     );
   });
 

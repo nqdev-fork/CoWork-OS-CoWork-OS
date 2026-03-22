@@ -1,10 +1,12 @@
 import * as path from "path";
+import * as fs from "fs/promises";
 import { Workspace } from "../../../shared/types";
 import { AgentDaemon } from "../daemon";
 import { SpreadsheetBuilder } from "../skills/spreadsheet";
 import { DocumentBuilder } from "../skills/document";
 import { PresentationBuilder } from "../skills/presentation";
 import { FolderOrganizer } from "../skills/organizer";
+import { editPdfRegion } from "../../documents/pdf-region-editor";
 
 /**
  * SkillTools implements high-level skills for document creation
@@ -130,7 +132,7 @@ export class SkillTools {
   async editDocument(input: {
     sourcePath: string;
     destPath?: string;
-    action?: "append" | "move_section" | "insert_after_section" | "list_sections";
+    action?: "append" | "move_section" | "insert_after_section" | "list_sections" | "replace_blocks";
     newContent?: Array<{
       type: string;
       text: string;
@@ -138,6 +140,7 @@ export class SkillTools {
       items?: string[];
       rows?: string[][];
     }>;
+    blockIds?: string[];
     // For move_section action:
     sectionToMove?: string;
     afterSection?: string;
@@ -264,6 +267,44 @@ export class SkillTools {
       };
     }
 
+    if (action === "replace_blocks") {
+      if (!input.blockIds || !Array.isArray(input.blockIds) || input.blockIds.length === 0) {
+        throw new Error('Missing required "blockIds" parameter for replace_blocks action');
+      }
+      if (!input.newContent || !Array.isArray(input.newContent) || input.newContent.length === 0) {
+        throw new Error(
+          'Missing or empty "newContent" parameter for replace_blocks action. ' +
+            "Please provide replacement content blocks.",
+        );
+      }
+
+      const result = await this.documentBuilder.replaceBlocksById(
+        inputPath,
+        outputPath,
+        input.blockIds,
+        input.newContent,
+      );
+
+      if (!result.success) {
+        throw new Error(result.message);
+      }
+
+      this.daemon.logEvent(this.taskId, "file_modified", {
+        path: input.destPath || input.sourcePath,
+        type: "document",
+        action: "replace_blocks",
+        blockIds: input.blockIds,
+        sectionsAdded: result.sectionsAdded,
+      });
+
+      return {
+        success: true,
+        path: input.destPath || input.sourcePath,
+        sectionsAdded: result.sectionsAdded,
+        message: result.message,
+      };
+    }
+
     // Default action: append
     if (!input.newContent || !Array.isArray(input.newContent) || input.newContent.length === 0) {
       throw new Error(
@@ -297,6 +338,60 @@ export class SkillTools {
       success: true,
       path: input.destPath || input.sourcePath,
       sectionsAdded: result.sectionsAdded,
+    };
+  }
+
+  async editPdfRegion(input: {
+    sourcePath: string;
+    destPath: string;
+    pageIndex: number;
+    bbox: { x: number; y: number; w: number; h: number };
+    instruction: string;
+  }): Promise<{ success: boolean; path: string; message?: string }> {
+    if (!this.workspace.permissions.read) {
+      throw new Error("Read permission not granted");
+    }
+    if (!this.workspace.permissions.write) {
+      throw new Error("Write permission not granted");
+    }
+    if (!input.sourcePath || !input.destPath) {
+      throw new Error("sourcePath and destPath are required");
+    }
+    if (!input.instruction || !input.instruction.trim()) {
+      throw new Error("instruction is required");
+    }
+
+    const workspaceRoot = path.resolve(this.workspace.path);
+    const sourcePath = path.resolve(path.join(workspaceRoot, input.sourcePath));
+    const destPath = path.resolve(path.join(workspaceRoot, input.destPath));
+    const sep = path.sep;
+    if (
+      !sourcePath.startsWith(workspaceRoot + sep) && sourcePath !== workspaceRoot ||
+      !destPath.startsWith(workspaceRoot + sep) && destPath !== workspaceRoot
+    ) {
+      throw new Error("Path escapes workspace root");
+    }
+    await editPdfRegion({
+      sourcePath,
+      destPath,
+      pageIndex: input.pageIndex,
+      bbox: input.bbox,
+      instruction: input.instruction,
+    });
+
+    this.daemon.logEvent(this.taskId, "file_created", {
+      path: input.destPath,
+      type: "document",
+      format: "pdf",
+      action: "edit_pdf_region",
+      pageIndex: input.pageIndex,
+      bbox: input.bbox,
+    });
+
+    return {
+      success: true,
+      path: input.destPath,
+      message: "PDF region updated",
     };
   }
 

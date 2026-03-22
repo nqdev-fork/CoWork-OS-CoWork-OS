@@ -98,7 +98,7 @@ bounded_research=true
   it("routes explicit skill activation prompts to execution", () => {
     const routed = IntentRouter.route(
       "Novel task",
-      "Use the autonovel skill. Seed: a climatologist discovers a city that only exists during fog.",
+      "Use the novelist skill. Seed: a climatologist discovers a city that only exists during fog.",
     );
     expect(routed.intent).toBe("execution");
     expect(routed.conversationMode).toBe("task");

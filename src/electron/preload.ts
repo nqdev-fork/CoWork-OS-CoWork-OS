@@ -37,6 +37,9 @@ import type {
   UpdateAgentTeamMemberRequest,
   UpdateAgentTeamRequest,
   AddChannelRequest,
+  DocumentEditRequest,
+  DocumentEditorSession,
+  DocumentVersionEntry,
   InputRequest,
   InputRequestResponse,
   Workspace,
@@ -263,6 +266,9 @@ const IPC_CHANNELS = {
   TASK_CONTINUE: "task:continue",
   TASK_RENAME: "task:rename",
   TASK_DELETE: "task:delete",
+  DOCUMENT_OPEN_EDITOR_SESSION: "document:openEditorSession",
+  DOCUMENT_LIST_VERSIONS: "document:listVersions",
+  DOCUMENT_START_EDIT_TASK: "document:startEditTask",
   TASK_EVENT: "task:event",
   TASK_EVENTS: "task:events",
   TASK_SEMANTIC_TIMELINE: "task:semanticTimeline",
@@ -1969,7 +1975,14 @@ interface AgentRoleData {
   heartbeatEnabled?: boolean;
   heartbeatIntervalMinutes?: number;
   heartbeatStaggerOffset?: number;
+  pulseEveryMinutes?: number;
+  dispatchCooldownMinutes?: number;
+  maxDispatchesPerDay?: number;
+  heartbeatProfile?: import("../shared/types").HeartbeatProfile;
+  activeHours?: import("../shared/types").HeartbeatActiveHours;
   lastHeartbeatAt?: number;
+  lastPulseAt?: number;
+  lastDispatchAt?: number;
   heartbeatStatus?: HeartbeatStatus;
   operatorMandate?: string;
   allowedLoopTypes?: import("../shared/types").CompanyLoopType[];
@@ -1999,6 +2012,11 @@ interface CreateAgentRoleRequest {
   heartbeatEnabled?: boolean;
   heartbeatIntervalMinutes?: number;
   heartbeatStaggerOffset?: number;
+  pulseEveryMinutes?: number;
+  dispatchCooldownMinutes?: number;
+  maxDispatchesPerDay?: number;
+  heartbeatProfile?: import("../shared/types").HeartbeatProfile;
+  activeHours?: import("../shared/types").HeartbeatActiveHours;
   operatorMandate?: string;
   allowedLoopTypes?: import("../shared/types").CompanyLoopType[];
   outputTypes?: import("../shared/types").CompanyOutputType[];
@@ -2029,6 +2047,11 @@ interface UpdateAgentRoleRequest {
   heartbeatEnabled?: boolean;
   heartbeatIntervalMinutes?: number;
   heartbeatStaggerOffset?: number;
+  pulseEveryMinutes?: number;
+  dispatchCooldownMinutes?: number;
+  maxDispatchesPerDay?: number;
+  heartbeatProfile?: import("../shared/types").HeartbeatProfile;
+  activeHours?: import("../shared/types").HeartbeatActiveHours | null;
   operatorMandate?: string;
   allowedLoopTypes?: import("../shared/types").CompanyLoopType[];
   outputTypes?: import("../shared/types").CompanyOutputType[];
@@ -2354,6 +2377,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
     workspaceId: string;
     files: Array<{ name: string; data: string; mimeType?: string }>;
   }) => ipcRenderer.invoke("file:importDataToWorkspace", data),
+  openDocumentEditorSession: (data: { filePath: string; workspacePath?: string }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.DOCUMENT_OPEN_EDITOR_SESSION, data) as Promise<DocumentEditorSession>,
+  listDocumentVersions: (data: { filePath: string; workspacePath?: string }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.DOCUMENT_LIST_VERSIONS, data) as Promise<DocumentVersionEntry[]>,
+  startDocumentEditTask: (data: DocumentEditRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.DOCUMENT_START_EDIT_TASK, data),
 
   // Shell APIs
   openExternal: (url: string) => ipcRenderer.invoke("shell:openExternal", url),
@@ -3815,6 +3844,7 @@ export interface FileViewerResult {
 }
 
 export type { TraySettings };
+export type { DocumentEditorSession, DocumentVersionEntry, DocumentEditRequest };
 
 // Export Agent Role types
 export type {
@@ -3892,6 +3922,15 @@ export interface ElectronAPI {
     workspaceId: string;
     files: Array<{ name: string; data: string; mimeType?: string }>;
   }) => Promise<Array<{ relativePath: string; fileName: string; size: number; mimeType?: string }>>;
+  openDocumentEditorSession: (data: {
+    filePath: string;
+    workspacePath?: string;
+  }) => Promise<DocumentEditorSession>;
+  listDocumentVersions: (data: {
+    filePath: string;
+    workspacePath?: string;
+  }) => Promise<DocumentVersionEntry[]>;
+  startDocumentEditTask: (data: DocumentEditRequest) => Promise<Any>;
   openExternal: (url: string) => Promise<void>;
   openSystemSettings: (
     target: "microphone" | "dictation",
@@ -5438,6 +5477,11 @@ export interface ElectronAPI {
         heartbeatEnabled: boolean;
         heartbeatIntervalMinutes: number;
         heartbeatStaggerOffset: number;
+        pulseEveryMinutes?: number;
+        dispatchCooldownMinutes?: number;
+        maxDispatchesPerDay?: number;
+        heartbeatProfile?: import("../shared/types").HeartbeatProfile;
+        activeHours?: import("../shared/types").HeartbeatActiveHours;
         heartbeatStatus: HeartbeatStatus;
         lastHeartbeatAt?: number;
       }
@@ -5449,6 +5493,11 @@ export interface ElectronAPI {
       heartbeatEnabled?: boolean;
       heartbeatIntervalMinutes?: number;
       heartbeatStaggerOffset?: number;
+      pulseEveryMinutes?: number;
+      dispatchCooldownMinutes?: number;
+      maxDispatchesPerDay?: number;
+      heartbeatProfile?: import("../shared/types").HeartbeatProfile;
+      activeHours?: import("../shared/types").HeartbeatActiveHours | null;
     },
   ) => Promise<Any>;
   triggerHeartbeat: (agentRoleId: string) => Promise<HeartbeatResult>;
@@ -5458,6 +5507,15 @@ export interface ElectronAPI {
         heartbeatStatus: HeartbeatStatus;
         lastHeartbeatAt?: number;
         nextHeartbeatAt?: number;
+        lastPulseResult?: import("../shared/types").HeartbeatPulseResultKind;
+        lastDispatchKind?: string;
+        deferred?: import("../shared/types").HeartbeatDeferredState;
+        compressedSignalCount?: number;
+        dueProactiveCount?: number;
+        checklistDueCount?: number;
+        dispatchCooldownUntil?: number;
+        dispatchesToday?: number;
+        maxDispatchesPerDay?: number;
         isRunning: boolean;
       }
     | undefined
@@ -5470,6 +5528,15 @@ export interface ElectronAPI {
       heartbeatStatus: HeartbeatStatus;
       lastHeartbeatAt?: number;
       nextHeartbeatAt?: number;
+      lastPulseResult?: import("../shared/types").HeartbeatPulseResultKind;
+      lastDispatchKind?: string;
+      deferred?: import("../shared/types").HeartbeatDeferredState;
+      compressedSignalCount?: number;
+      dueProactiveCount?: number;
+      checklistDueCount?: number;
+      dispatchCooldownUntil?: number;
+      dispatchesToday?: number;
+      maxDispatchesPerDay?: number;
     }>
   >;
   onHeartbeatEvent: (callback: (event: HeartbeatEvent) => void) => () => void;

@@ -1,5 +1,8 @@
 import { LLMContent, LLMImageContent, LLMMessage, LLMResponse, LLMTool } from "./types";
 import { imageToTextFallback } from "./image-utils";
+import { createLogger } from "../../utils/logger";
+
+const logger = createLogger("openai-compat");
 
 export interface OpenAICompatibleMessageOptions {
   /** Set to false to replace image blocks with text fallback (default: false) */
@@ -102,7 +105,61 @@ export function toOpenAICompatibleMessages(
     }
   }
 
-  return result;
+  // Post-processing: remove assistant messages with tool_calls that don't have complete
+  // tool responses. This prevents the Azure error: "An assistant message with 'tool_calls'
+  // must be followed by tool messages responding to each 'tool_call_id'."
+  const cleaned: typeof result = [];
+  let i = 0;
+  while (i < result.length) {
+    const msg = result[i];
+    if (msg.role === "assistant" && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+      const toolCallIds: string[] = msg.tool_calls.map((tc: Any) => tc.id);
+      // Collect all immediately following tool messages
+      const toolMessages: typeof result = [];
+      let j = i + 1;
+      while (j < result.length && result[j].role === "tool") {
+        toolMessages.push(result[j]);
+        j++;
+      }
+      const expectedIds = new Set(toolCallIds);
+      const matchedToolMessages = toolMessages.filter(
+        (tm) => tm.tool_call_id != null && expectedIds.has(tm.tool_call_id),
+      );
+      const unexpectedToolMessages = toolMessages.filter(
+        (tm) => tm.tool_call_id == null || !expectedIds.has(tm.tool_call_id),
+      );
+      const coveredIds = new Set(matchedToolMessages.map((tm) => tm.tool_call_id));
+      const allCovered = toolCallIds.every((id) => coveredIds.has(id));
+      if (allCovered) {
+        if (unexpectedToolMessages.length > 0) {
+          logger.warn(
+            `Dropping orphaned tool messages with unexpected tool_call_ids: ${unexpectedToolMessages
+              .map((tm) => String(tm.tool_call_id || ""))
+              .join(", ")}`,
+          );
+        }
+        cleaned.push(msg, ...matchedToolMessages);
+      } else {
+        const missing = toolCallIds.filter((id) => !coveredIds.has(id));
+        logger.warn(
+          `Dropping assistant tool_calls message with uncovered tool_call_ids: ${missing.join(", ")}`,
+        );
+      }
+      i = j;
+    } else if (msg.role === "tool") {
+      logger.warn(
+        `Dropping standalone orphaned tool message with tool_call_id: ${String(
+          msg.tool_call_id || "",
+        )}`,
+      );
+      i++;
+    } else {
+      cleaned.push(msg);
+      i++;
+    }
+  }
+
+  return cleaned;
 }
 
 export function toOpenAICompatibleTools(tools: LLMTool[]): Array<{

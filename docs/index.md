@@ -15,6 +15,9 @@ hero:
       text: Features
       link: /features
     - theme: alt
+      text: Heartbeat v3
+      link: /heartbeat-v3
+    - theme: alt
       text: Evolving Agent Intelligence
       link: /evolving-agent-intelligence
     - theme: alt
@@ -40,6 +43,8 @@ features:
     details: Connect local and remote CoWork nodes, inspect device summaries, browse remote workspaces, and launch tasks against selected machines from one Devices tab.
   - title: Automations
     details: Task Queue, Self-Improve, Scheduled Tasks, Webhooks, Event Triggers, and Daily Briefing now live under one Automations operating surface.
+  - title: Heartbeat V3
+    details: Default two-lane background automation with cheap Pulse checks, selective Dispatch escalation, signal compression, and truthful Mission Control state.
   - title: 139 Built-in Skills
     details: Document creation, web research, code generation, image analysis, and more. Extensible via custom skills and plugins.
   - title: Agent Teams

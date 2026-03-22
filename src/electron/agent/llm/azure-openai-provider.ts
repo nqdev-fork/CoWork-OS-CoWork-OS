@@ -633,6 +633,18 @@ export class AzureOpenAIProvider implements LLMProvider {
     );
   }
 
+  /** Model output validation failures that often succeed on retry (content filter false positives, malformed tool args). */
+  private isModelOutputValidationError(message: string): boolean {
+    const normalized = String(message || "").toLowerCase();
+    return normalized.includes("model produced invalid content");
+  }
+
+  /** Azure occasionally returns transient upstream faults as HTTP 400 with a server-error message. */
+  private isTransientServerErrorMessage(message: string): boolean {
+    const normalized = String(message || "").toLowerCase();
+    return normalized.includes("the server had an error while processing your request");
+  }
+
   private toStructuredProviderError(error: Any): Error {
     const message = String(error?.message || "Azure OpenAI request failed");
     const wrapped = new Error(message) as Any;
@@ -646,7 +658,9 @@ export class AzureOpenAIProvider implements LLMProvider {
           : undefined;
     wrapped.retryable =
       (typeof status === "number" && status >= 500) ||
+      this.isTransientServerErrorMessage(message) ||
       this.isTransientInterruptionMessage(message) ||
+      this.isModelOutputValidationError(message) ||
       wrapped.code === "ECONNRESET" ||
       wrapped.code === "ETIMEDOUT" ||
       wrapped.code === "ENOTFOUND" ||

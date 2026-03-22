@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { AgentRoleData, AgentCapability } from "../../electron/preload";
+import type { HeartbeatProfile } from "../../shared/types";
 import { TWIN_ICON_KEYS, resolveTwinIcon } from "../utils/twin-icons";
 
 // Alias for UI usage
@@ -384,11 +385,11 @@ export function AgentRoleEditor({
                 {editedRole.heartbeatEnabled && (
                   <div className="heartbeat-options">
                     <div className="form-row">
-                      <label>Check Interval</label>
+                      <label>Pulse Every</label>
                       <select
-                        value={editedRole.heartbeatIntervalMinutes || 15}
+                        value={editedRole.pulseEveryMinutes || editedRole.heartbeatIntervalMinutes || 15}
                         onChange={(e) =>
-                          handleChange("heartbeatIntervalMinutes", parseInt(e.target.value))
+                          handleChange("pulseEveryMinutes", parseInt(e.target.value))
                         }
                       >
                         {HEARTBEAT_INTERVALS.map((interval) => (
@@ -397,7 +398,7 @@ export function AgentRoleEditor({
                           </option>
                         ))}
                       </select>
-                      <span className="form-hint">How often the agent checks for new work</span>
+                      <span className="form-hint">Cheap pulse cadence for deterministic heartbeat review</span>
                     </div>
 
                     <div className="form-row">
@@ -414,6 +415,51 @@ export function AgentRoleEditor({
                       <span className="form-hint">
                         Offset to stagger heartbeats across multiple agents (0-60 minutes)
                       </span>
+                    </div>
+
+                    <div className="form-row">
+                      <label>Profile</label>
+                      <select
+                        value={editedRole.heartbeatProfile || "observer"}
+                        onChange={(e) =>
+                          handleChange("heartbeatProfile", e.target.value as HeartbeatProfile)
+                        }
+                      >
+                        <option value="observer">Observer</option>
+                        <option value="operator">Operator</option>
+                        <option value="dispatcher">Dispatcher</option>
+                      </select>
+                      <span className="form-hint">
+                        Observer = awareness only, Operator = maintenance, Dispatcher = escalation
+                      </span>
+                    </div>
+
+                    <div className="form-row">
+                      <label>Dispatch Cooldown (minutes)</label>
+                      <input
+                        type="number"
+                        value={editedRole.dispatchCooldownMinutes || 120}
+                        onChange={(e) =>
+                          handleChange("dispatchCooldownMinutes", parseInt(e.target.value) || 120)
+                        }
+                        min={0}
+                        max={1440}
+                      />
+                      <span className="form-hint">Minimum gap between dispatch escalations</span>
+                    </div>
+
+                    <div className="form-row">
+                      <label>Max Dispatches / Day</label>
+                      <input
+                        type="number"
+                        value={editedRole.maxDispatchesPerDay || 6}
+                        onChange={(e) =>
+                          handleChange("maxDispatchesPerDay", parseInt(e.target.value) || 6)
+                        }
+                        min={0}
+                        max={100}
+                      />
+                      <span className="form-hint">Daily budget for task/runbook escalation</span>
                     </div>
                   </div>
                 )}

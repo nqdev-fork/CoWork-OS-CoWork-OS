@@ -48,6 +48,7 @@ import {
   Plus,
   Building2,
   HeartPulse,
+  Film,
 } from "lucide-react";
 import {
   LLMSettingsData,
@@ -602,7 +603,7 @@ export function Settings({
   const [activeSkillsSubTab, setActiveSkillsSubTab] = useState<"custom" | "store">(
     initialTab === "skillhub" ? "store" : "custom",
   );
-  const [activeAIModelsSubTab, setActiveAIModelsSubTab] = useState<"llm" | "search">(
+  const [activeAIModelsSubTab, setActiveAIModelsSubTab] = useState<"llm" | "video" | "search">(
     initialTab === "search" ? "search" : "llm",
   );
   const [activeAutomationsSubTab, setActiveAutomationsSubTab] = useState<
@@ -698,6 +699,46 @@ export function Settings({
   const [imageGenBackupModel, setImageGenBackupModel] = useState<
     "gpt-image-1.5" | "nano-banana-2" | ""
   >("");
+
+  // Video generation state
+  const [videoDefaultProvider, setVideoDefaultProvider] = useState<
+    "openai" | "azure" | "gemini" | "vertex" | "kling" | ""
+  >("");
+  const [videoFallbackProvider, setVideoFallbackProvider] = useState<
+    "openai" | "azure" | "gemini" | "vertex" | "kling" | ""
+  >("");
+  // OpenAI Sora video config
+  const [videoOpenAIModel, setVideoOpenAIModel] = useState("sora-2");
+  const [videoOpenAIDuration, setVideoOpenAIDuration] = useState("5");
+  const [videoOpenAIAspectRatio, setVideoOpenAIAspectRatio] = useState("16:9");
+  const [videoOpenAIResolution, setVideoOpenAIResolution] = useState("720p");
+  // Azure Sora video config
+  const [videoAzureApiKey, setVideoAzureApiKey] = useState("");
+  const [videoAzureEndpoint, setVideoAzureEndpoint] = useState("");
+  const [videoAzureDeployment, setVideoAzureDeployment] = useState("");
+  const [videoAzureApiVersion, setVideoAzureApiVersion] = useState("preview");
+  const [videoAzureDuration, setVideoAzureDuration] = useState("5");
+  const [videoAzureAspectRatio, setVideoAzureAspectRatio] = useState("16:9");
+  // Gemini Veo config
+  const [videoGeminiModel, setVideoGeminiModel] = useState<
+    "veo-3.1" | "veo-3.1-fast-preview" | "veo-3.0"
+  >("veo-3.1");
+  const [videoGeminiDuration, setVideoGeminiDuration] = useState("5");
+  const [videoGeminiAspectRatio, setVideoGeminiAspectRatio] = useState("16:9");
+  // Vertex AI Veo config
+  const [videoVertexModel, setVideoVertexModel] = useState<"veo-3" | "veo-3.1">("veo-3");
+  const [videoVertexProjectId, setVideoVertexProjectId] = useState("");
+  const [videoVertexLocation, setVideoVertexLocation] = useState("us-central1");
+  const [videoVertexOutputGcsUri, setVideoVertexOutputGcsUri] = useState("");
+  const [videoVertexAccessToken, setVideoVertexAccessToken] = useState("");
+  const [videoVertexDuration, setVideoVertexDuration] = useState("5");
+  const [videoVertexAspectRatio, setVideoVertexAspectRatio] = useState("16:9");
+  // Kling config
+  const [videoKlingApiKey, setVideoKlingApiKey] = useState("");
+  const [videoKlingBaseUrl, setVideoKlingBaseUrl] = useState("https://api.klingai.com");
+  const [videoKlingModel, setVideoKlingModel] = useState("kling-v2");
+  const [videoKlingDuration, setVideoKlingDuration] = useState("5");
+  const [videoKlingAspectRatio, setVideoKlingAspectRatio] = useState("16:9");
 
   // Azure OpenAI state
   const [azureApiKey, setAzureApiKey] = useState("");
@@ -1374,6 +1415,36 @@ export function Settings({
       } else {
         setImageGenBackupModel("");
       }
+
+      // Video generation settings
+      const vg = loadedSettings.videoGeneration;
+      if (vg?.defaultProvider) setVideoDefaultProvider(vg.defaultProvider);
+      if (vg?.fallbackProvider) setVideoFallbackProvider(vg.fallbackProvider);
+      if (vg?.openai?.defaultModel) setVideoOpenAIModel(vg.openai.defaultModel);
+      if (vg?.openai?.defaultDuration) setVideoOpenAIDuration(String(vg.openai.defaultDuration));
+      if (vg?.openai?.defaultAspectRatio) setVideoOpenAIAspectRatio(vg.openai.defaultAspectRatio);
+      if (vg?.openai?.defaultResolution) setVideoOpenAIResolution(vg.openai.defaultResolution);
+      if (vg?.azure?.videoApiKey) setVideoAzureApiKey(vg.azure.videoApiKey);
+      if (vg?.azure?.videoEndpoint) setVideoAzureEndpoint(vg.azure.videoEndpoint);
+      if (vg?.azure?.videoDeployment) setVideoAzureDeployment(vg.azure.videoDeployment);
+      if (vg?.azure?.videoApiVersion) setVideoAzureApiVersion(vg.azure.videoApiVersion);
+      if (vg?.azure?.defaultDuration) setVideoAzureDuration(String(vg.azure.defaultDuration));
+      if (vg?.azure?.defaultAspectRatio) setVideoAzureAspectRatio(vg.azure.defaultAspectRatio);
+      if (vg?.gemini?.defaultModel) setVideoGeminiModel(vg.gemini.defaultModel);
+      if (vg?.gemini?.defaultDuration) setVideoGeminiDuration(String(vg.gemini.defaultDuration));
+      if (vg?.gemini?.defaultAspectRatio) setVideoGeminiAspectRatio(vg.gemini.defaultAspectRatio);
+      if (vg?.vertex?.model) setVideoVertexModel(vg.vertex.model);
+      if (vg?.vertex?.projectId) setVideoVertexProjectId(vg.vertex.projectId);
+      if (vg?.vertex?.location) setVideoVertexLocation(vg.vertex.location);
+      if (vg?.vertex?.outputGcsUri) setVideoVertexOutputGcsUri(vg.vertex.outputGcsUri);
+      if (vg?.vertex?.accessToken) setVideoVertexAccessToken(vg.vertex.accessToken);
+      if (vg?.vertex?.defaultDuration) setVideoVertexDuration(String(vg.vertex.defaultDuration));
+      if (vg?.vertex?.defaultAspectRatio) setVideoVertexAspectRatio(vg.vertex.defaultAspectRatio);
+      if (vg?.kling?.apiKey) setVideoKlingApiKey(vg.kling.apiKey);
+      if (vg?.kling?.baseUrl) setVideoKlingBaseUrl(vg.kling.baseUrl);
+      if (vg?.kling?.model) setVideoKlingModel(vg.kling.model);
+      if (vg?.kling?.defaultDuration) setVideoKlingDuration(String(vg.kling.defaultDuration));
+      if (vg?.kling?.defaultAspectRatio) setVideoKlingAspectRatio(vg.kling.defaultAspectRatio);
 
       // Set Bedrock form state (access key and secret key are set earlier)
       if (loadedSettings.bedrock?.accessKeyId) {
@@ -2178,6 +2249,45 @@ export function Settings({
                 backupModel: imageGenBackupModel || undefined,
               }
             : undefined,
+        videoGeneration: {
+          defaultProvider: videoDefaultProvider || undefined,
+          fallbackProvider: videoFallbackProvider || undefined,
+          openai: {
+            defaultModel: videoOpenAIModel || undefined,
+            defaultDuration: videoOpenAIDuration ? Number(videoOpenAIDuration) : undefined,
+            defaultAspectRatio: (videoOpenAIAspectRatio as "16:9" | "9:16" | "1:1") || undefined,
+            defaultResolution: (videoOpenAIResolution as "480p" | "720p" | "1080p") || undefined,
+          },
+          azure: {
+            videoApiKey: videoAzureApiKey || undefined,
+            videoEndpoint: videoAzureEndpoint || undefined,
+            videoDeployment: videoAzureDeployment || undefined,
+            videoApiVersion: videoAzureApiVersion || undefined,
+            defaultDuration: videoAzureDuration ? Number(videoAzureDuration) : undefined,
+            defaultAspectRatio: (videoAzureAspectRatio as "16:9" | "9:16" | "1:1") || undefined,
+          },
+          gemini: {
+            defaultModel: videoGeminiModel || undefined,
+            defaultDuration: videoGeminiDuration ? Number(videoGeminiDuration) : undefined,
+            defaultAspectRatio: (videoGeminiAspectRatio as "16:9" | "9:16" | "1:1") || undefined,
+          },
+          vertex: {
+            model: videoVertexModel || undefined,
+            projectId: videoVertexProjectId || undefined,
+            location: videoVertexLocation || undefined,
+            outputGcsUri: videoVertexOutputGcsUri || undefined,
+            accessToken: videoVertexAccessToken || undefined,
+            defaultDuration: videoVertexDuration ? Number(videoVertexDuration) : undefined,
+            defaultAspectRatio: (videoVertexAspectRatio as "16:9" | "9:16" | "1:1") || undefined,
+          },
+          kling: {
+            apiKey: videoKlingApiKey || undefined,
+            baseUrl: videoKlingBaseUrl || undefined,
+            model: videoKlingModel || undefined,
+            defaultDuration: videoKlingDuration ? Number(videoKlingDuration) : undefined,
+            defaultAspectRatio: (videoKlingAspectRatio as "16:9" | "9:16" | "1:1") || undefined,
+          },
+        },
         customProviders:
           Object.keys(sanitizedCustomProviders).length > 0 ? sanitizedCustomProviders : undefined,
       };
@@ -2350,6 +2460,327 @@ export function Settings({
     !!cheapRoutingModel &&
     strongRoutingModel === cheapRoutingModel;
 
+  const activeVideoTab = videoDefaultProvider || "openai";
+
+  const videoProviders = [
+    { type: "openai" as const, name: "OpenAI Sora", icon: <CircleDot {...S} /> },
+    { type: "azure" as const, name: "Azure Sora", icon: <Cloud {...S} /> },
+    { type: "gemini" as const, name: "Gemini Veo", icon: <Star {...S} /> },
+    { type: "vertex" as const, name: "Vertex AI Veo", icon: <Hexagon {...S} /> },
+    { type: "kling" as const, name: "Kling", icon: <Zap {...S} /> },
+  ];
+
+  const renderVideoPanel = () => (
+              <div className="llm-provider-panel">
+                <div className="llm-provider-header">
+                  <h2>Video Provider</h2>
+                  <p className="settings-description">
+                    Choose which service to use for video generation. The selected provider will be used by the video creation tool.
+                  </p>
+                </div>
+                <div className="llm-provider-tabs">
+                  {videoProviders.map((vp) => (
+                    <button
+                      key={vp.type}
+                      type="button"
+                      className={`llm-provider-tab ${activeVideoTab === vp.type ? "active" : ""}`}
+                      onClick={() => setVideoDefaultProvider(vp.type)}
+                    >
+                      {vp.icon}
+                      <span className="llm-provider-tab-label">{vp.name}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="llm-provider-content">
+
+                  {activeVideoTab === "openai" && (
+                    <div className="settings-section">
+                      <h3>OpenAI Sora 2</h3>
+                      <p className="settings-hint">Uses the OpenAI API key configured in AI Model. Supports text-to-video and image-to-video.</p>
+                      <label className="settings-label">Default model</label>
+                      <select
+                        className="settings-select"
+                        value={videoOpenAIModel}
+                        onChange={(e) => setVideoOpenAIModel(e.target.value)}
+                      >
+                        <option value="sora-2">sora-2</option>
+                        <option value="sora-2-pro">sora-2-pro</option>
+                      </select>
+                      <label className="settings-label" style={{ marginTop: "8px" }}>Default duration (seconds)</label>
+                      <input
+                        className="settings-input"
+                        type="number"
+                        min={1}
+                        max={20}
+                        value={videoOpenAIDuration}
+                        onChange={(e) => setVideoOpenAIDuration(e.target.value)}
+                      />
+                      <label className="settings-label" style={{ marginTop: "8px" }}>Default aspect ratio</label>
+                      <select
+                        className="settings-select"
+                        value={videoOpenAIAspectRatio}
+                        onChange={(e) => setVideoOpenAIAspectRatio(e.target.value)}
+                      >
+                        <option value="16:9">16:9 (landscape)</option>
+                        <option value="9:16">9:16 (portrait)</option>
+                        <option value="1:1">1:1 (square)</option>
+                      </select>
+                      <label className="settings-label" style={{ marginTop: "8px" }}>Default resolution</label>
+                      <select
+                        className="settings-select"
+                        value={videoOpenAIResolution}
+                        onChange={(e) => setVideoOpenAIResolution(e.target.value)}
+                      >
+                        <option value="480p">480p</option>
+                        <option value="720p">720p</option>
+                        <option value="1080p">1080p</option>
+                      </select>
+                    </div>
+                  )}
+
+                  {activeVideoTab === "azure" && (
+                    <div className="settings-section">
+                      <h3>Azure OpenAI Sora 2</h3>
+                      <p className="settings-hint">Optionally use a dedicated API key and endpoint for video (e.g. a different Azure resource). Leave blank to reuse the Azure chat credentials from AI Model.</p>
+                      <label className="settings-label">API Key (video-specific, optional)</label>
+                      <input
+                        className="settings-input"
+                        type="password"
+                        placeholder="Leave blank to use the Azure chat API key"
+                        value={videoAzureApiKey}
+                        onChange={(e) => setVideoAzureApiKey(e.target.value)}
+                      />
+                      <label className="settings-label" style={{ marginTop: "8px" }}>Endpoint (video-specific, optional)</label>
+                      <input
+                        className="settings-input"
+                        type="text"
+                        placeholder="Leave blank to use the Azure chat endpoint"
+                        value={videoAzureEndpoint}
+                        onChange={(e) => setVideoAzureEndpoint(e.target.value)}
+                      />
+                      <label className="settings-label" style={{ marginTop: "8px" }}>Sora deployment name</label>
+                      <input
+                        className="settings-input"
+                        type="text"
+                        placeholder="e.g. sora"
+                        value={videoAzureDeployment}
+                        onChange={(e) => setVideoAzureDeployment(e.target.value)}
+                      />
+                      <label className="settings-label" style={{ marginTop: "8px" }}>API version</label>
+                      <input
+                        className="settings-input"
+                        type="text"
+                        placeholder="preview"
+                        value={videoAzureApiVersion}
+                        onChange={(e) => setVideoAzureApiVersion(e.target.value)}
+                      />
+                      <label className="settings-label" style={{ marginTop: "8px" }}>Default duration (seconds)</label>
+                      <input
+                        className="settings-input"
+                        type="number"
+                        min={1}
+                        max={20}
+                        value={videoAzureDuration}
+                        onChange={(e) => setVideoAzureDuration(e.target.value)}
+                      />
+                      <label className="settings-label" style={{ marginTop: "8px" }}>Default aspect ratio</label>
+                      <select
+                        className="settings-select"
+                        value={videoAzureAspectRatio}
+                        onChange={(e) => setVideoAzureAspectRatio(e.target.value)}
+                      >
+                        <option value="16:9">16:9 (landscape)</option>
+                        <option value="9:16">9:16 (portrait)</option>
+                        <option value="1:1">1:1 (square)</option>
+                      </select>
+                    </div>
+                  )}
+
+                  {activeVideoTab === "gemini" && (
+                    <div className="settings-section">
+                      <h3>Gemini Veo 3.1</h3>
+                      <p className="settings-hint">Uses the Gemini API key configured in AI Model. Supports text-to-video and image-to-video via long-running operations.</p>
+                      <label className="settings-label">Default model</label>
+                      <select
+                        className="settings-select"
+                        value={videoGeminiModel}
+                        onChange={(e) =>
+                          setVideoGeminiModel(
+                            e.target.value as "veo-3.1" | "veo-3.1-fast-preview" | "veo-3.0",
+                          )
+                        }
+                      >
+                        <option value="veo-3.1">Veo 3.1 (standard)</option>
+                        <option value="veo-3.1-fast-preview">Veo 3.1 Fast Preview</option>
+                        <option value="veo-3.0">Veo 3.0</option>
+                      </select>
+                      <label className="settings-label" style={{ marginTop: "8px" }}>Default duration (seconds)</label>
+                      <input
+                        className="settings-input"
+                        type="number"
+                        min={1}
+                        max={30}
+                        value={videoGeminiDuration}
+                        onChange={(e) => setVideoGeminiDuration(e.target.value)}
+                      />
+                      <label className="settings-label" style={{ marginTop: "8px" }}>Default aspect ratio</label>
+                      <select
+                        className="settings-select"
+                        value={videoGeminiAspectRatio}
+                        onChange={(e) => setVideoGeminiAspectRatio(e.target.value)}
+                      >
+                        <option value="16:9">16:9 (landscape)</option>
+                        <option value="9:16">9:16 (portrait)</option>
+                        <option value="1:1">1:1 (square)</option>
+                      </select>
+                    </div>
+                  )}
+
+                  {activeVideoTab === "vertex" && (
+                    <div className="settings-section">
+                      <h3>Vertex AI Veo 3 / 3.1</h3>
+                      <p className="settings-hint">Requires a Google Cloud project, location, and an access token. Output can be saved to a GCS bucket.</p>
+                      <label className="settings-label">Model</label>
+                      <select
+                        className="settings-select"
+                        value={videoVertexModel}
+                        onChange={(e) => setVideoVertexModel(e.target.value as "veo-3" | "veo-3.1")}
+                      >
+                        <option value="veo-3">Veo 3</option>
+                        <option value="veo-3.1">Veo 3.1</option>
+                      </select>
+                      <label className="settings-label" style={{ marginTop: "8px" }}>GCP Project ID</label>
+                      <input
+                        className="settings-input"
+                        type="text"
+                        placeholder="my-project-id"
+                        value={videoVertexProjectId}
+                        onChange={(e) => setVideoVertexProjectId(e.target.value)}
+                      />
+                      <label className="settings-label" style={{ marginTop: "8px" }}>Location</label>
+                      <input
+                        className="settings-input"
+                        type="text"
+                        placeholder="us-central1"
+                        value={videoVertexLocation}
+                        onChange={(e) => setVideoVertexLocation(e.target.value)}
+                      />
+                      <label className="settings-label" style={{ marginTop: "8px" }}>Output GCS URI (optional)</label>
+                      <input
+                        className="settings-input"
+                        type="text"
+                        placeholder="gs://my-bucket/videos/"
+                        value={videoVertexOutputGcsUri}
+                        onChange={(e) => setVideoVertexOutputGcsUri(e.target.value)}
+                      />
+                      <label className="settings-label" style={{ marginTop: "8px" }}>Access Token</label>
+                      <p className="settings-hint" style={{ marginBottom: "4px", color: "var(--color-warning, #b45309)" }}>
+                        OAuth access tokens expire in ~1 hour. Re-paste a fresh token when generation fails. For long-running use, consider a service account key instead.
+                      </p>
+                      <input
+                        className="settings-input"
+                        type="password"
+                        placeholder="ya29...."
+                        value={videoVertexAccessToken}
+                        onChange={(e) => setVideoVertexAccessToken(e.target.value)}
+                      />
+                      <label className="settings-label" style={{ marginTop: "8px" }}>Default duration (seconds)</label>
+                      <input
+                        className="settings-input"
+                        type="number"
+                        min={1}
+                        max={30}
+                        value={videoVertexDuration}
+                        onChange={(e) => setVideoVertexDuration(e.target.value)}
+                      />
+                      <label className="settings-label" style={{ marginTop: "8px" }}>Default aspect ratio</label>
+                      <select
+                        className="settings-select"
+                        value={videoVertexAspectRatio}
+                        onChange={(e) => setVideoVertexAspectRatio(e.target.value)}
+                      >
+                        <option value="16:9">16:9 (landscape)</option>
+                        <option value="9:16">9:16 (portrait)</option>
+                        <option value="1:1">1:1 (square)</option>
+                      </select>
+                    </div>
+                  )}
+
+                  {activeVideoTab === "kling" && (
+                    <div className="settings-section">
+                      <h3>Kling</h3>
+                      <p className="settings-hint">Dedicated Kling API key. Supports text-to-video and image-to-video.</p>
+                      <label className="settings-label">API Key</label>
+                      <input
+                        className="settings-input"
+                        type="password"
+                        placeholder="Enter Kling API key"
+                        value={videoKlingApiKey}
+                        onChange={(e) => setVideoKlingApiKey(e.target.value)}
+                      />
+                      <label className="settings-label" style={{ marginTop: "8px" }}>Base URL</label>
+                      <input
+                        className="settings-input"
+                        type="text"
+                        placeholder="https://api.klingai.com"
+                        value={videoKlingBaseUrl}
+                        onChange={(e) => setVideoKlingBaseUrl(e.target.value)}
+                      />
+                      <label className="settings-label" style={{ marginTop: "8px" }}>Model</label>
+                      <input
+                        className="settings-input"
+                        type="text"
+                        placeholder="kling-v2"
+                        value={videoKlingModel}
+                        onChange={(e) => setVideoKlingModel(e.target.value)}
+                      />
+                      <label className="settings-label" style={{ marginTop: "8px" }}>Default duration (seconds)</label>
+                      <input
+                        className="settings-input"
+                        type="number"
+                        min={1}
+                        max={60}
+                        value={videoKlingDuration}
+                        onChange={(e) => setVideoKlingDuration(e.target.value)}
+                      />
+                      <label className="settings-label" style={{ marginTop: "8px" }}>Default aspect ratio</label>
+                      <select
+                        className="settings-select"
+                        value={videoKlingAspectRatio}
+                        onChange={(e) => setVideoKlingAspectRatio(e.target.value)}
+                      >
+                        <option value="16:9">16:9 (landscape)</option>
+                        <option value="9:16">9:16 (portrait)</option>
+                        <option value="1:1">1:1 (square)</option>
+                      </select>
+                    </div>
+                  )}
+
+                  {/* Fallback provider */}
+                  <div className="settings-section" style={{ marginTop: "16px" }}>
+                    <label className="settings-label">Fallback provider</label>
+                    <p className="settings-hint">If the selected provider fails, fall back to this one.</p>
+                    <select
+                      className="settings-select"
+                      value={videoFallbackProvider}
+                      onChange={(e) =>
+                        setVideoFallbackProvider(
+                          (e.target.value || "") as "openai" | "azure" | "gemini" | "vertex" | "kling" | "",
+                        )
+                      }
+                    >
+                      <option value="">None</option>
+                      <option value="openai">OpenAI Sora 2</option>
+                      <option value="azure">Azure OpenAI Sora 2</option>
+                      <option value="gemini">Gemini Veo 3.1</option>
+                      <option value="vertex">Vertex AI Veo</option>
+                      <option value="kling">Kling</option>
+                    </select>
+                  </div>
+
+                </div>
+              </div>
+  );
 
   const renderLLMPanel = () => (
               <div className="llm-provider-panel">
@@ -4450,7 +4881,7 @@ export function Settings({
               <div className="more-channels-panel">
                 <div className="more-channels-header">
                   <h2>AI & Models</h2>
-                  <p className="settings-description">Configure AI model and web search</p>
+                  <p className="settings-description">Configure AI model, video model, and web search</p>
                 </div>
                 <div className="more-channels-tabs">
                   <button
@@ -4459,6 +4890,13 @@ export function Settings({
                   >
                     <Layers {...S} />
                     <span>AI Model</span>
+                  </button>
+                  <button
+                    className={`more-channels-tab ${activeAIModelsSubTab === "video" ? "active" : ""}`}
+                    onClick={() => setActiveAIModelsSubTab("video")}
+                  >
+                    <Film {...S} />
+                    <span>Video Model</span>
                   </button>
                   <button
                     className={`more-channels-tab ${activeAIModelsSubTab === "search" ? "active" : ""}`}
@@ -4470,6 +4908,7 @@ export function Settings({
                 </div>
                 <div className="more-channels-content">
                   {activeAIModelsSubTab === "llm" && renderLLMPanel()}
+                  {activeAIModelsSubTab === "video" && renderVideoPanel()}
                   {activeAIModelsSubTab === "search" && <SearchSettings />}
                 </div>
               </div>

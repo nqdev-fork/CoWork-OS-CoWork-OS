@@ -801,6 +801,7 @@ export class ControlPlaneCoreService {
   attachTaskToRun(runId: string, taskId: string): { issue: Issue; run: HeartbeatRun; task: Task } {
     const run = this.getRun(runId);
     if (!run) throw new Error(`Run not found: ${runId}`);
+    if (!run.issueId) throw new Error(`Run has no issue: ${runId}`);
     const issue = this.getIssue(run.issueId);
     if (!issue) throw new Error(`Issue not found for run: ${runId}`);
     const task = this.taskRepo.findById(taskId);

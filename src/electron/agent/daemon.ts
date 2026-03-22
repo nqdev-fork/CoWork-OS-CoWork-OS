@@ -182,6 +182,29 @@ function parseBooleanEnv(envName: string, fallback = false): boolean {
   return fallback;
 }
 
+const TASK_OVERRIDE_ALLOWLIST = new Set<keyof Task>([
+  "assignedAgentRoleId",
+  "heartbeatRunId",
+  "issueId",
+  "companyId",
+  "goalId",
+  "projectId",
+  "requestDepth",
+  "billingCode",
+]);
+
+function sanitizeTaskOverrides(taskOverrides?: Partial<Task>): Partial<Task> | undefined {
+  if (!taskOverrides) return undefined;
+  const sanitized: Partial<Task> = {};
+  const writableSanitized = sanitized as Record<keyof Task, Task[keyof Task]>;
+  for (const [key, value] of Object.entries(taskOverrides) as Array<[keyof Task, Task[keyof Task]]>) {
+    if (TASK_OVERRIDE_ALLOWLIST.has(key)) {
+      writableSanitized[key] = value;
+    }
+  }
+  return Object.keys(sanitized).length > 0 ? sanitized : undefined;
+}
+
 interface CachedExecutor {
   executor: TaskExecutor;
   lastAccessed: number;
@@ -1573,6 +1596,7 @@ export class AgentDaemon extends EventEmitter {
     budgetTokens?: number;
     budgetCost?: number;
     source?: Task["source"];
+    taskOverrides?: Partial<Task>;
   }): Promise<Task> {
     const derived = this.deriveTaskStrategy({
       title: params.title,
@@ -1588,6 +1612,7 @@ export class AgentDaemon extends EventEmitter {
           route: derived.route,
         })
       : undefined;
+    const safeTaskOverrides = sanitizeTaskOverrides(params.taskOverrides);
     const task = this.taskRepo.create({
       title: params.title,
       prompt: derived.prompt,
@@ -1600,6 +1625,7 @@ export class AgentDaemon extends EventEmitter {
       strategyLock: isCronTask,
       budgetProfile: cronBudgetProfile,
       ...(params.source ? { source: params.source } : {}),
+      ...(safeTaskOverrides || {}),
     });
     this.logEvent(task.id, "log", {
       message:

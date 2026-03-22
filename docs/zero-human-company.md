@@ -17,7 +17,7 @@ The zero-human-company workflow is a composition of existing CoWork OS subsystem
 - `Workspace Kit` provides durable company context in `.cowork/`
 - `Settings > Companies` provides the control surface for creating companies, editing the company graph, and linking operators
 - `Digital Twins` provide persistent operator roles
-- `Heartbeat` lets those roles run on a schedule
+- `Heartbeat v3` gives those roles cheap Pulse review plus selective Dispatch escalation
 - `Strategic Planner` turns goals and stalled work into managed issues
 - `Mission Control` lets you monitor agents, issues, runs, and tasks
 - `Self-Improve` can optionally run autonomous improvement experiments on git-backed workspaces
@@ -46,7 +46,7 @@ These files are injected into agent context so operators reason from company sta
 Operator agents are implemented as `AgentRole` records with:
 
 - capability and tool settings
-- heartbeat configuration
+- Heartbeat v3 configuration (`pulseEveryMinutes`, cooldown, budget, profile)
 - role-specific prompts
 - persisted optional `companyId` assignment
 - optional `autonomyPolicy`
@@ -90,7 +90,7 @@ This is important because it means ZHC operation is not a separate prototype pat
 
 Mission Control exposes the operating loop through:
 
-- left panel: live agents and heartbeat status
+- left panel: live agents and pulse/dispatch state
 - center panel: execution task board
 - right panel: feed, task detail, and `Ops`
 - planner strip: planner config, manual run trigger, recent planner cycles
@@ -110,7 +110,7 @@ Mission Control exposes the operating loop through:
 
 ### Digital Twins
 
-Digital twins are the main way to instantiate company operators. The ZHC workflow uses the same activation flow as any other twin, but swaps in venture/operator personas and company-oriented heartbeat behavior.
+Digital twins are the main way to instantiate company operators. The ZHC workflow uses the same activation flow as any other twin, but swaps in venture/operator personas and company-oriented Heartbeat v3 behavior.
 
 When a twin is created from company context, CoWork OS now persists the company assignment on the resulting `AgentRole`. That lets the product consistently show:
 
@@ -137,7 +137,7 @@ The ZHC setup depends heavily on `.cowork/` files. The workspace kit is the dura
 
 ### Heartbeat Maintenance
 
-Lead operators can treat `HEARTBEAT.md` as a recurring checklist. This gives you proactive background review without creating a second automation system.
+`HEARTBEAT.md` is a recurring checklist input for Heartbeat v3. Operators and dispatchers can treat it as company-ops maintenance work without creating a second automation system, while observer twins stay awareness-only.
 
 ### Mission Control
 
@@ -189,7 +189,7 @@ flowchart LR
     workspaceKit[WorkspaceKit]
     companies[CompaniesTab]
     digitalTwins[DigitalTwins]
-    heartbeat[HeartbeatLoop]
+    heartbeat[HeartbeatV3]
     planner[StrategicPlanner]
     issues[CompanyIssues]
     tasks[TaskRuntime]
@@ -214,7 +214,7 @@ Operational sequence:
 2. You create or select the company shell in `Settings > Companies`.
 3. You activate operator agents from venture-oriented persona templates.
 4. Those twins are persisted with company assignment.
-5. Heartbeats wake those agents on a schedule.
+5. Heartbeat v3 runs Pulse on each agent's cadence and Dispatches only when justified.
 6. The strategic planner reviews goals, projects, and open issues.
 7. The planner creates or updates planner-managed issues.
 8. If auto-dispatch is enabled, issues become executable tasks.
@@ -380,7 +380,7 @@ For a more realistic founder-operated company shell, activate:
 - `Growth Operator`
 - `Customer Ops Lead`
 
-Suggested heartbeat intervals for a live demo:
+Suggested Pulse cadences for a live demo:
 
 - `Founder Office Operator`: 10 minutes
 - `Company Planner`: 15 minutes
@@ -438,7 +438,7 @@ Keep this short and current. This is the highest-signal "what matters now" doc f
 
 ### `HEARTBEAT.md`
 
-Use this as a recurring checklist for lead operators:
+Use this as a recurring checklist for operator or dispatcher twins:
 
 - review KPI drift
 - check stalled issues
@@ -457,7 +457,7 @@ Watch for:
 - company exists in `Settings > Companies`
 - operators are linked to the intended company
 - operators present in the agents list
-- heartbeat enabled
+- heartbeat enabled with the intended profile
 - planner configured for the expected company
 - planner cycle successfully creating issues
 
@@ -466,7 +466,7 @@ Watch for:
 Watch:
 
 - Mission Queue for active tasks
-- Feed for heartbeat and activity events
+- Feed for Pulse, Dispatch, and activity events
 - Ops for issue state, comments, and runs
 - linked tasks from planner-managed issues
 
@@ -474,7 +474,7 @@ Watch:
 
 Tune:
 
-- heartbeat intervals
+- Pulse cadence, cooldown, and daily dispatch budget
 - approval preset
 - operator mix
 - `HEARTBEAT.md` checklist quality

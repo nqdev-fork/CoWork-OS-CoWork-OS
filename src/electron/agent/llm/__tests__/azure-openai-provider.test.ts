@@ -372,4 +372,51 @@ describe("AzureOpenAIProvider", () => {
       status: 500,
     });
   });
+
+  it("marks 'model produced invalid content' 400 as retryable", async () => {
+    mockFetch.mockResolvedValue(
+      createErrorResponse(400, "Bad Request", {
+        error: {
+          message:
+            "The model produced invalid content. Consider modifying your prompt if you are seeing this error persistently. For more information, please see https://aka.ms/model-error",
+        },
+      }),
+    );
+
+    const provider = new AzureOpenAIProvider(baseConfig);
+    const request: LLMRequest = {
+      model: "gpt-5.4",
+      maxTokens: 100,
+      system: "system prompt",
+      messages: [{ role: "user", content: "hi" }],
+    };
+
+    await expect(provider.createMessage(request)).rejects.toMatchObject({
+      retryable: true,
+      status: 400,
+    });
+  });
+
+  it("marks Azure wrapped server-error 400s as retryable", async () => {
+    mockFetch.mockResolvedValue(
+      createErrorResponse(400, "Bad Request", {
+        error: {
+          message: "The server had an error while processing your request. Sorry about that!",
+        },
+      }),
+    );
+
+    const provider = new AzureOpenAIProvider(baseConfig);
+    const request: LLMRequest = {
+      model: "gpt-5.4",
+      maxTokens: 100,
+      system: "system prompt",
+      messages: [{ role: "user", content: "hi" }],
+    };
+
+    await expect(provider.createMessage(request)).rejects.toMatchObject({
+      retryable: true,
+      status: 400,
+    });
+  });
 });

@@ -12,6 +12,7 @@ import {
   Code,
   Archive,
 } from "lucide-react";
+import { DocumentAwareFileModal } from "./DocumentAwareFileModal";
 
 interface UnifiedFile {
   id: string;
@@ -72,6 +73,7 @@ export const FileHub: React.FC<{ workspaceId?: string }> = ({ workspaceId: _work
   const [recentFiles, setRecentFiles] = useState<UnifiedFile[]>([]);
   const [showRecent, setShowRecent] = useState(false);
   const [availableSources, setAvailableSources] = useState<string[]>(["local", "artifacts"]);
+  const [viewerFilePath, setViewerFilePath] = useState<string | null>(null);
 
   const loadFiles = useCallback(async () => {
     try {
@@ -111,8 +113,7 @@ export const FileHub: React.FC<{ workspaceId?: string }> = ({ workspaceId: _work
       // Navigate into directory
       return;
     }
-    // Open file
-    window.electronAPI?.openFile?.(file.path);
+    setViewerFilePath(file.path);
   };
 
   return (
@@ -268,6 +269,12 @@ export const FileHub: React.FC<{ workspaceId?: string }> = ({ workspaceId: _work
           ))
         )}
       </div>
+      {viewerFilePath && (
+        <DocumentAwareFileModal
+          filePath={viewerFilePath}
+          onClose={() => setViewerFilePath(null)}
+        />
+      )}
     </div>
   );
 };

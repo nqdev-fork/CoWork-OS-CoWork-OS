@@ -16,6 +16,7 @@ import { extractPptxContentFromFile } from "../utils/pptx-extractor";
 import { parsePdfBuffer } from "../utils/pdf-parser";
 import ExcelJS from "exceljs";
 import { createMediaPlaybackUrl } from "../media";
+import { DocumentEditorSessionService } from "../documents/DocumentEditorSessionService";
 
 import { DatabaseManager } from "../database/schema";
 import {
@@ -88,6 +89,9 @@ import {
   TaskMessageSchema,
   FileImportSchema,
   FileImportDataSchema,
+  DocumentEditorOpenSessionSchema,
+  DocumentEditorListVersionsSchema,
+  DocumentEditRequestSchema,
   ApprovalResponseSchema,
   InputRequestResponseSchema,
   LLMSettingsSchema,
@@ -236,6 +240,110 @@ type MacSystemSettingsTarget = "microphone" | "dictation";
 
 const execFileAsync = promisify(execFile);
 const logger = createLogger("IPC");
+const VIDEO_PREVIEW_CACHE_DIR = path.join(os.tmpdir(), "cowork-video-preview-cache");
+const VIDEO_PREVIEW_FFMPEG_TIMEOUT_MS = 60_000;
+const MAX_TRANSCODED_VIDEO_PREVIEW_SIZE = 64 * 1024 * 1024;
+
+let ffmpegCheckedAt = 0;
+let ffmpegAvailable: boolean | null = null;
+
+const isFfmpegInstalled = async (): Promise<boolean> => {
+  const now = Date.now();
+  if (ffmpegAvailable !== null && now - ffmpegCheckedAt < 5 * 60 * 1000) {
+    return ffmpegAvailable;
+  }
+
+  ffmpegCheckedAt = now;
+  try {
+    await execFileAsync("ffmpeg", ["-version"], { timeout: 5_000 });
+    ffmpegAvailable = true;
+    return true;
+  } catch {
+    ffmpegAvailable = false;
+    return false;
+  }
+};
+
+const sanitizeVideoPreviewBaseName = (resolvedPath: string): string => {
+  const baseName = path.basename(resolvedPath, path.extname(resolvedPath));
+  const normalized = baseName.replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+|_+$/g, "");
+  return normalized.length > 0 ? normalized.slice(0, 80) : "video-preview";
+};
+
+const getCachedVideoPreviewPath = (resolvedPath: string, stats: fsSync.Stats): string => {
+  const safeBase = sanitizeVideoPreviewBaseName(resolvedPath);
+  return path.join(
+    VIDEO_PREVIEW_CACHE_DIR,
+    `${safeBase}-${stats.size}-${Math.floor(stats.mtimeMs)}.webm`,
+  );
+};
+
+const generateTranscodedVideoPreviewDataUrl = async (
+  resolvedPath: string,
+  stats: fsSync.Stats,
+): Promise<string | null> => {
+  if (stats.size > MAX_TRANSCODED_VIDEO_PREVIEW_SIZE) {
+    return null;
+  }
+
+  const hasFfmpeg = await isFfmpegInstalled();
+  if (!hasFfmpeg) {
+    return null;
+  }
+
+  try {
+    await fs.mkdir(VIDEO_PREVIEW_CACHE_DIR, { recursive: true });
+    const previewPath = getCachedVideoPreviewPath(resolvedPath, stats);
+
+    try {
+      await fs.access(previewPath);
+    } catch {
+      const tempOutputPath = `${previewPath}.${process.pid}.tmp.webm`;
+      try {
+        await execFileAsync(
+          "ffmpeg",
+          [
+            "-y",
+            "-i",
+            resolvedPath,
+            "-c:v",
+            "libvpx",
+            "-deadline",
+            "realtime",
+            "-cpu-used",
+            "5",
+            "-crf",
+            "24",
+            "-b:v",
+            "1M",
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "96k",
+            tempOutputPath,
+          ],
+          {
+            timeout: VIDEO_PREVIEW_FFMPEG_TIMEOUT_MS,
+            maxBuffer: 8 * 1024 * 1024,
+          },
+        );
+        await fs.rename(tempOutputPath, previewPath);
+      } catch (ffmpegError) {
+        // Clean up partial output before re-throwing so the outer catch can log and return null.
+        try { await fs.unlink(tempOutputPath); } catch { /* ignore if never created */ }
+        throw ffmpegError;
+      }
+    }
+
+    const previewBuffer = await fs.readFile(previewPath);
+    return `data:video/webm;base64,${previewBuffer.toString("base64")}`;
+  } catch (error) {
+    logger.warn(
+      `Video preview transcode failed for ${resolvedPath}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return null;
+  }
+};
 
 const isMacSystemSettingsTarget = (value: unknown): value is MacSystemSettingsTarget =>
   value === "microphone" || value === "dictation";
@@ -578,6 +686,12 @@ export async function setupIpcHandlers(
   const evalService = new EvalService(db);
   const taskLabelRepo = new TaskLabelRepository(db);
   const workingStateRepo = new WorkingStateRepository(db);
+  const documentEditorSessionService = new DocumentEditorSessionService(
+    workspaceRepo,
+    taskRepo,
+    artifactRepo,
+    agentDaemon,
+  );
   const contextPolicyManager = new ContextPolicyManager(db);
   const emitTaskStatusEvent = (
     taskId: string,
@@ -1111,6 +1225,7 @@ export async function setupIpcHandlers(
       const MAX_VIDEO_SIZE = 500 * 1024 * 1024; // 500MB
       const MAX_PPTX_VIEWER_SIZE = 50 * 1024 * 1024; // 50MB before hard-stop
       const MAX_XLSX_SIZE = 20 * 1024 * 1024; // 20MB for spreadsheets
+      const MAX_INLINE_VIDEO_DATA_URL_SIZE = 25 * 1024 * 1024; // 25MB for reliable in-app playback
 
       if (fileType === "image" && stats.size > MAX_IMAGE_SIZE) {
         return { success: false, error: "File too large for preview (max 10MB for images)" };
@@ -1197,14 +1312,30 @@ export async function setupIpcHandlers(
             if (!mimeType || (mimeType !== "video/mp4" && mimeType !== "video/webm")) {
               return { success: false, error: "Unsupported video type" };
             }
-            if (!workspacePath || workspacePath.trim().length === 0) {
-              return { success: false, error: "Workspace path is required for video preview" };
+            if (mimeType === "video/mp4") {
+              const transcodedPreviewUrl = await generateTranscodedVideoPreviewDataUrl(
+                resolvedPath,
+                stats,
+              );
+              if (transcodedPreviewUrl) {
+                playbackUrl = transcodedPreviewUrl;
+                content = null;
+                break;
+              }
             }
-            playbackUrl = createMediaPlaybackUrl({
-              resolvedPath,
-              workspaceRoot: workspacePath,
-              mimeType,
-            });
+            if (stats.size <= MAX_INLINE_VIDEO_DATA_URL_SIZE) {
+              const buffer = await fs.readFile(resolvedPath);
+              playbackUrl = `data:${mimeType};base64,${buffer.toString("base64")}`;
+            } else {
+              if (!workspacePath || workspacePath.trim().length === 0) {
+                return { success: false, error: "Workspace path is required for video preview" };
+              }
+              playbackUrl = createMediaPlaybackUrl({
+                resolvedPath,
+                workspaceRoot: workspacePath,
+                mimeType,
+              });
+            }
             content = null;
             break;
           }
@@ -1455,6 +1586,30 @@ export async function setupIpcHandlers(
       return results;
     },
   );
+
+  ipcMain.handle(IPC_CHANNELS.DOCUMENT_OPEN_EDITOR_SESSION, async (_, data) => {
+    const validated = validateInput(
+      DocumentEditorOpenSessionSchema,
+      data,
+      "document editor open session",
+    );
+    return documentEditorSessionService.openSession(validated.filePath, validated.workspacePath);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.DOCUMENT_LIST_VERSIONS, async (_, data) => {
+    const validated = validateInput(
+      DocumentEditorListVersionsSchema,
+      data,
+      "document editor version list",
+    );
+    return documentEditorSessionService.listVersions(validated.filePath, validated.workspacePath);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.DOCUMENT_START_EDIT_TASK, async (_, data) => {
+    checkRateLimit(IPC_CHANNELS.TASK_CREATE);
+    const validated = validateInput(DocumentEditRequestSchema, data, "document edit request");
+    return documentEditorSessionService.startEditTask(validated);
+  });
 
   // Workspace handlers
   ipcMain.handle(IPC_CHANNELS.WORKSPACE_CREATE, async (_, data) => {
@@ -2318,6 +2473,8 @@ export async function setupIpcHandlers(
       kimi: validated.kimi,
       openaiCompatible: validated.openaiCompatible,
       customProviders: validated.customProviders ?? existingSettings.customProviders,
+      imageGeneration: validated.imageGeneration ?? existingSettings.imageGeneration,
+      videoGeneration: validated.videoGeneration ?? existingSettings.videoGeneration,
       // Preserve cached models from existing settings
       cachedGeminiModels: existingSettings.cachedGeminiModels,
       cachedOpenRouterModels: existingSettings.cachedOpenRouterModels,

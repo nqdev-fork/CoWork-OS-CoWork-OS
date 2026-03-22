@@ -83,6 +83,7 @@ import {
   Settings,
   PenLine,
   LayoutGrid,
+  Film,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { InlineVideoPreview } from "./InlineVideoPreview";
@@ -267,7 +268,7 @@ type SlashCommandOption = {
 const normalizeMentionSearch = (value: string): string =>
   value.toLowerCase().replace(/[^a-z0-9]/g, "");
 import { SkillParameterModal } from "./SkillParameterModal";
-import { FileViewer } from "./FileViewer";
+import { DocumentAwareFileModal } from "./DocumentAwareFileModal";
 import { ThemeIcon } from "./ThemeIcon";
 import {
   BookIcon,
@@ -2144,6 +2145,7 @@ interface CreateTaskOptions {
   verificationAgent?: boolean;
   executionMode?: ExecutionMode;
   taskDomain?: TaskDomain;
+  videoGenerationMode?: boolean;
 }
 
 const EXECUTION_MODE_ORDER: ExecutionMode[] = ["chat", "execute", "plan", "analyze", "verified"];
@@ -2154,6 +2156,7 @@ const TASK_DOMAIN_ORDER: TaskDomain[] = [
   "operations",
   "writing",
   "general",
+  "media",
 ];
 const EXECUTION_MODE_LABEL: Record<ExecutionMode, string> = {
   chat: "Chat",
@@ -2176,6 +2179,7 @@ const TASK_DOMAIN_LABEL: Record<TaskDomain, string> = {
   operations: "Operations",
   writing: "Writing",
   general: "General",
+  media: "Video",
 };
 const TASK_DOMAIN_HINT: Record<TaskDomain, string> = {
   auto: "Adapts orchestration automatically",
@@ -2184,6 +2188,7 @@ const TASK_DOMAIN_HINT: Record<TaskDomain, string> = {
   operations: "Optimized for infra and operational workflows",
   writing: "Optimized for writing and editing output",
   general: "Balanced behavior for mixed tasks",
+  media: "Video generation mode — uses video tools strongly",
 };
 const EXECUTION_MODE_ICON: Record<ExecutionMode, LucideIcon> = {
   chat: MessageCircle,
@@ -2199,6 +2204,7 @@ const TASK_DOMAIN_ICON: Record<TaskDomain, LucideIcon> = {
   operations: Settings,
   writing: PenLine,
   general: LayoutGrid,
+  media: Film,
 };
 type SettingsTab =
   | "appearance"
@@ -2884,6 +2890,24 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                   const commandOutputsForBlock = item.eventIndices.flatMap((ei: number) =>
                     commandOutputSessionsByInsertIndex.get(ei) ?? [],
                   );
+                  // Exclude sessions shown inline inside run_command tool call frames
+                  const inlineRunCommandSessionIds = new Set<string>();
+                  for (let idx = 0; idx < item.events.length; idx++) {
+                    const ev = item.events[idx];
+                    const evIndex = item.eventIndices[idx];
+                    if (
+                      getEffectiveTaskEventType(ev) === "tool_call" &&
+                      ev.payload?.tool === "run_command" &&
+                      isEventExpanded(ev)
+                    ) {
+                      for (const s of commandOutputSessionsByInsertIndex.get(evIndex) ?? []) {
+                        inlineRunCommandSessionIds.add(s.id);
+                      }
+                    }
+                  }
+                  const siblingCommandOutputsForBlock = commandOutputsForBlock.filter(
+                    (s: CommandOutputSession) => !inlineRunCommandSessionIds.has(s.id),
+                  );
                   const isBlockShowAll = showAllActionBlocks.has(item.blockId);
                   // Count only truly renderable events to avoid slicing on non-renderable raw events
                   const renderableRawIndices: number[] = [];
@@ -3067,6 +3091,9 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                                       summaryMode: !verboseSteps,
                                       task,
                                       childTasks,
+                                      commandOutputSessions:
+                                        commandOutputSessionsByInsertIndex.get(eventIndex) ?? [],
+                                      renderCommandOutput: renderCommandOutputs,
                                     })
                                   : undefined
                               }
@@ -3074,7 +3101,7 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                           );
                         })}
                       </ActionBlock>
-                      {renderCommandOutputs(commandOutputsForBlock)}
+                      {renderCommandOutputs(siblingCommandOutputsForBlock)}
                     </Fragment>
                   );
                 }
@@ -3491,11 +3518,21 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                               summaryMode: !verboseSteps,
                               task,
                               childTasks,
+                              commandOutputSessions: commandOutputsAfterEvent ?? [],
+                              renderCommandOutput: renderCommandOutputs,
                             })
                           : undefined
                       }
                     />
-                    {renderCommandOutputs(commandOutputsAfterEvent)}
+                    {renderCommandOutputs(
+                      isExpanded &&
+                        effectiveType === "tool_call" &&
+                        event.payload?.tool === "run_command" &&
+                        commandOutputsAfterEvent &&
+                        commandOutputsAfterEvent.length > 0
+                        ? []
+                        : commandOutputsAfterEvent ?? [],
+                    )}
                   </Fragment>
                 );
               })}
@@ -4047,8 +4084,31 @@ export function MainContent({
     );
     const terminalErrorDedupWindowMs = 10_000;
     const lastErrorByFingerprint = new Map<string, number>();
+    const escalationDedupWindowMs = 60_000;
+    const lastEscalationByReason = new Map<string, number>();
     const dedupedEvents = visibleEvents.filter((event) => {
-      if (getEffectiveTaskEventType(event) !== "error") return true;
+      const effectiveType = getEffectiveTaskEventType(event);
+
+      // Deduplicate consecutive step_contract_escalated events with the same reason
+      // so repeated nudges don't appear as multiple identical steps in the feed.
+      if (effectiveType === "step_contract_escalated") {
+        const payload =
+          event.payload && typeof event.payload === "object"
+            ? (event.payload as Record<string, unknown>)
+            : {};
+        const reason = typeof payload.reason === "string" ? payload.reason.trim() : "__unknown__";
+        const previousTimestamp = lastEscalationByReason.get(reason);
+        if (
+          typeof previousTimestamp === "number" &&
+          event.timestamp - previousTimestamp <= escalationDedupWindowMs
+        ) {
+          return false;
+        }
+        lastEscalationByReason.set(reason, event.timestamp);
+        return true;
+      }
+
+      if (effectiveType !== "error") return true;
       const payload =
         event.payload && typeof event.payload === "object"
           ? (event.payload as Record<string, unknown>)
@@ -5306,6 +5366,20 @@ export function MainContent({
     return event.payload?.type === "spreadsheet" || /\.xlsx?$/i.test(filePath);
   }, []);
 
+  const isVideoFileEvent = useCallback((event: TaskEvent): boolean => {
+    const effectiveType = getEffectiveTaskEventType(event);
+    if (
+      effectiveType !== "file_created" &&
+      effectiveType !== "file_modified" &&
+      effectiveType !== "artifact_created"
+    )
+      return false;
+    const filePath = String(event.payload?.path || event.payload?.from || "");
+    const mimeType =
+      typeof event.payload?.mimeType === "string" ? event.payload.mimeType.toLowerCase() : "";
+    return event.payload?.type === "video" || mimeType.startsWith("video/") || /\.(mp4|webm)$/i.test(filePath);
+  }, []);
+
   const shouldRenderTimelineEventInStepFeed = useCallback((event: TaskEvent): boolean => {
     const effectiveType = getEffectiveTaskEventType(event);
     if (effectiveType === "user_message" || effectiveType === "assistant_message") {
@@ -5315,15 +5389,17 @@ export function MainContent({
       ALWAYS_VISIBLE_TECHNICAL_EVENT_TYPES.has(event.type) ||
       ALWAYS_VISIBLE_TECHNICAL_EVENT_TYPES.has(effectiveType as EventType) ||
       isImageFileEvent(event) ||
+      isVideoFileEvent(event) ||
       isSpreadsheetFileEvent(event) ||
       (effectiveType === "tool_result" && event.payload?.tool === "schedule_task");
     return showSteps || showEvenWithoutSteps;
-  }, [isImageFileEvent, isSpreadsheetFileEvent, showSteps]);
+  }, [isImageFileEvent, isSpreadsheetFileEvent, isVideoFileEvent, showSteps]);
 
   // Check if an event has details to show
   const hasEventDetails = useCallback((event: TaskEvent): boolean => {
     const effectiveType = getEffectiveTaskEventType(event);
     if (isImageFileEvent(event)) return true;
+    if (isVideoFileEvent(event)) return true;
     if (isSpreadsheetFileEvent(event)) return true;
     if (workspace?.path && getStepCompletionPreviewPath(event)) return true;
     if (effectiveType === "task_completed") {
@@ -5368,7 +5444,7 @@ export function MainContent({
       "step_failed",
       "approval_requested",
     ].includes(effectiveType);
-  }, [events, isImageFileEvent, isSpreadsheetFileEvent, verboseSteps, workspace?.path]);
+  }, [events, isImageFileEvent, isSpreadsheetFileEvent, isVideoFileEvent, verboseSteps, workspace?.path]);
 
   // Determine if an event should be expanded by default
   // Important events (plan, assistant responses, errors) should be expanded
@@ -5376,6 +5452,7 @@ export function MainContent({
   const shouldDefaultExpand = useCallback((event: TaskEvent): boolean => {
     const effectiveType = getEffectiveTaskEventType(event);
     if (isImageFileEvent(event)) return true;
+    if (isVideoFileEvent(event)) return true;
     if (isSpreadsheetFileEvent(event)) return true;
     if (workspace?.path && getStepCompletionPreviewPath(event)) return true;
     if (effectiveType === "task_completed") return hasEventDetails(event);
@@ -5408,6 +5485,7 @@ export function MainContent({
     hasEventDetails,
     isImageFileEvent,
     isSpreadsheetFileEvent,
+    isVideoFileEvent,
     workspace?.path,
   ]);
 
@@ -5822,6 +5900,7 @@ export function MainContent({
         const modeOptions: CreateTaskOptions = {
           executionMode,
           taskDomain,
+          videoGenerationMode: taskDomain === "media" ? true : undefined,
         };
         const baseOptions: CreateTaskOptions =
           multiLlmModeEnabled && multiLlmConfig
@@ -7645,7 +7724,7 @@ export function MainContent({
 
         {/* File Viewer Modal - Welcome View */}
         {viewerFilePath && workspace?.path && (
-          <FileViewer
+          <DocumentAwareFileModal
             filePath={viewerFilePath}
             workspacePath={workspace.path}
             onClose={() => setViewerFilePath(null)}
@@ -8602,7 +8681,7 @@ export function MainContent({
 
       {/* File Viewer Modal - Task View */}
       {viewerFilePath && workspace?.path && (
-        <FileViewer
+        <DocumentAwareFileModal
           filePath={viewerFilePath}
           workspacePath={workspace.path}
           onClose={() => setViewerFilePath(null)}
@@ -8653,15 +8732,15 @@ function formatStepContractEscalatedMessage(reason: string): string {
   const r = reason.trim().toLowerCase();
   switch (r) {
     case "end_turn_before_required_mutation":
-      return "Saving progress before making changes";
+      return "Still working on this step — waiting for the first file write";
     case "loop_warning_threshold_reached":
       return "Trying a different approach";
     case "mutation_starvation_guard":
-      return "Waiting for file changes";
+      return "Waiting for file activity to begin";
     case "first_write_checkpoint_no_attempt":
-      return "Preparing to make changes";
+      return "Nudging agent to begin writing";
     case "first_write_checkpoint_failed":
-      return "Retrying file changes";
+      return "Retrying the file write";
     default:
       return "Adjusting approach";
   }
@@ -9203,6 +9282,8 @@ function renderEventDetails(
     summaryMode?: boolean;
     task?: Task | null;
     childTasks?: Task[];
+    commandOutputSessions?: CommandOutputSession[];
+    renderCommandOutput?: (sessions: CommandOutputSession[]) => React.ReactNode;
   },
 ) {
   const workspacePath = options?.workspacePath;
@@ -9442,6 +9523,24 @@ function renderEventDetails(
     case "tool_call": {
       const tcToolName = event.payload.tool;
       const tcInput = event.payload.input;
+
+      // run_command: embed CLI output inside tool call frame when available
+      if (tcToolName === "run_command" && tcInput?.command) {
+        const cmdSessions = options?.commandOutputSessions ?? [];
+        const renderCmd = options?.renderCommandOutput;
+        if (cmdSessions.length > 0 && renderCmd) {
+          return (
+            <div className="event-details event-details-run-command event-details-scrollable">
+              {renderCmd(cmdSessions)}
+            </div>
+          );
+        }
+        return (
+          <div className="event-details event-details-scrollable">
+            <pre>{truncateForDisplay(JSON.stringify(tcInput, null, 2))}</pre>
+          </div>
+        );
+      }
 
       // write_file: show path + code preview
       if (tcToolName === "write_file" && tcInput?.path && tcInput?.content) {

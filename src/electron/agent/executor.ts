@@ -882,6 +882,8 @@ export class TaskExecutor {
   private static readonly PINNED_USER_PROFILE_CLOSE_TAG = "</cowork_user_profile>";
 
   private static readonly BROWSER_TOOL_TIMEOUT_MS = 90 * 1000;
+  /** Video generation submission can take 10–30 s for job creation + initial processing. */
+  private static readonly VIDEO_TOOL_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
   private upsertPinnedUserBlock(
     messages: LLMMessage[],
@@ -5593,7 +5595,15 @@ ${transcript}
     ) {
       return false;
     }
-    if (/^Task missing /i.test(message) && !this.isSourceValidationGuardError(error)) {
+    // Block hard evidence-requirement guards from falling back to partial success.
+    // "Task missing direct answer" is intentionally excluded: when a task is resumed
+    // after an app restart with no snapshot, the answer may have already been delivered
+    // but can no longer be reconstructed, so we allow partial success when substantive
+    // evidence of completed work exists.
+    if (
+      /^Task missing (artifact|execution|verification) evidence/i.test(message) &&
+      !this.isSourceValidationGuardError(error)
+    ) {
       return false;
     }
     const failureClass = this.classifyFailure(error);
@@ -6420,6 +6430,16 @@ ${transcript}
       return clampToStepTimeout(Math.max(configured, TaskExecutor.BROWSER_TOOL_TIMEOUT_MS));
     }
 
+    // Video generation tools: job submission + polling can take several minutes.
+    if (
+      toolName === "generate_video" ||
+      toolName === "get_video_generation_job" ||
+      toolName === "cancel_video_generation_job"
+    ) {
+      const configured = normalizedSettingsTimeout ?? TaskExecutor.VIDEO_TOOL_TIMEOUT_MS;
+      return clampToStepTimeout(Math.max(configured, TaskExecutor.VIDEO_TOOL_TIMEOUT_MS));
+    }
+
     // Child-agent coordination tools can legitimately run longer than the default timeout.
     if (toolName === "wait_for_agent") {
       const inputSeconds = toolInput?.timeout_seconds;
@@ -6611,7 +6631,12 @@ ${transcript}
     }
 
     // Check for duplicate file creations
-    const fileCreationTools = new Set(["write_file", "copy_file"]);
+    // Note: get_video_generation_job is a polling tool, not a creation tool — excluded here.
+    const fileCreationTools = new Set([
+      "write_file",
+      "copy_file",
+      "generate_video",
+    ]);
     if (fileCreationTools.has(toolName) || isArtifactGenerationToolNameUtil(toolName)) {
       const filename = input?.filename || input?.path || input?.destPath || input?.destination;
       if (filename) {
@@ -6714,21 +6739,41 @@ ${transcript}
     }
 
     // Record file creations
-    const fileCreationTools = new Set(["write_file", "copy_file"]);
+    // Note: get_video_generation_job is a polling tool — only record a creation when
+    // generate_video completes and the result includes an output path.
+    const fileCreationTools = new Set([
+      "write_file",
+      "copy_file",
+      "generate_video",
+    ]);
     if (toolSucceeded && (fileCreationTools.has(toolName) || isArtifactGenerationToolNameUtil(toolName))) {
       const filename =
-        result?.path || result?.filename || input?.filename || input?.path || input?.destPath ||
-        input?.destination || input?.file_path;
+        result?.path ||
+        result?.filename ||
+        (Array.isArray(result?.outputPaths) ? result.outputPaths[0] : undefined) ||
+        input?.filename ||
+        input?.path ||
+        input?.destPath ||
+        input?.destination ||
+        input?.file_path;
       if (filename) {
         this.fileOperationTracker.recordFileCreation(filename);
       }
     }
 
     // A successful mutation invalidates stale read/list dedupe/cache state.
-    const mutatingTools = new Set(["write_file", "copy_file", "edit_file", "edit_document"]);
+    const mutatingTools = new Set([
+      "write_file",
+      "copy_file",
+      "edit_file",
+      "edit_document",
+      "generate_video",
+      "get_video_generation_job",
+    ]);
     if (toolSucceeded && (mutatingTools.has(toolName) || this.isFileMutationTool(toolName))) {
       const changedPath =
         result?.path ||
+        (Array.isArray(result?.outputPaths) ? result.outputPaths[0] : undefined) ||
         input?.path ||
         input?.destPath ||
         input?.file_path ||
@@ -6810,6 +6855,8 @@ ${transcript}
       canonical === "generate_spreadsheet" ||
       canonical === "create_presentation" ||
       canonical === "generate_presentation" ||
+      canonical === "generate_video" ||
+      canonical === "get_video_generation_job" ||
       canonical === "edit_document"
     );
   }
@@ -7383,6 +7430,9 @@ ${transcript}
       "generate_spreadsheet",
       "create_presentation",
       "generate_presentation",
+      "generate_video",
+      "get_video_generation_job",
+      "cancel_video_generation_job",
       "canvas_create",
       "canvas_push",
       "create_directory",
@@ -7522,6 +7572,21 @@ ${transcript}
       required.add(canonicalizeToolNameUtil("create_diagram"));
     }
 
+    const videoGenerationIntent =
+      /\b(video generation tool|text-to-video|image-to-video)\b/.test(desc) ||
+      (/\b(video|clip|animation|footage|movie)\b/.test(desc) &&
+        /\b(call|invoke|run|execute|use|create|generate|produce|render)\b/.test(desc));
+    if (videoGenerationIntent) {
+      addRequiredToolIfKnown("generate_video");
+    }
+
+    const videoPollingIntent =
+      /\b(poll|check|track|monitor)\b[\s\S]{0,50}\b(job|status|operation)\b/.test(desc) &&
+      /\b(video|generation|async|asynchronous)\b/.test(desc);
+    if (videoPollingIntent) {
+      addRequiredToolIfKnown("get_video_generation_job");
+    }
+
     const scaffoldIntent =
       /\b(scaffold|bootstrap|initialize|set up project|setup project|create widget)\b/.test(desc);
     if (scaffoldIntent) {
@@ -7552,7 +7617,10 @@ ${transcript}
     const readOnlyLike = descriptionHasReadOnlyIntent(desc);
     const specializedArtifactMention =
       /\.(docx|pdf|xlsx|pptx)\b/.test(desc) ||
-      /\b(word document|docx|pdf|spreadsheet|excel|slides?|powerpoint)\b/.test(desc);
+      /\.(mp4|mov|webm)\b/.test(desc) ||
+      /\b(word document|docx|pdf|spreadsheet|excel|slides?|powerpoint|video|clip|footage)\b/.test(
+        desc,
+      );
     if (fileArtifactMentioned && hasWriteIntent && !summaryLike && !readOnlyLike && !specializedArtifactMention) {
       required.add(canonicalizeToolNameUtil("write_file"));
     }
@@ -7740,6 +7808,7 @@ ${transcript}
       requiredTools.has("create_document") ||
       requiredTools.has("create_spreadsheet") ||
       requiredTools.has("create_presentation") ||
+      requiredTools.has("get_video_generation_job") ||
       requiredTools.has("create_diagram") ||
       requiredTools.has("canvas_push") ||
       requiredTools.has("write_file") ||
@@ -7788,6 +7857,8 @@ ${transcript}
         requiredTools.has("generate_spreadsheet") ||
         requiredTools.has("create_presentation") ||
         requiredTools.has("generate_presentation") ||
+        requiredTools.has("generate_video") ||
+        requiredTools.has("get_video_generation_job") ||
         requiredTools.has("canvas_create") ||
         requiredTools.has("canvas_push");
       const hasSpecializedArtifactExtension = Array.from(requiredExtensions.values()).some(
@@ -9679,11 +9750,6 @@ ${transcript}
     stepKind: "analysis" | "mutation_required" | "verification",
     taskDomain: TaskDomain,
   ): Set<string> {
-    const taskIntent = String(this.task.agentConfig?.taskIntent || "").toLowerCase();
-    if (taskIntent === "chat" && this.getEffectiveExecutionMode() === "execute") {
-      return new Set<string>();
-    }
-
     const always = new Set<string>([
       "revise_plan",
       "request_user_input",
@@ -9707,6 +9773,8 @@ ${transcript}
       "count_text",
       "text_metrics",
       "analyze_image",
+      "get_video_generation_job",
+      "cancel_video_generation_job",
       "browser_navigate",
       "browser_get_content",
       "browser_get_text",
@@ -9731,6 +9799,9 @@ ${transcript}
       "generate_presentation",
       "create_diagram",
       "generate_image",
+      "generate_video",
+      "get_video_generation_job",
+      "cancel_video_generation_job",
       "run_command",
       "run_applescript",
     ]);
@@ -9763,6 +9834,11 @@ ${transcript}
     if (taskDomain === "writing") {
       base.add("create_document");
       base.add("generate_document");
+    }
+    if (taskDomain === "media") {
+      base.add("generate_video");
+      base.add("get_video_generation_job");
+      base.add("cancel_video_generation_job");
     }
     return base;
   }
@@ -9990,6 +10066,23 @@ ${transcript}
     // Only rebuild if there's meaningful history
     if (conversationParts.length > 4) {
       // More than just the task header
+
+      // Extract the last substantive assistant message from events and restore
+      // tracking variables so that buildResultSummary() / getBestFinalResponseCandidate()
+      // have meaningful content when finalizeTask runs after resumption.
+      let lastEventAssistantMessage: string | null = null;
+      for (const event of events) {
+        if (this.getReplayEventType(event) === "assistant_message" && event.payload?.message) {
+          const msg = String(event.payload.message).trim();
+          if (msg) lastEventAssistantMessage = msg;
+        }
+      }
+      if (lastEventAssistantMessage) {
+        this.lastAssistantOutput = lastEventAssistantMessage;
+        this.lastNonVerificationOutput = lastEventAssistantMessage;
+        this.lastAssistantText = lastEventAssistantMessage;
+      }
+
       this.updateConversationHistory([
         {
           role: "user",
@@ -13836,6 +13929,7 @@ You are continuing a previous conversation. The context from the previous conver
     if (!desc.trim()) return false;
     if (this.stepAllowsInlineDeliverable(step)) return false;
     if (this.stepIndicatesInlineDiagramIntent(desc)) return false;
+    if (/\bset (?:the )?(?:target|output) file path\b/.test(desc)) return false;
 
     const hasWriteVerb = descriptionHasWriteIntent(desc);
 
@@ -13937,7 +14031,8 @@ You are continuing a previous conversation. The context from the previous conver
     const hasConcreteTargetPath = this.extractStepPathCandidates(step).length > 0;
     const namingOnlyCue =
       /\b(output|artifact|file)\s+name\b/.test(desc) ||
-      /\bname\s+(?:the\s+)?(?:output|artifact|file)\b/.test(desc);
+      /\bname\s+(?:the\s+)?(?:output|artifact|file)\b/.test(desc) ||
+      /\bset (?:the )?(?:target|output) file path\b/.test(desc);
     // When a step has concrete write intent AND
     // a concrete target path, it should always require an actual file write — even
     // if the description also contains summary/compile/report wording.
@@ -14547,6 +14642,7 @@ You are continuing a previous conversation. The context from the previous conver
     const reportedPathRaw =
       opts.result?.path ||
       opts.result?.filename ||
+      (Array.isArray(opts.result?.outputPaths) ? opts.result.outputPaths[0] : undefined) ||
       opts.input?.path ||
       opts.input?.filename ||
       opts.input?.destPath ||
@@ -16528,12 +16624,12 @@ You are continuing a previous conversation. The context from the previous conver
     const preflightPrompt = [
       "Before executing this task, provide a brief structured pre-flight analysis (keep it concise):",
       "",
-      "**Problem:** Restate the task in one sentence.",
+      "**Task:** Restate the task in one sentence.",
       "**Assumptions:** List 2-3 key assumptions you're making.",
       "**Risks:** Identify 1-2 potential issues or edge cases.",
       "**Approach:** Outline your planned approach in 2-3 bullet points.",
       "",
-      "Do not use tools or execute anything yet. Just frame the problem.",
+      "Do not use tools or execute anything yet. Just frame the task.",
       `\nUser request:\n${this.task.prompt}`,
     ].join("\n");
     const userContent = await this.buildUserContent(preflightPrompt, this.initialImages);
@@ -16543,7 +16639,7 @@ You are continuing a previous conversation. The context from the previous conver
           model: this.modelId,
           maxTokens: 400,
           system:
-            "You are a task analysis assistant. Frame the problem clearly and concisely before execution begins.",
+            "You are a task analysis assistant. Frame the task clearly and concisely before execution begins.",
           messages: [{ role: "user", content: userContent }],
         },
         25_000,
@@ -17136,6 +17232,7 @@ PLANNING RULES:
 - ${shouldRequirePlanVerificationStep ? "Include one final verification step for non-trivial tasks. Verification steps MUST use only objective, machine-checkable criteria: file existence, section/keyword presence, structural requirements, format validity. NEVER use subjective quality criteria (e.g. 'clearly written', 'comprehensive', 'actionable', 'well-structured')." : "Skip dedicated verification steps unless the user explicitly asks for verification."}
 - Avoid redundant review/verify steps and repeated file reads.
 - In plan mode, if the plan needs user choices/preferences, include a step that uses request_user_input (not plain free-text questioning).
+- STEP DESCRIPTIONS: Write every step description in plain English describing what the step ACCOMPLISHES, never which tool it uses. Bad: "Use the use_skill tool with skill ID novelist to..." Good: "Run the Novelist skill to draft and package the novel". Bad: "Use request_user_input to collect the seed concept" Good: "Collect the story seed, genre, and target length from you". Bad: "Use write_file to save world.md" Good: "Create the world bible and character profiles". Never expose tool names, skill IDs, or backtick-wrapped identifiers in step descriptions.
 
 RESILIENCE RULES:
 - Do not stop at "cannot be done" when fallbacks exist.

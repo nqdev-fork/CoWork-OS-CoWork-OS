@@ -27,6 +27,7 @@ import { TextTools } from "./text-tools";
 import { BrowserTools } from "./browser-tools";
 import { ShellTools } from "./shell-tools";
 import { ImageTools } from "./image-tools";
+import { VideoTools } from "./video-tools";
 import { VisionTools } from "./vision-tools";
 import { SystemTools } from "./system-tools";
 import { CronTools } from "./cron-tools";
@@ -347,6 +348,7 @@ export class ToolRegistry {
   private browserTools: BrowserTools;
   private shellTools: ShellTools;
   private imageTools: ImageTools;
+  private videoTools: VideoTools;
   private visionTools: VisionTools;
   private systemTools: SystemTools;
   private cronTools: CronTools;
@@ -407,6 +409,7 @@ export class ToolRegistry {
     this.browserTools = new BrowserTools(workspace, daemon, taskId);
     this.shellTools = new ShellTools(workspace, daemon, taskId);
     this.imageTools = new ImageTools(workspace, daemon, taskId);
+    this.videoTools = new VideoTools(workspace, daemon, taskId);
     this.visionTools = new VisionTools(workspace, daemon, taskId);
     this.systemTools = new SystemTools(workspace, daemon, taskId);
     this.cronTools = new CronTools(workspace, daemon, taskId);
@@ -831,6 +834,7 @@ export class ToolRegistry {
     this.qaTools.setWorkspace(workspace);
     this.shellTools.setWorkspace(workspace);
     this.imageTools.setWorkspace(workspace);
+    this.videoTools.setWorkspace(workspace);
     this.visionTools.setWorkspace(workspace);
     this.systemTools.setWorkspace(workspace);
     this.cronTools.setWorkspace(workspace);
@@ -1011,6 +1015,9 @@ export class ToolRegistry {
 
     // Always add image tools; they will surface setup guidance if API keys are missing
     allTools.push(...ImageTools.getToolDefinitions());
+
+    // Always add video tools; they will surface setup guidance if video providers are not configured
+    allTools.push(...VideoTools.getToolDefinitions());
 
     // Vision tools (image understanding); may surface setup guidance if API keys are missing
     allTools.push(...VisionTools.getToolDefinitions());
@@ -1999,6 +2006,7 @@ ${skillDescriptions}`;
     if (name === "create_spreadsheet") return await this.skillTools.createSpreadsheet(input);
     if (name === "create_document") return await this.skillTools.createDocument(input);
     if (name === "edit_document") return await this.skillTools.editDocument(input);
+    if (name === "edit_pdf_region") return await this.skillTools.editPdfRegion(input);
     if (name === "create_presentation") return await this.skillTools.createPresentation(input);
     if (name === "organize_folder") return await this.skillTools.organizeFolder(input);
     if (name === "use_skill") return await this.executeUseSkill(input);
@@ -2142,6 +2150,11 @@ ${skillDescriptions}`;
 
     // Image tools
     if (name === "generate_image") return await this.imageTools.generateImage(input);
+
+    // Video tools
+    if (name === "generate_video") return await this.videoTools.generateVideo(input);
+    if (name === "get_video_generation_job") return await this.videoTools.getVideoGenerationJob(input);
+    if (name === "cancel_video_generation_job") return await this.videoTools.cancelVideoGenerationJob(input);
 
     // Vision tools
     if (name === "analyze_image") return await this.visionTools.analyzeImage(input);
@@ -3990,7 +4003,7 @@ ${skillDescriptions}`;
       {
         name: "edit_document",
         description:
-          "Edit an existing Word document (DOCX). Supports multiple actions: append (default), move_section, insert_after_section, list_sections. Use this to modify existing documents without recreating them from scratch.",
+          "Edit an existing Word document (DOCX). Supports append, move_section, insert_after_section, replace_blocks, and list_sections. Use this to modify existing documents without recreating them from scratch.",
         input_schema: {
           type: "object",
           properties: {
@@ -4005,13 +4018,13 @@ ${skillDescriptions}`;
             },
             action: {
               type: "string",
-              enum: ["append", "move_section", "insert_after_section", "list_sections"],
+              enum: ["append", "move_section", "insert_after_section", "replace_blocks", "list_sections"],
               description:
-                "Action to perform: append (default) adds content at end, move_section moves a section to a new position, insert_after_section inserts content after a specific section, list_sections lists all sections",
+                "Action to perform: append adds content at end, move_section reorders a section, insert_after_section inserts content after a specific section, replace_blocks replaces contiguous parsed block IDs, list_sections lists sections",
             },
             newContent: {
               type: "array",
-              description: "For append/insert_after_section: Content blocks to add",
+              description: "For append/insert_after_section/replace_blocks: Content blocks to add",
               items: {
                 type: "object",
                 properties: {
@@ -4045,6 +4058,11 @@ ${skillDescriptions}`;
                 required: ["type", "text"],
               },
             },
+            blockIds: {
+              type: "array",
+              description: "For replace_blocks: contiguous DOCX block IDs to replace",
+              items: { type: "string" },
+            },
             sectionToMove: {
               type: "string",
               description:
@@ -4062,6 +4080,44 @@ ${skillDescriptions}`;
             },
           },
           required: ["sourcePath"],
+        },
+      },
+      {
+        name: "edit_pdf_region",
+        description:
+          "Edit a selected region in an existing PDF and write the result to a new PDF path while preserving the source file.",
+        input_schema: {
+          type: "object",
+          properties: {
+            sourcePath: {
+              type: "string",
+              description: "Workspace-relative path to the source PDF",
+            },
+            destPath: {
+              type: "string",
+              description: "Workspace-relative path for the edited PDF output",
+            },
+            pageIndex: {
+              type: "number",
+              description: "0-based page index containing the selected region",
+            },
+            bbox: {
+              type: "object",
+              description: "Normalized region bounds on the page",
+              properties: {
+                x: { type: "number" },
+                y: { type: "number" },
+                w: { type: "number" },
+                h: { type: "number" },
+              },
+              required: ["x", "y", "w", "h"],
+            },
+            instruction: {
+              type: "string",
+              description: "Natural-language edit instruction for the selected PDF region",
+            },
+          },
+          required: ["sourcePath", "destPath", "pageIndex", "bbox", "instruction"],
         },
       },
       {

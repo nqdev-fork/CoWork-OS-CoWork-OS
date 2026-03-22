@@ -46,13 +46,15 @@ This guide covers the full system in detail: how twins work, what each built-in 
 
 ## How Digital Twins Work
 
+Heartbeat-enabled twins now use Heartbeat v3 by default. This guide focuses on persona behavior and scenarios; use [Heartbeat v3](heartbeat-v3.md) as the source of truth for runtime semantics.
+
 A digital twin has two operational modes:
 
-### Proactive Mode (Heartbeat-Driven)
+### Proactive Mode (Heartbeat v3)
 
-The twin wakes up on a configurable interval (every 5 minutes to 4 hours) and automatically executes its enabled proactive tasks. Each task has its own frequency — a twin with a 30-minute heartbeat might run PR triage every 60 minutes but dependency checks every 8 hours. The heartbeat service tracks which tasks are due each cycle.
+The twin runs a configurable Pulse cadence (every 5 minutes to 4 hours by default). Pulse is cheap, deterministic, and non-LLM: it evaluates merged signals, due proactive work, due checklist items, and dispatch guardrails before deciding whether anything should escalate. A twin with a 30-minute Pulse cadence might review PR triage every 60 minutes but only Dispatch when signal strength, pending work, or checklist state justifies visible action.
 
-Results appear as completed tasks in Mission Control. The human sees a stream of prepared artifacts — review queues, status digests, risk assessments — without having asked for them.
+Results may appear as no visible action, an internal suggestion, a heartbeat task, a runbook request, or a cron handoff. Mission Control shows the Pulse/Dispatch truth rather than assuming every wake becomes work.
 
 ### Reactive Mode (On-Demand)
 
@@ -70,9 +72,9 @@ Each template is a JSON blueprint that bundles:
 | Component | What It Defines |
 |-----------|----------------|
 | **Role configuration** | Capabilities (code, review, test, analyze, etc.), autonomy level (specialist or lead), personality profile, and a deep system prompt that defines the twin's behavior boundaries |
-| **Heartbeat configuration** | Default wake interval and stagger offset (prevents all twins from firing simultaneously) |
+| **Heartbeat configuration** | Default Pulse cadence, dispatch cooldown, daily dispatch budget, heartbeat profile, active hours, and stagger support |
 | **Cognitive offload categories** | Which types of mental work the twin absorbs (from a taxonomy of 10 categories) |
-| **Proactive tasks** | 2-4 heartbeat-driven tasks, each with a prompt template, frequency, priority, and enabled/disabled flag |
+| **Proactive tasks** | 2-4 proactive tasks, each with a prompt template, frequency, execution mode, optional signal threshold, priority, and enabled/disabled flag |
 | **Skill references** | Recommended skills the twin should have access to, with reasons and required/optional flags |
 | **Metadata** | Category, tags, seniority range, and industry-agnostic flag for gallery filtering |
 
@@ -775,8 +777,10 @@ To add a persona for any job function:
   },
   "heartbeat": {
     "enabled": true,
-    "intervalMinutes": 30,
-    "staggerOffset": 0
+    "pulseEveryMinutes": 30,
+    "dispatchCooldownMinutes": 120,
+    "maxDispatchesPerDay": 6,
+    "heartbeatProfile": "observer"
   },
   "cognitiveOffload": {
     "primaryCategories": ["category-1", "category-2"],
@@ -786,8 +790,10 @@ To add a persona for any job function:
         "name": "Task Name",
         "description": "What this task does",
         "category": "offload-category",
-        "promptTemplate": "The prompt injected into the heartbeat...",
+        "promptTemplate": "The prompt used when Dispatch escalates this task...",
         "frequencyMinutes": 60,
+        "executionMode": "dispatch",
+        "minSignalStrength": 0.5,
         "priority": 1,
         "enabled": true
       }
@@ -807,7 +813,8 @@ To add a persona for any job function:
 - **System prompt**: Define what the twin does AND what it never does. Every template includes a clear "never does X without explicit approval" boundary.
 - **Proactive tasks**: 2-4 tasks. Start with the most valuable one enabled, keep less critical ones disabled by default. Users enable them as they see the value.
 - **Frequency**: Higher frequency for time-sensitive tasks (security scans, PR triage). Lower frequency for digest-style tasks (executive briefs, changelog drafts).
-- **Priority**: Lower number = higher priority. When multiple tasks are due in the same heartbeat cycle, priority determines execution order.
+- **Execution mode**: Use `pulse_only` for cheap maintenance review, `dispatch` when escalation should create visible work, and `cron_handoff` for heavyweight or exact-time checks.
+- **Priority**: Lower number = higher priority when multiple tasks are due in the same Pulse cycle.
 - **Skills**: Mark skills as `required: true` only if the twin's core function depends on them. Optional skills extend capability but aren't essential.
 
 ---
@@ -843,10 +850,10 @@ Not directly. But twins share the same organizational knowledge graph and task s
 The twin still works. Missing skills produce a warning during activation but don't prevent the twin from functioning. Proactive tasks and ad-hoc work still operate; the twin just can't invoke the specific skill.
 
 **Can I change a twin's configuration after activation?**
-Yes. An activated twin is a standard AgentRole. Edit any property via the Agent Role Editor in Mission Control: capabilities, autonomy, personality, system prompt, heartbeat interval, proactive task settings (in the soul JSON).
+Yes. An activated twin is a standard AgentRole. Edit any property via the Agent Role Editor in Mission Control: capabilities, autonomy, personality, system prompt, Pulse cadence, dispatch controls, heartbeat profile, and proactive task settings (in the soul JSON).
 
 **How much does each twin cost in API usage?**
-Depends on heartbeat frequency and task complexity. A twin with a 30-minute heartbeat running 2-3 tasks per cycle uses roughly the same tokens as a few manual conversations per day. Longer heartbeat intervals (2-4 hours) are more economical for roles that don't need real-time monitoring.
+Depends on Pulse cadence, signal quality, profile, and task complexity. Heartbeat v3 is cheaper because Pulse is non-LLM and quiet by default; cost concentrates in Dispatch runs. An `observer` twin with a 30-minute Pulse cadence is usually far cheaper than the old "every wake might become work" model, while longer cadences remain appropriate for low-urgency roles.
 
 **Can I use local LLMs for twins?**
 Yes. CoWork OS supports 30+ LLM providers including Ollama for local models. Assign any model to a twin via the `modelKey` and `providerType` fields during activation.
@@ -855,4 +862,4 @@ Yes. CoWork OS supports 30+ LLM providers including Ollama for local models. Ass
 Twins access the same data as any CoWork OS agent: the workspace's task history, git history, files, conversations, and knowledge graph. They don't have access to data outside what you've configured in your workspace.
 
 **Can twins operate without heartbeat (purely reactive)?**
-Yes. Disable the heartbeat during activation or set it to a very long interval. The twin becomes a reactive agent that only works when you assign tasks to it.
+Yes. Disable heartbeat entirely to make the twin purely reactive. Setting a very long cadence also works, but `heartbeatEnabled: false` is the cleanest way to disable background Pulse activity.

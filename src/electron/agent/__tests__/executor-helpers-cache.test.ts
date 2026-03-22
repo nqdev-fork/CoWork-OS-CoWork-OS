@@ -171,13 +171,13 @@ describe("FileOperationTracker cache invalidation", () => {
     const first = (TaskExecutor as Any).prototype.checkFileOperation.call(
       fakeThis,
       "write_file",
-      { path: "artifacts/skills/demo/autonovel/chapters/ch_08.md", content: "one" },
+      { path: "artifacts/skills/demo/novelist/chapters/ch_08.md", content: "one" },
       batchCreatedPaths,
     );
     const second = (TaskExecutor as Any).prototype.checkFileOperation.call(
       fakeThis,
       "write_file",
-      { path: "artifacts/skills/demo/autonovel/chapters/ch_08.md", content: "two" },
+      { path: "artifacts/skills/demo/novelist/chapters/ch_08.md", content: "two" },
       batchCreatedPaths,
     );
 

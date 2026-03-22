@@ -13,6 +13,9 @@ const CANONICAL_ARTIFACT_EXTENSION_LIST = [
   "jsonl",
   "txt",
   "pptx",
+  "mp4",
+  "mov",
+  "webm",
   "html",
   "css",
   "js",
@@ -236,7 +239,7 @@ export function descriptionHasScaffoldIntent(text: string): boolean {
 
 export function descriptionHasArtifactCue(text: string): boolean {
   const desc = String(text || "").toLowerCase();
-  return /\b(file|document|docx?|pdf|whitepaper|markdown|csv|xlsx|json|jsonl|txt|pptx|presentation|slides?|spec(?:ification)?|proposal|project|workspace|widget|xcode|scheme|entitlements?|plist|source code|code file)\b/.test(
+  return /\b(file|document|docx?|pdf|whitepaper|markdown|csv|xlsx|json|jsonl|txt|pptx|mp4|mov|webm|presentation|slides?|video|clip|footage|spec(?:ification)?|proposal|project|workspace|widget|xcode|scheme|entitlements?|plist|source code|code file)\b/.test(
     desc,
   );
 }

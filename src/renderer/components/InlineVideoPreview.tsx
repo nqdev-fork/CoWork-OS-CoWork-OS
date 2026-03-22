@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { FileViewerResult } from "../../electron/preload";
+import { createVideoObjectUrl } from "../utils/videoPlayback";
 
 type InlineVideoPreviewProps = {
   filePath: string;
@@ -34,6 +35,7 @@ export function InlineVideoPreview({
   const [loading, setLoading] = useState(true);
   const [result, setResult] = useState<FileViewerResult["data"] | null>(null);
   const [posterUrl, setPosterUrl] = useState<string | null>(null);
+  const [playbackUrl, setPlaybackUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const subtitle = useMemo(() => {
@@ -112,6 +114,30 @@ export function InlineVideoPreview({
     };
   }, [posterPath, workspacePath]);
 
+  useEffect(() => {
+    const nextUrl = result?.playbackUrl;
+    if (!nextUrl) {
+      setPlaybackUrl(null);
+      return;
+    }
+
+    const resolvedUrl = createVideoObjectUrl(nextUrl);
+    if (!resolvedUrl) {
+      setPlaybackUrl(null);
+      setError("Failed to prepare video playback.");
+      return;
+    }
+
+    setPlaybackUrl(resolvedUrl);
+    setError((current) => (current === "Failed to prepare video playback." ? null : current));
+
+    return () => {
+      if (resolvedUrl !== nextUrl) {
+        URL.revokeObjectURL(resolvedUrl);
+      }
+    };
+  }, [result?.playbackUrl]);
+
   const handleOpen = async () => {
     if (onOpenViewer) {
       onOpenViewer(filePath);
@@ -132,7 +158,7 @@ export function InlineVideoPreview({
 
       {!loading && error && <div className="inline-video-error">{error}</div>}
 
-      {!loading && !error && result?.playbackUrl && (
+      {!loading && !error && playbackUrl && (
         <>
           <div className="inline-video-header">
             <div className="inline-video-header-left">
@@ -172,14 +198,28 @@ export function InlineVideoPreview({
 
           <div className="inline-video-player-wrap">
             <video
+              key={playbackUrl}
               className="inline-video-player"
-              src={result.playbackUrl}
+              src={playbackUrl}
               controls
-              preload="metadata"
+              // blob: URLs hold data already in memory — "auto" is fine and speeds up first-frame.
+              // For media-server URLs the full video must be fetched, so use "metadata" to avoid
+              // eagerly downloading potentially large files.
+              preload={playbackUrl?.startsWith("blob:") ? "auto" : "metadata"}
               playsInline
               muted={muted}
               loop={loop}
-              poster={posterUrl || result.posterDataUrl}
+              poster={posterUrl || result?.posterDataUrl || undefined}
+              onClick={(e) => e.stopPropagation()}
+              onPointerDown={(e) => e.stopPropagation()}
+              onLoadedMetadata={() => {
+                setError((current) =>
+                  current === "This video failed to load in the app preview." ? null : current,
+                );
+              }}
+              onError={() => {
+                setError("This video failed to load in the app preview.");
+              }}
             />
           </div>
         </>

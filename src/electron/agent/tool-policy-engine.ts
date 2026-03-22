@@ -107,6 +107,10 @@ const ARTIFACT_TOOLS = new Set([
   "analyze_image",
   "read_pdf_visual",
   "parse_document",
+  // Video generation tools
+  "generate_video",
+  "get_video_generation_job",
+  "cancel_video_generation_job",
 ]);
 
 const CONDITIONAL_SYSTEM_TOOLS = new Set([
@@ -164,6 +168,9 @@ const ARTIFACT_INTENT_PATTERN =
 /** Matches prompts that request AI image generation (draw, picture, create image, etc.) */
 const IMAGE_CREATION_INTENT_PATTERN =
   /\b(draw|picture|photo|paint|illustrate|render|sketch)\b|create\s+(?:an?\s+)?(?:image|picture|photo|illustration)|generate\s+(?:an?\s+)?(?:image|picture|photo)|make\s+(?:an?\s+)?(?:image|picture|photo|illustration)/i;
+/** Matches prompts that request AI video generation (create video, generate video, etc.) */
+const VIDEO_CREATION_INTENT_PATTERN =
+  /\b(video|clip|animation|footage|reel|movie)\b|create\s+(?:an?\s+)?video|generate\s+(?:an?\s+)?video|make\s+(?:an?\s+)?video|record\s+(?:an?\s+)?video/i;
 const SYSTEM_INTENT_PATTERN =
   /\b(clipboard|screenshot|finder|application|open app|open url|environment variable|env var|applescript|desktop automation)\b/i;
 const ORCHESTRATION_INTENT_PATTERN =
@@ -280,7 +287,9 @@ export function evaluateToolAvailability(
       if (
         ARTIFACT_INTENT_PATTERN.test(taskText) ||
         IMAGE_CREATION_INTENT_PATTERN.test(taskText) ||
+        VIDEO_CREATION_INTENT_PATTERN.test(taskText) ||
         ctx.taskDomain === "writing" ||
+        ctx.taskDomain === "media" ||
         ctx.taskIntent === "planning"
       ) {
         return { decision: "allow", metadata };

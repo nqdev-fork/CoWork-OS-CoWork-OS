@@ -280,6 +280,13 @@ export class DatabaseManager {
         risk_level TEXT,
         eval_case_id TEXT,
         eval_run_id TEXT,
+        issue_id TEXT REFERENCES issues(id) ON DELETE SET NULL,
+        heartbeat_run_id TEXT REFERENCES heartbeat_runs(id) ON DELETE SET NULL,
+        company_id TEXT REFERENCES companies(id) ON DELETE SET NULL,
+        goal_id TEXT REFERENCES goals(id) ON DELETE SET NULL,
+        project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+        request_depth INTEGER,
+        billing_code TEXT,
         FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
       );
 
@@ -499,13 +506,18 @@ export class DatabaseManager {
 
       CREATE TABLE IF NOT EXISTS heartbeat_runs (
         id TEXT PRIMARY KEY,
-        issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+        issue_id TEXT REFERENCES issues(id) ON DELETE CASCADE,
         task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
         agent_role_id TEXT REFERENCES agent_roles(id) ON DELETE SET NULL,
         workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL,
+        run_type TEXT DEFAULT 'dispatch',
+        dispatch_kind TEXT,
+        reason TEXT,
         status TEXT NOT NULL,
         summary TEXT,
         error TEXT,
+        cost_stats TEXT,
+        evidence_refs TEXT,
         resumed_from_run_id TEXT REFERENCES heartbeat_runs(id) ON DELETE SET NULL,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
@@ -551,14 +563,6 @@ export class DatabaseManager {
       CREATE INDEX IF NOT EXISTS idx_issues_assignee ON issues(assignee_agent_role_id, updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status, updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_issue_comments_issue ON issue_comments(issue_id, created_at ASC);
-      CREATE INDEX IF NOT EXISTS idx_heartbeat_runs_issue ON heartbeat_runs(issue_id, updated_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_heartbeat_runs_status ON heartbeat_runs(status, updated_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_heartbeat_runs_agent ON heartbeat_runs(agent_role_id, updated_at DESC);
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_heartbeat_runs_active_issue
-        ON heartbeat_runs(issue_id)
-        WHERE status IN ('queued', 'running');
-      CREATE INDEX IF NOT EXISTS idx_heartbeat_run_events_run ON heartbeat_run_events(run_id, timestamp ASC);
-
       -- Channel Gateway tables
       CREATE TABLE IF NOT EXISTS channels (
         id TEXT PRIMARY KEY,
@@ -1089,8 +1093,31 @@ export class DatabaseManager {
           is_system INTEGER NOT NULL DEFAULT 0,
           is_active INTEGER NOT NULL DEFAULT 1,
           sort_order INTEGER NOT NULL DEFAULT 100,
+          autonomy_level TEXT DEFAULT 'specialist',
+          soul TEXT,
+          heartbeat_enabled INTEGER DEFAULT 0,
+          heartbeat_interval_minutes INTEGER DEFAULT 15,
+          heartbeat_stagger_offset INTEGER DEFAULT 0,
+          heartbeat_pulse_every_minutes INTEGER DEFAULT 15,
+          heartbeat_dispatch_cooldown_minutes INTEGER DEFAULT 120,
+          heartbeat_max_dispatches_per_day INTEGER DEFAULT 6,
+          heartbeat_profile TEXT DEFAULT 'observer',
+          heartbeat_active_hours TEXT,
           created_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL
+          updated_at INTEGER NOT NULL,
+          last_heartbeat_at INTEGER,
+          last_pulse_at INTEGER,
+          last_dispatch_at INTEGER,
+          heartbeat_last_pulse_result TEXT,
+          heartbeat_last_dispatch_kind TEXT,
+          heartbeat_status TEXT DEFAULT 'idle',
+          operator_mandate TEXT,
+          allowed_loop_types TEXT,
+          output_types TEXT,
+          suppression_policy TEXT,
+          max_autonomous_outputs_per_cycle INTEGER DEFAULT 1,
+          last_useful_output_at INTEGER,
+          operator_health_score REAL
         );
 
         CREATE INDEX IF NOT EXISTS idx_agent_roles_active ON agent_roles(is_active);
@@ -1353,7 +1380,16 @@ export class DatabaseManager {
       "ALTER TABLE agent_roles ADD COLUMN heartbeat_enabled INTEGER DEFAULT 0",
       "ALTER TABLE agent_roles ADD COLUMN heartbeat_interval_minutes INTEGER DEFAULT 15",
       "ALTER TABLE agent_roles ADD COLUMN heartbeat_stagger_offset INTEGER DEFAULT 0",
+      "ALTER TABLE agent_roles ADD COLUMN heartbeat_pulse_every_minutes INTEGER DEFAULT 15",
+      "ALTER TABLE agent_roles ADD COLUMN heartbeat_dispatch_cooldown_minutes INTEGER DEFAULT 120",
+      "ALTER TABLE agent_roles ADD COLUMN heartbeat_max_dispatches_per_day INTEGER DEFAULT 6",
+      "ALTER TABLE agent_roles ADD COLUMN heartbeat_profile TEXT DEFAULT 'observer'",
+      "ALTER TABLE agent_roles ADD COLUMN heartbeat_active_hours TEXT",
       "ALTER TABLE agent_roles ADD COLUMN last_heartbeat_at INTEGER",
+      "ALTER TABLE agent_roles ADD COLUMN last_pulse_at INTEGER",
+      "ALTER TABLE agent_roles ADD COLUMN last_dispatch_at INTEGER",
+      "ALTER TABLE agent_roles ADD COLUMN heartbeat_last_pulse_result TEXT",
+      "ALTER TABLE agent_roles ADD COLUMN heartbeat_last_dispatch_kind TEXT",
       "ALTER TABLE agent_roles ADD COLUMN heartbeat_status TEXT DEFAULT 'idle'",
       "ALTER TABLE agent_roles ADD COLUMN company_id TEXT REFERENCES companies(id) ON DELETE SET NULL",
       "ALTER TABLE agent_roles ADD COLUMN operator_mandate TEXT",
@@ -1375,6 +1411,156 @@ export class DatabaseManager {
 
     try {
       this.db.exec("CREATE INDEX IF NOT EXISTS idx_agent_roles_company ON agent_roles(company_id)");
+    } catch {
+      // Index already exists, ignore
+    }
+
+    try {
+      const heartbeatRunColumns = this.db
+        .prepare("PRAGMA table_info(heartbeat_runs)")
+        .all() as Array<{ name?: string; notnull?: number }>;
+      const heartbeatRunColumnNames = new Set(
+        heartbeatRunColumns
+          .map((column) => (typeof column.name === "string" ? column.name : ""))
+          .filter(Boolean),
+      );
+      const requiresHeartbeatRunMigration =
+        heartbeatRunColumnNames.has("issue_id") &&
+        (!heartbeatRunColumnNames.has("run_type") ||
+          !heartbeatRunColumnNames.has("dispatch_kind") ||
+          !heartbeatRunColumnNames.has("reason") ||
+          !heartbeatRunColumnNames.has("cost_stats") ||
+          !heartbeatRunColumnNames.has("evidence_refs") ||
+          heartbeatRunColumns.some((column) => column.name === "issue_id" && column.notnull === 1));
+
+      const heartbeatRunIndexStatements = [
+        "CREATE INDEX IF NOT EXISTS idx_heartbeat_runs_issue ON heartbeat_runs(issue_id, updated_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_heartbeat_runs_status ON heartbeat_runs(status, updated_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_heartbeat_runs_agent ON heartbeat_runs(agent_role_id, updated_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_heartbeat_runs_workspace ON heartbeat_runs(workspace_id, updated_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_heartbeat_runs_type ON heartbeat_runs(run_type, updated_at DESC)",
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_heartbeat_runs_active_issue
+          ON heartbeat_runs(issue_id)
+          WHERE issue_id IS NOT NULL AND status IN ('queued', 'running')`,
+        "CREATE INDEX IF NOT EXISTS idx_heartbeat_run_events_run ON heartbeat_run_events(run_id, timestamp ASC)",
+      ];
+
+      if (requiresHeartbeatRunMigration) {
+        this.db.exec("PRAGMA foreign_keys = OFF");
+        try {
+          this.db.exec(`
+          DROP INDEX IF EXISTS idx_heartbeat_runs_issue;
+          DROP INDEX IF EXISTS idx_heartbeat_runs_status;
+          DROP INDEX IF EXISTS idx_heartbeat_runs_agent;
+          DROP INDEX IF EXISTS idx_heartbeat_runs_workspace;
+          DROP INDEX IF EXISTS idx_heartbeat_runs_type;
+          DROP INDEX IF EXISTS idx_heartbeat_runs_active_issue;
+
+          ALTER TABLE heartbeat_runs RENAME TO heartbeat_runs_legacy;
+          ALTER TABLE heartbeat_run_events RENAME TO heartbeat_run_events_legacy;
+
+          CREATE TABLE heartbeat_runs (
+            id TEXT PRIMARY KEY,
+            issue_id TEXT REFERENCES issues(id) ON DELETE CASCADE,
+            task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+            agent_role_id TEXT REFERENCES agent_roles(id) ON DELETE SET NULL,
+            workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL,
+            run_type TEXT DEFAULT 'dispatch',
+            dispatch_kind TEXT,
+            reason TEXT,
+            status TEXT NOT NULL,
+            summary TEXT,
+            error TEXT,
+            cost_stats TEXT,
+            evidence_refs TEXT,
+            resumed_from_run_id TEXT REFERENCES heartbeat_runs(id) ON DELETE SET NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            started_at INTEGER,
+            completed_at INTEGER
+          );
+
+          CREATE TABLE heartbeat_run_events (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES heartbeat_runs(id) ON DELETE CASCADE,
+            timestamp INTEGER NOT NULL,
+            type TEXT NOT NULL,
+            payload TEXT NOT NULL
+          );
+
+          INSERT INTO heartbeat_runs (
+            id, issue_id, task_id, agent_role_id, workspace_id, run_type, dispatch_kind, reason,
+            status, summary, error, cost_stats, evidence_refs, resumed_from_run_id,
+            created_at, updated_at, started_at, completed_at
+          )
+          SELECT
+            id,
+            issue_id,
+            task_id,
+            agent_role_id,
+            workspace_id,
+            'dispatch',
+            CASE
+              WHEN task_id IS NOT NULL THEN 'task'
+              ELSE 'silent'
+            END,
+            'migrated_v2_run',
+            status,
+            summary,
+            error,
+            NULL,
+            NULL,
+            resumed_from_run_id,
+            created_at,
+            updated_at,
+            started_at,
+            completed_at
+          FROM heartbeat_runs_legacy;
+
+          INSERT INTO heartbeat_run_events (id, run_id, timestamp, type, payload)
+          SELECT id, run_id, timestamp, type, payload
+          FROM heartbeat_run_events_legacy;
+
+          DROP TABLE heartbeat_run_events_legacy;
+          DROP TABLE heartbeat_runs_legacy;
+        `);
+        } finally {
+          this.db.exec("PRAGMA foreign_keys = ON");
+        }
+        for (const sql of heartbeatRunIndexStatements) {
+          this.db.exec(sql);
+        }
+      } else {
+        for (const sql of heartbeatRunIndexStatements) {
+          this.db.exec(sql);
+        }
+      }
+    } catch (error) {
+      console.error("[DatabaseManager] Failed heartbeat_runs migration:", error);
+    }
+
+    const taskLinkageColumns = [
+      "ALTER TABLE tasks ADD COLUMN issue_id TEXT REFERENCES issues(id) ON DELETE SET NULL",
+      "ALTER TABLE tasks ADD COLUMN heartbeat_run_id TEXT REFERENCES heartbeat_runs(id) ON DELETE SET NULL",
+      "ALTER TABLE tasks ADD COLUMN company_id TEXT REFERENCES companies(id) ON DELETE SET NULL",
+      "ALTER TABLE tasks ADD COLUMN goal_id TEXT REFERENCES goals(id) ON DELETE SET NULL",
+      "ALTER TABLE tasks ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE SET NULL",
+      "ALTER TABLE tasks ADD COLUMN request_depth INTEGER",
+      "ALTER TABLE tasks ADD COLUMN billing_code TEXT",
+    ];
+
+    for (const sql of taskLinkageColumns) {
+      try {
+        this.db.exec(sql);
+      } catch {
+        // Column already exists, ignore
+      }
+    }
+
+    try {
+      this.db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_issue_id ON tasks(issue_id)");
+      this.db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_heartbeat_run_id ON tasks(heartbeat_run_id)");
+      this.db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_company_id ON tasks(company_id)");
     } catch {
       // Index already exists, ignore
     }

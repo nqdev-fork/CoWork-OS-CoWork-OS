@@ -9,6 +9,8 @@ import {
   AgentAutonomyLevel,
   HeartbeatStatus,
   HeartbeatConfig,
+  HeartbeatProfile,
+  HeartbeatActiveHours,
   DEFAULT_AGENT_ROLES,
 } from "../../shared/types";
 import { normalizeAgentRoleIcon } from "./agent-role-display";
@@ -24,6 +26,86 @@ function safeJsonParse<T>(jsonString: string | null, defaultValue: T, context?: 
     console.error(`Failed to parse JSON${context ? ` in ${context}` : ""}:`, error);
     return defaultValue;
   }
+}
+
+function hasHeartbeatMaintenanceHints(input: {
+  heartbeatEnabled?: boolean;
+  soul?: string;
+  operatorMandate?: string;
+  allowedLoopTypes?: unknown;
+  outputTypes?: unknown;
+  name?: string;
+  displayName?: string;
+}): boolean {
+  if (!input.heartbeatEnabled) return false;
+  if (typeof input.operatorMandate === "string" && input.operatorMandate.trim().length > 0) {
+    return true;
+  }
+  if (Array.isArray(input.allowedLoopTypes) && input.allowedLoopTypes.length > 0) return true;
+  if (Array.isArray(input.outputTypes) && input.outputTypes.length > 0) return true;
+  const roleName = `${input.name || ""} ${input.displayName || ""}`.toLowerCase();
+  if (roleName.includes("twin") || roleName.includes("manager") || roleName.includes("founder")) {
+    return true;
+  }
+  if (typeof input.soul === "string" && input.soul.trim().length > 0) {
+    try {
+      const parsed = JSON.parse(input.soul) as Record<string, unknown>;
+      const cognitiveOffload =
+        parsed?.cognitiveOffload && typeof parsed.cognitiveOffload === "object"
+          ? (parsed.cognitiveOffload as Record<string, unknown>)
+          : null;
+      const proactiveTasks = cognitiveOffload?.proactiveTasks;
+      if (Array.isArray(proactiveTasks) && proactiveTasks.length > 0) {
+        return true;
+      }
+    } catch {
+      // Ignore malformed soul JSON when deriving profile defaults.
+    }
+  }
+  return false;
+}
+
+function deriveHeartbeatProfile(
+  input: {
+    autonomyLevel?: AgentAutonomyLevel;
+    requestedProfile?: HeartbeatProfile;
+    heartbeatEnabled?: boolean;
+    soul?: string;
+    operatorMandate?: string;
+    allowedLoopTypes?: unknown;
+    outputTypes?: unknown;
+    name?: string;
+    displayName?: string;
+  },
+): HeartbeatProfile {
+  if (input.requestedProfile) return input.requestedProfile;
+  if (input.autonomyLevel === "lead") return "dispatcher";
+  if (hasHeartbeatMaintenanceHints(input)) return "operator";
+  if (input.autonomyLevel === "intern") return "observer";
+  return "observer";
+}
+
+function derivePulseEveryMinutes(
+  requestedPulseEveryMinutes?: number,
+  fallbackHeartbeatIntervalMinutes?: number,
+): number {
+  return requestedPulseEveryMinutes || fallbackHeartbeatIntervalMinutes || 15;
+}
+
+function deriveDispatchCooldownMinutes(
+  autonomyLevel?: AgentAutonomyLevel,
+  requestedCooldown?: number,
+): number {
+  if (requestedCooldown) return requestedCooldown;
+  return autonomyLevel === "lead" ? 60 : 120;
+}
+
+function deriveMaxDispatchesPerDay(
+  autonomyLevel?: AgentAutonomyLevel,
+  requestedBudget?: number,
+): number {
+  if (requestedBudget) return requestedBudget;
+  return autonomyLevel === "lead" ? 12 : 4;
 }
 
 /**
@@ -62,6 +144,30 @@ export class AgentRoleRepository {
       heartbeatEnabled: request.heartbeatEnabled || false,
       heartbeatIntervalMinutes: request.heartbeatIntervalMinutes || 15,
       heartbeatStaggerOffset: request.heartbeatStaggerOffset || 0,
+      pulseEveryMinutes: derivePulseEveryMinutes(
+        request.pulseEveryMinutes,
+        request.heartbeatIntervalMinutes,
+      ),
+      dispatchCooldownMinutes: deriveDispatchCooldownMinutes(
+        request.autonomyLevel,
+        request.dispatchCooldownMinutes,
+      ),
+      maxDispatchesPerDay: deriveMaxDispatchesPerDay(
+        request.autonomyLevel,
+        request.maxDispatchesPerDay,
+      ),
+      heartbeatProfile: deriveHeartbeatProfile({
+        autonomyLevel: request.autonomyLevel,
+        requestedProfile: request.heartbeatProfile,
+        heartbeatEnabled: request.heartbeatEnabled,
+        soul: request.soul,
+        operatorMandate: request.operatorMandate,
+        allowedLoopTypes: request.allowedLoopTypes,
+        outputTypes: request.outputTypes,
+        name: request.name,
+        displayName: request.displayName,
+      }),
+      activeHours: request.activeHours,
       heartbeatStatus: "idle",
       operatorMandate: request.operatorMandate,
       allowedLoopTypes: request.allowedLoopTypes,
@@ -79,10 +185,12 @@ export class AgentRoleRepository {
         capabilities, tool_restrictions, is_system, is_active,
         sort_order, created_at, updated_at,
         autonomy_level, soul, heartbeat_enabled, heartbeat_interval_minutes,
-        heartbeat_stagger_offset, heartbeat_status, operator_mandate, allowed_loop_types,
+        heartbeat_stagger_offset, heartbeat_pulse_every_minutes,
+        heartbeat_dispatch_cooldown_minutes, heartbeat_max_dispatches_per_day,
+        heartbeat_profile, heartbeat_active_hours, heartbeat_status, operator_mandate, allowed_loop_types,
         output_types, suppression_policy, max_autonomous_outputs_per_cycle,
         last_useful_output_at, operator_health_score
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -109,6 +217,11 @@ export class AgentRoleRepository {
       role.heartbeatEnabled ? 1 : 0,
       role.heartbeatIntervalMinutes,
       role.heartbeatStaggerOffset,
+      role.pulseEveryMinutes,
+      role.dispatchCooldownMinutes,
+      role.maxDispatchesPerDay,
+      role.heartbeatProfile,
+      role.activeHours ? JSON.stringify(role.activeHours) : null,
       role.heartbeatStatus,
       role.operatorMandate || null,
       role.allowedLoopTypes ? JSON.stringify(role.allowedLoopTypes) : null,
@@ -274,6 +387,26 @@ export class AgentRoleRepository {
       fields.push("heartbeat_stagger_offset = ?");
       values.push(request.heartbeatStaggerOffset);
     }
+    if (request.pulseEveryMinutes !== undefined) {
+      fields.push("heartbeat_pulse_every_minutes = ?");
+      values.push(request.pulseEveryMinutes);
+    }
+    if (request.dispatchCooldownMinutes !== undefined) {
+      fields.push("heartbeat_dispatch_cooldown_minutes = ?");
+      values.push(request.dispatchCooldownMinutes);
+    }
+    if (request.maxDispatchesPerDay !== undefined) {
+      fields.push("heartbeat_max_dispatches_per_day = ?");
+      values.push(request.maxDispatchesPerDay);
+    }
+    if (request.heartbeatProfile !== undefined) {
+      fields.push("heartbeat_profile = ?");
+      values.push(request.heartbeatProfile);
+    }
+    if (request.activeHours !== undefined) {
+      fields.push("heartbeat_active_hours = ?");
+      values.push(request.activeHours ? JSON.stringify(request.activeHours) : null);
+    }
     if (request.operatorMandate !== undefined) {
       fields.push("operator_mandate = ?");
       values.push(request.operatorMandate);
@@ -358,6 +491,16 @@ export class AgentRoleRepository {
         heartbeatEnabled: false,
         heartbeatIntervalMinutes: 15,
         heartbeatStaggerOffset: 0,
+        pulseEveryMinutes: 15,
+        dispatchCooldownMinutes: deriveDispatchCooldownMinutes(defaultRole.autonomyLevel, undefined),
+        maxDispatchesPerDay: deriveMaxDispatchesPerDay(defaultRole.autonomyLevel, undefined),
+        heartbeatProfile: deriveHeartbeatProfile({
+          autonomyLevel: defaultRole.autonomyLevel,
+          requestedProfile: undefined,
+          heartbeatEnabled: false,
+          name: defaultRole.name,
+          displayName: defaultRole.displayName,
+        }),
         heartbeatStatus: "idle",
       };
 
@@ -368,10 +511,12 @@ export class AgentRoleRepository {
           capabilities, tool_restrictions, is_system, is_active,
         sort_order, created_at, updated_at,
         autonomy_level, soul, heartbeat_enabled, heartbeat_interval_minutes,
-        heartbeat_stagger_offset, heartbeat_status, operator_mandate, allowed_loop_types,
+        heartbeat_stagger_offset, heartbeat_pulse_every_minutes,
+        heartbeat_dispatch_cooldown_minutes, heartbeat_max_dispatches_per_day,
+        heartbeat_profile, heartbeat_active_hours, heartbeat_status, operator_mandate, allowed_loop_types,
         output_types, suppression_policy, max_autonomous_outputs_per_cycle,
         last_useful_output_at, operator_health_score
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       stmt.run(
@@ -398,6 +543,11 @@ export class AgentRoleRepository {
         role.heartbeatEnabled ? 1 : 0,
         role.heartbeatIntervalMinutes,
         role.heartbeatStaggerOffset,
+        role.pulseEveryMinutes,
+        role.dispatchCooldownMinutes,
+        role.maxDispatchesPerDay,
+        role.heartbeatProfile,
+        role.activeHours ? JSON.stringify(role.activeHours) : null,
         role.heartbeatStatus,
         role.operatorMandate || null,
         role.allowedLoopTypes ? JSON.stringify(role.allowedLoopTypes) : null,
@@ -448,6 +598,16 @@ export class AgentRoleRepository {
         heartbeatEnabled: false,
         heartbeatIntervalMinutes: 15,
         heartbeatStaggerOffset: 0,
+        pulseEveryMinutes: 15,
+        dispatchCooldownMinutes: deriveDispatchCooldownMinutes(defaultRole.autonomyLevel, undefined),
+        maxDispatchesPerDay: deriveMaxDispatchesPerDay(defaultRole.autonomyLevel, undefined),
+        heartbeatProfile: deriveHeartbeatProfile({
+          autonomyLevel: defaultRole.autonomyLevel,
+          requestedProfile: undefined,
+          heartbeatEnabled: false,
+          name: defaultRole.name,
+          displayName: defaultRole.displayName,
+        }),
         heartbeatStatus: "idle",
       };
 
@@ -458,10 +618,12 @@ export class AgentRoleRepository {
           capabilities, tool_restrictions, is_system, is_active,
         sort_order, created_at, updated_at,
         autonomy_level, soul, heartbeat_enabled, heartbeat_interval_minutes,
-        heartbeat_stagger_offset, heartbeat_status, operator_mandate, allowed_loop_types,
+        heartbeat_stagger_offset, heartbeat_pulse_every_minutes,
+        heartbeat_dispatch_cooldown_minutes, heartbeat_max_dispatches_per_day,
+        heartbeat_profile, heartbeat_active_hours, heartbeat_status, operator_mandate, allowed_loop_types,
         output_types, suppression_policy, max_autonomous_outputs_per_cycle,
         last_useful_output_at, operator_health_score
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       stmt.run(
@@ -488,6 +650,11 @@ export class AgentRoleRepository {
         role.heartbeatEnabled ? 1 : 0,
         role.heartbeatIntervalMinutes,
         role.heartbeatStaggerOffset,
+        role.pulseEveryMinutes,
+        role.dispatchCooldownMinutes,
+        role.maxDispatchesPerDay,
+        role.heartbeatProfile,
+        role.activeHours ? JSON.stringify(role.activeHours) : null,
         role.heartbeatStatus,
         role.operatorMandate || null,
         role.allowedLoopTypes ? JSON.stringify(role.allowedLoopTypes) : null,
@@ -546,7 +713,31 @@ export class AgentRoleRepository {
       heartbeatEnabled: row.heartbeat_enabled === 1,
       heartbeatIntervalMinutes: row.heartbeat_interval_minutes || 15,
       heartbeatStaggerOffset: row.heartbeat_stagger_offset || 0,
+      pulseEveryMinutes:
+        row.heartbeat_pulse_every_minutes || row.heartbeat_interval_minutes || 15,
+      dispatchCooldownMinutes: row.heartbeat_dispatch_cooldown_minutes || 120,
+      maxDispatchesPerDay: row.heartbeat_max_dispatches_per_day || 6,
+      heartbeatProfile: deriveHeartbeatProfile({
+        autonomyLevel: row.autonomy_level as AgentAutonomyLevel,
+        requestedProfile: row.heartbeat_profile as HeartbeatProfile | undefined,
+        heartbeatEnabled: row.heartbeat_enabled === 1,
+        soul: row.soul || undefined,
+        operatorMandate: row.operator_mandate || undefined,
+        allowedLoopTypes: safeJsonParse(row.allowed_loop_types, [], "agentRole.allowedLoopTypes"),
+        outputTypes: safeJsonParse(row.output_types, [], "agentRole.outputTypes"),
+        name: row.name,
+        displayName: row.display_name,
+      }),
+      activeHours: safeJsonParse<HeartbeatActiveHours | undefined>(
+        row.heartbeat_active_hours,
+        undefined,
+        "agentRole.activeHours",
+      ),
       lastHeartbeatAt: row.last_heartbeat_at || undefined,
+      lastPulseAt: row.last_pulse_at || undefined,
+      lastDispatchAt: row.last_dispatch_at || undefined,
+      lastPulseResult: row.heartbeat_last_pulse_result || undefined,
+      lastDispatchKind: row.heartbeat_last_dispatch_kind || undefined,
       heartbeatStatus: (row.heartbeat_status as HeartbeatStatus) || "idle",
       operatorMandate: row.operator_mandate || undefined,
       allowedLoopTypes: safeJsonParse(row.allowed_loop_types, [], "agentRole.allowedLoopTypes"),
@@ -599,6 +790,26 @@ export class AgentRoleRepository {
       fields.push("heartbeat_stagger_offset = ?");
       values.push(config.heartbeatStaggerOffset);
     }
+    if (config.pulseEveryMinutes !== undefined) {
+      fields.push("heartbeat_pulse_every_minutes = ?");
+      values.push(config.pulseEveryMinutes);
+    }
+    if (config.dispatchCooldownMinutes !== undefined) {
+      fields.push("heartbeat_dispatch_cooldown_minutes = ?");
+      values.push(config.dispatchCooldownMinutes);
+    }
+    if (config.maxDispatchesPerDay !== undefined) {
+      fields.push("heartbeat_max_dispatches_per_day = ?");
+      values.push(config.maxDispatchesPerDay);
+    }
+    if (config.heartbeatProfile !== undefined) {
+      fields.push("heartbeat_profile = ?");
+      values.push(config.heartbeatProfile);
+    }
+    if (config.activeHours !== undefined) {
+      fields.push("heartbeat_active_hours = ?");
+      values.push(config.activeHours ? JSON.stringify(config.activeHours) : null);
+    }
 
     if (fields.length === 0) {
       return existing;
@@ -629,6 +840,48 @@ export class AgentRoleRepository {
     values.push(id);
     const sql = `UPDATE agent_roles SET ${fields.join(", ")} WHERE id = ?`;
     this.db.prepare(sql).run(...values);
+  }
+
+  updateHeartbeatRunTimestamps(
+    id: string,
+    updates: {
+      lastPulseAt?: number;
+      lastDispatchAt?: number;
+      lastHeartbeatAt?: number;
+      lastPulseResult?: AgentRole["lastPulseResult"];
+      lastDispatchKind?: AgentRole["lastDispatchKind"];
+    },
+  ): void {
+    const fields: string[] = [];
+    const values: Any[] = [];
+
+    if (updates.lastPulseAt !== undefined) {
+      fields.push("last_pulse_at = ?");
+      values.push(updates.lastPulseAt);
+    }
+    if (updates.lastDispatchAt !== undefined) {
+      fields.push("last_dispatch_at = ?");
+      values.push(updates.lastDispatchAt);
+    }
+    if (updates.lastHeartbeatAt !== undefined) {
+      fields.push("last_heartbeat_at = ?");
+      values.push(updates.lastHeartbeatAt);
+    }
+    if (updates.lastPulseResult !== undefined) {
+      fields.push("heartbeat_last_pulse_result = ?");
+      values.push(updates.lastPulseResult);
+    }
+    if (updates.lastDispatchKind !== undefined) {
+      fields.push("heartbeat_last_dispatch_kind = ?");
+      values.push(updates.lastDispatchKind);
+    }
+
+    if (fields.length === 0) return;
+
+    fields.push("updated_at = ?");
+    values.push(Date.now());
+    values.push(id);
+    this.db.prepare(`UPDATE agent_roles SET ${fields.join(", ")} WHERE id = ?`).run(...values);
   }
 
   /**
