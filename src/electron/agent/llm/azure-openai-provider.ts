@@ -19,7 +19,7 @@ import {
   fromOpenAICompatibleResponse,
 } from "./openai-compatible";
 
-const DEFAULT_AZURE_API_VERSION = "2024-02-15-preview";
+const DEFAULT_AZURE_API_VERSION = "2024-12-01-preview";
 const AZURE_MAX_TOOLS = 128;
 const textDecoder = new TextDecoder();
 
@@ -410,6 +410,7 @@ export class AzureOpenAIProvider implements LLMProvider {
     let contentText = "";
     let inputTokens = 0;
     let outputTokens = 0;
+    let cachedTokens = 0;
     let finishReason: LLMResponse["stopReason"] = "end_turn";
 
     await this.consumeSseEvents(response, (eventData) => {
@@ -425,6 +426,7 @@ export class AzureOpenAIProvider implements LLMProvider {
       if (payload?.usage) {
         inputTokens = payload.usage.prompt_tokens ?? inputTokens;
         outputTokens = payload.usage.completion_tokens ?? outputTokens;
+        cachedTokens = payload.usage.prompt_tokens_details?.cached_tokens ?? cachedTokens;
       }
 
       const choice = Array.isArray(payload?.choices) ? payload.choices[0] : undefined;
@@ -473,7 +475,9 @@ export class AzureOpenAIProvider implements LLMProvider {
     return {
       content: [{ type: "text", text: contentText }],
       stopReason: finishReason,
-      usage: inputTokens || outputTokens ? { inputTokens, outputTokens } : undefined,
+      usage: inputTokens || outputTokens
+        ? { inputTokens, outputTokens, cachedTokens: cachedTokens || undefined }
+        : undefined,
     };
   }
 
@@ -485,6 +489,7 @@ export class AzureOpenAIProvider implements LLMProvider {
     let contentText = "";
     let inputTokens = 0;
     let outputTokens = 0;
+    let cachedTokens = 0;
     let finishReason: LLMResponse["stopReason"] = "end_turn";
 
     await this.consumeSseEvents(response, (eventData) => {
@@ -500,6 +505,7 @@ export class AzureOpenAIProvider implements LLMProvider {
       if (payload?.usage) {
         inputTokens = payload.usage.input_tokens ?? inputTokens;
         outputTokens = payload.usage.output_tokens ?? outputTokens;
+        cachedTokens = payload.usage.input_tokens_details?.cached_tokens ?? cachedTokens;
       }
 
       switch (payload?.type) {
@@ -526,6 +532,8 @@ export class AzureOpenAIProvider implements LLMProvider {
           if (payload.response?.usage) {
             inputTokens = payload.response.usage.input_tokens ?? inputTokens;
             outputTokens = payload.response.usage.output_tokens ?? outputTokens;
+            cachedTokens =
+              payload.response.usage.input_tokens_details?.cached_tokens ?? cachedTokens;
           }
           if (typeof payload.response?.output_text === "string" && payload.response.output_text) {
             contentText = payload.response.output_text;
@@ -556,7 +564,9 @@ export class AzureOpenAIProvider implements LLMProvider {
     return {
       content: [{ type: "text", text: contentText }],
       stopReason: finishReason,
-      usage: inputTokens || outputTokens ? { inputTokens, outputTokens } : undefined,
+      usage: inputTokens || outputTokens
+        ? { inputTokens, outputTokens, cachedTokens: cachedTokens || undefined }
+        : undefined,
     };
   }
 
@@ -612,6 +622,7 @@ export class AzureOpenAIProvider implements LLMProvider {
         ? {
             inputTokens: response.usage.input_tokens ?? 0,
             outputTokens: response.usage.output_tokens ?? 0,
+            cachedTokens: response.usage.input_tokens_details?.cached_tokens || undefined,
           }
         : undefined,
     };
@@ -742,8 +753,10 @@ export class AzureOpenAIProvider implements LLMProvider {
             : undefined;
         if (shouldStream) {
           body.stream = true;
+          body.stream_options = { include_usage: true };
           if (fallbackBody) {
             fallbackBody.stream = true;
+            fallbackBody.stream_options = { include_usage: true };
           }
         }
 
