@@ -140,8 +140,71 @@ function parseResponse<T>(raw: string): BridgeResponse<T> {
   return JSON.parse(raw) as BridgeResponse<T>;
 }
 
-function provisioningErrorMessage(): string {
-  return "Apple Health bridge requires a properly provisioned macOS app bundle. The current helper build was rejected by Launch Services, so HealthKit authorization cannot prompt until Xcode-managed signing/provisioning succeeds.";
+function embeddedProvisioningProfilePath(bundlePath: string): string {
+  return path.join(bundlePath, "Contents", "embedded.provisionprofile");
+}
+
+function hasEmbeddedProvisioningProfile(bundlePath: string): boolean {
+  return fs.existsSync(embeddedProvisioningProfilePath(bundlePath));
+}
+
+function extractBundleIdentifierFromPlist(plistPath: string): string | undefined {
+  try {
+    const plist = fs.readFileSync(plistPath, "utf8");
+    const match = plist.match(
+      /<key>\s*CFBundleIdentifier\s*<\/key>\s*<string>\s*([^<]+?)\s*<\/string>/i,
+    );
+    return match?.[1]?.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function readLocalBundleIdentifier(): string | undefined {
+  try {
+    const configPath = path.resolve(process.cwd(), ".cowork", "healthkit-bridge.json");
+    if (!fs.existsSync(configPath)) return undefined;
+    const parsed = JSON.parse(fs.readFileSync(configPath, "utf8")) as { bundleIdentifier?: unknown };
+    return typeof parsed.bundleIdentifier === "string" && parsed.bundleIdentifier.trim().length > 0
+      ? parsed.bundleIdentifier.trim()
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveProvisioningBundleIdentifier(bundlePath?: string): string {
+  const configured =
+    process.env.COWORK_HEALTHKIT_BUNDLE_IDENTIFIER ||
+    process.env.HEALTHKIT_BRIDGE_BUNDLE_IDENTIFIER ||
+    process.env.PRODUCT_BUNDLE_IDENTIFIER ||
+    readLocalBundleIdentifier();
+  if (configured) return configured;
+  if (bundlePath) {
+    const bundleIdentifier = extractBundleIdentifierFromPlist(
+      path.join(bundlePath, "Contents", "Info.plist"),
+    );
+    if (bundleIdentifier) return bundleIdentifier;
+  }
+  return "com.cowork.healthkitbridge";
+}
+
+function provisioningErrorMessage(bundlePath?: string): string {
+  const profilePath = bundlePath ? embeddedProvisioningProfilePath(bundlePath) : "the helper app bundle";
+  const bundleIdentifier = resolveProvisioningBundleIdentifier(bundlePath);
+  return `Apple Health bridge cannot launch because HealthKit uses restricted entitlements and macOS requires an eligible embedded provisioning profile. Missing profile: ${profilePath}. Register this Mac in Apple Developer, create/download a Mac App Development profile for ${bundleIdentifier} with HealthKit enabled, set COWORK_HEALTHKIT_PROVISIONING_PROFILE (or .cowork/healthkit-bridge.json -> provisioningProfile), then rebuild the helper.`;
+}
+
+function normalizeBridgeLaunchError(raw: string, bundlePath?: string): string {
+  const trimmed = raw.trim();
+  if (
+    /RBSRequestErrorDomain/i.test(trimmed) ||
+    /Launchd job spawn failed/i.test(trimmed) ||
+    /cannot be opened for an unexpected reason/i.test(trimmed)
+  ) {
+    return provisioningErrorMessage(bundlePath);
+  }
+  return trimmed || provisioningErrorMessage(bundlePath);
 }
 
 function runBridge<T>(request: BridgeRequest): Promise<BridgeResponse<T>> {
@@ -149,6 +212,17 @@ function runBridge<T>(request: BridgeRequest): Promise<BridgeResponse<T>> {
     const shouldUseBundle = !process.env.COWORK_HEALTHKIT_BRIDGE_DIRECT;
     const bundlePath = shouldUseBundle ? resolveBridgeBundle() : null;
     if (bundlePath) {
+      if (!hasEmbeddedProvisioningProfile(bundlePath)) {
+        resolve({
+          ok: false,
+          error: {
+            code: "BRIDGE_PROVISIONING_REQUIRED",
+            message: provisioningErrorMessage(bundlePath),
+          },
+        });
+        return;
+      }
+
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cowork-healthkit-"));
       const requestPath = path.join(tempDir, "request.json");
       const responsePath = path.join(tempDir, "response.json");
@@ -178,7 +252,7 @@ function runBridge<T>(request: BridgeRequest): Promise<BridgeResponse<T>> {
               ok: false,
               error: {
                 code: "BRIDGE_EXITED",
-                message: stderr.trim() || provisioningErrorMessage(),
+                message: normalizeBridgeLaunchError(stderr, bundlePath),
               },
             });
             return;
@@ -239,7 +313,7 @@ function runBridge<T>(request: BridgeRequest): Promise<BridgeResponse<T>> {
           ok: false,
           error: {
             code: "BRIDGE_EXITED",
-            message: stderr.trim() || provisioningErrorMessage(),
+            message: normalizeBridgeLaunchError(stderr, resolveBridgeBundle() || undefined),
           },
         });
         return;
