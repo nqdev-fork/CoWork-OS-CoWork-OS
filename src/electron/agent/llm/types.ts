@@ -217,6 +217,10 @@ export interface LLMProviderError extends Error {
   retryable?: boolean;
   phase?: string;
   status?: number;
+  requestId?: string;
+  providerMessage?: string;
+  providerCode?: string;
+  errorData?: unknown;
   cause?: unknown;
 }
 
