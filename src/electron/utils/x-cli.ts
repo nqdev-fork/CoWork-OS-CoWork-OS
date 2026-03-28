@@ -42,6 +42,24 @@ function parseJsonSafe(text: string): Any | undefined {
   }
 }
 
+function dedupeBirdOutputDetail(stderr: string, stdout: string, baseMessage: string): string {
+  const lines = [stderr, stdout]
+    .filter(Boolean)
+    .flatMap((value) => value.split("\n"))
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return "";
+
+  const seen = new Set<string>();
+  const uniqueLines = lines.filter((line) => {
+    if (seen.has(line)) return false;
+    if (baseMessage.includes(line)) return false;
+    seen.add(line);
+    return true;
+  });
+  return uniqueLines.join("\n");
+}
+
 function buildGlobalArgs(settings: XSettingsData): string[] {
   const args: string[] = [];
 
@@ -115,7 +133,7 @@ export async function runBirdCommand(
     const stderr = typeof error?.stderr === "string" ? error.stderr.trim() : "";
     const stdout = typeof error?.stdout === "string" ? error.stdout.trim() : "";
     const baseMessage = error?.message || "bird command failed";
-    const detail = stderr || stdout;
+    const detail = dedupeBirdOutputDetail(stderr, stdout, baseMessage);
     const combined = `${baseMessage}${detail ? `: ${detail}` : ""}`;
 
     if (useJson && /unknown option.*--json/i.test(combined)) {
