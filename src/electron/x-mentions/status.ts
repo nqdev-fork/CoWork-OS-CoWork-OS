@@ -67,6 +67,10 @@ export class XMentionTriggerStatusStore {
       lastTaskId: normalized,
     };
   }
+
+  reset(): void {
+    this.status = { ...DEFAULT_STATUS };
+  }
 }
 
 const sharedStore = new XMentionTriggerStatusStore();
