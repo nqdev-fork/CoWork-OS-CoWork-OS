@@ -21,6 +21,8 @@ export interface RelationshipMemoryItem {
   lastTaskId?: string;
   status?: "open" | "done";
   dueAt?: number;
+  contactIdentityId?: string;
+  companyId?: string;
 }
 
 interface RelationshipMemoryProfile {
@@ -41,6 +43,8 @@ interface BuildPromptContextOptions {
   maxPerLayer?: number;
   maxChars?: number;
   includeDueSoon?: boolean;
+  contactIdentityId?: string;
+  companyId?: string;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -55,11 +59,13 @@ export class RelationshipMemoryService {
       layer?: RelationshipLayer;
       includeDone?: boolean;
       limit?: number;
+      contactIdentityId?: string;
+      companyId?: string;
     } = {},
   ): RelationshipMemoryItem[] {
     const profile = this.load();
     const limit = Math.max(1, params.limit ?? 80);
-    return this.sort(profile.items)
+    return this.sort(this.filterByScope(profile.items, params.contactIdentityId, params.companyId))
       .filter((item) => !params.layer || item.layer === params.layer)
       .filter((item) => params.includeDone === true || item.status !== "done")
       .slice(0, limit);
@@ -72,6 +78,8 @@ export class RelationshipMemoryService {
       confidence?: number;
       status?: "open" | "done";
       dueAt?: number | null;
+      contactIdentityId?: string | null;
+      companyId?: string | null;
     },
   ): RelationshipMemoryItem | null {
     const profile = this.load();
@@ -94,6 +102,16 @@ export class RelationshipMemoryService {
     } else if (typeof patch.dueAt === "number" && Number.isFinite(patch.dueAt)) {
       item.dueAt = Math.floor(patch.dueAt);
     }
+    if (patch.contactIdentityId === null) {
+      delete item.contactIdentityId;
+    } else if (typeof patch.contactIdentityId === "string") {
+      item.contactIdentityId = patch.contactIdentityId;
+    }
+    if (patch.companyId === null) {
+      delete item.companyId;
+    } else if (typeof patch.companyId === "string") {
+      item.companyId = patch.companyId;
+    }
     item.updatedAt = Date.now();
     this.save(profile);
     return item;
@@ -108,13 +126,26 @@ export class RelationshipMemoryService {
     return true;
   }
 
-  static listOpenCommitments(limit = 20): RelationshipMemoryItem[] {
-    return this.listItems({ layer: "commitments", includeDone: false, limit });
+  static listOpenCommitments(
+    limit = 20,
+    scope?: { contactIdentityId?: string; companyId?: string },
+  ): RelationshipMemoryItem[] {
+    return this.listItems({
+      layer: "commitments",
+      includeDone: false,
+      limit,
+      contactIdentityId: scope?.contactIdentityId,
+      companyId: scope?.companyId,
+    });
   }
 
-  static listDueSoonCommitments(windowHours = 72, nowMs = Date.now()): RelationshipMemoryItem[] {
+  static listDueSoonCommitments(
+    windowHours = 72,
+    nowMs = Date.now(),
+    scope?: { contactIdentityId?: string; companyId?: string },
+  ): RelationshipMemoryItem[] {
     const cutoff = nowMs + Math.max(1, Math.floor(windowHours)) * 60 * 60 * 1000;
-    return this.listOpenCommitments(200)
+    return this.listOpenCommitments(200, scope)
       .filter((item) => typeof item.dueAt === "number" && item.dueAt <= cutoff)
       .sort((a, b) => Number(a.dueAt || 0) - Number(b.dueAt || 0));
   }
@@ -253,6 +284,8 @@ export class RelationshipMemoryService {
     facts?: string[];
     commitments?: Array<{ text: string; dueAt?: number }>;
     taskId?: string;
+    contactIdentityId?: string;
+    companyId?: string;
   }): void {
     const facts = Array.isArray(params.facts) ? params.facts : [];
     const commitments = Array.isArray(params.commitments) ? params.commitments : [];
@@ -266,6 +299,8 @@ export class RelationshipMemoryService {
         confidence: 0.7,
         source: "task",
         lastTaskId: params.taskId,
+        contactIdentityId: params.contactIdentityId,
+        companyId: params.companyId,
       });
     }
 
@@ -280,6 +315,8 @@ export class RelationshipMemoryService {
         lastTaskId: params.taskId,
         status: "open",
         dueAt: commitment.dueAt,
+        contactIdentityId: params.contactIdentityId,
+        companyId: params.companyId,
       });
     }
   }
@@ -337,12 +374,14 @@ export class RelationshipMemoryService {
     const maxChars = Math.max(300, options.maxChars ?? 1200);
     const includeDueSoon = options.includeDueSoon !== false;
     const profile = this.load();
-    if (!profile.items.length) return "";
+    const scopedItems = this.filterByScope(profile.items, options.contactIdentityId, options.companyId);
+    if (!scopedItems.length) return "";
 
     const lines: string[] = ["RELATIONSHIP MEMORY (continuity context, not hard constraints):"];
 
     const appendLayer = (label: string, layer: RelationshipLayer, openOnly = false) => {
       const selected = this.sort(profile.items)
+        .filter((item) => scopedItems.some((entry) => entry.id === item.id))
         .filter((item) => item.layer === layer)
         .filter((item) => !openOnly || item.status !== "done")
         .slice(0, maxPerLayer);
@@ -358,7 +397,10 @@ export class RelationshipMemoryService {
     appendLayer("Current context", "context");
     appendLayer("Open commitments", "commitments", true);
     if (includeDueSoon) {
-      const dueSoon = this.listDueSoonCommitments(72).slice(0, maxPerLayer);
+      const dueSoon = this.listDueSoonCommitments(72, Date.now(), {
+        contactIdentityId: options.contactIdentityId,
+        companyId: options.companyId,
+      }).slice(0, maxPerLayer);
       if (dueSoon.length > 0) {
         lines.push("Due soon reminders:");
         for (const item of dueSoon) {
@@ -387,7 +429,9 @@ export class RelationshipMemoryService {
     const existing = profile.items.find(
       (item) =>
         item.layer === input.layer &&
-        this.normalizeForMatch(item.text) === this.normalizeForMatch(normalizedText),
+        this.normalizeForMatch(item.text) === this.normalizeForMatch(normalizedText) &&
+        item.contactIdentityId === input.contactIdentityId &&
+        item.companyId === input.companyId,
     );
 
     if (existing) {
@@ -397,6 +441,8 @@ export class RelationshipMemoryService {
       existing.lastTaskId = input.lastTaskId ?? existing.lastTaskId;
       existing.status = input.status ?? existing.status;
       existing.dueAt = typeof input.dueAt === "number" ? Math.floor(input.dueAt) : existing.dueAt;
+      existing.contactIdentityId = input.contactIdentityId ?? existing.contactIdentityId;
+      existing.companyId = input.companyId ?? existing.companyId;
       this.save(profile);
       return;
     }
@@ -412,6 +458,8 @@ export class RelationshipMemoryService {
       lastTaskId: input.lastTaskId,
       status: input.status,
       dueAt: typeof input.dueAt === "number" ? Math.floor(input.dueAt) : undefined,
+      contactIdentityId: input.contactIdentityId,
+      companyId: input.companyId,
     });
 
     if (profile.items.length > MAX_ITEMS) {
@@ -610,6 +658,12 @@ export class RelationshipMemoryService {
               if (typeof item.dueAt === "number" && Number.isFinite(item.dueAt)) {
                 sanitizedItem.dueAt = Math.floor(item.dueAt);
               }
+              if (typeof item.contactIdentityId === "string") {
+                sanitizedItem.contactIdentityId = item.contactIdentityId;
+              }
+              if (typeof item.companyId === "string") {
+                sanitizedItem.companyId = item.companyId;
+              }
 
               return sanitizedItem;
             })
@@ -640,5 +694,29 @@ export class RelationshipMemoryService {
     } catch {
       // keep in-memory fallback only
     }
+  }
+
+  private static filterByScope(
+    items: RelationshipMemoryItem[],
+    contactIdentityId?: string,
+    companyId?: string,
+  ): RelationshipMemoryItem[] {
+    if (!contactIdentityId && !companyId) return items;
+    const scoped = items.filter((item) => item.contactIdentityId === contactIdentityId);
+    const companyScoped = items.filter(
+      (item) =>
+        !item.contactIdentityId &&
+        companyId &&
+        item.companyId === companyId &&
+        !scoped.some((entry) => entry.id === item.id),
+    );
+    const global = items.filter(
+      (item) =>
+        !item.contactIdentityId &&
+        !item.companyId &&
+        !scoped.some((entry) => entry.id === item.id) &&
+        !companyScoped.some((entry) => entry.id === item.id),
+    );
+    return [...scoped, ...companyScoped, ...global];
   }
 }
