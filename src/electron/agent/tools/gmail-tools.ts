@@ -83,6 +83,9 @@ export class GmailTools {
     if (status === 401) {
       return "Google Workspace authorization failed (401). Reconnect in Settings > Integrations > Google Workspace.";
     }
+    if (status === 403 && /insufficient authentication scopes/i.test(message)) {
+      return "Google Workspace authorization failed (403): Gmail modify scope is missing. Reconnect in Settings > Integrations > Google Workspace and authorize the updated permissions.";
+    }
     if (
       /token refresh failed|refresh token not configured|access token not configured|access token expired/i.test(
         message,
