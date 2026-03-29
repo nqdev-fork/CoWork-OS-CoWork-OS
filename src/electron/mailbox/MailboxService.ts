@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import { createHash, randomUUID } from "crypto";
 import { ChannelRepository, TaskRepository, WorkspaceRepository } from "../database/repositories";
+import { AgentRoleRepository } from "../agents/AgentRoleRepository";
 import { LLMProviderFactory } from "../agent/llm/provider-factory";
 import type { LLMMessage } from "../agent/llm/types";
 import { GoogleWorkspaceSettingsManager } from "../settings/google-workspace-manager";
@@ -10,17 +11,46 @@ import { EmailClient } from "../gateway/channels/email-client";
 import { LoomEmailClient } from "../gateway/channels/loom-client";
 import { assertSafeLoomMailboxFolder } from "../utils/loom";
 import { RelationshipMemoryService } from "../memory/RelationshipMemoryService";
-import type {
+import { PlaybookService } from "../memory/PlaybookService";
+import { KnowledgeGraphService } from "../knowledge-graph/KnowledgeGraphService";
+import { getHeartbeatService } from "../agents/HeartbeatService";
+import { ControlPlaneCoreService } from "../control-plane/ControlPlaneCoreService";
+import { ContactIdentityService } from "../identity/ContactIdentityService";
+import { MailboxAutomationHub } from "./MailboxAutomationHub";
+import { MailboxAutomationRegistry } from "./MailboxAutomationRegistry";
+import {
+  ChannelPreferenceSummary,
+  ContactIdentity,
+  ContactIdentityCandidate,
+  ContactIdentityCoverageStats,
+  ContactIdentityHandleType,
+  ContactIdentityResolution,
+  ContactIdentityReplyTarget,
+  ContactIdentitySearchResult,
   MailboxAccount,
   MailboxActionProposal,
   MailboxApplyActionInput,
   MailboxBulkReviewInput,
   MailboxBulkReviewResult,
+  MailboxAutomationStatus,
   MailboxCommitment,
   MailboxCommitmentState,
   MailboxContactMemory,
+  MailboxDigest,
+  MailboxDigestSnapshot,
   MailboxDraftOptions,
   MailboxDraftSuggestion,
+  MailboxEvent,
+  MailboxEventType,
+  MailboxAutomationRecord,
+  MailboxCompanyCandidate,
+  MailboxMissionControlHandoffPreview,
+  MailboxMissionControlHandoffRecord,
+  MailboxMissionControlHandoffRequest,
+  MailboxOperatorRecommendation,
+  MailboxRuleRecipe,
+  MailboxScheduleRecipe,
+  MailboxSensitiveContent,
   MailboxListThreadsInput,
   MailboxMessage,
   MailboxParticipant,
@@ -41,8 +71,11 @@ import type {
   MailboxThreadListItem,
   MailboxThreadSortOrder,
   MailboxThreadMailboxView,
+  RelationshipTimelineEvent,
+  RelationshipTimelineQuery,
+  stripMailboxSummaryHtmlArtifacts,
 } from "../../shared/mailbox";
-import type { Task } from "../../shared/types";
+import type { AgentRole, CompanyEvidenceRef, CompanyOutputContract, Issue, Task } from "../../shared/types";
 import { isTempWorkspaceId } from "../../shared/types";
 
 type MailboxAccountRow = {
@@ -82,6 +115,7 @@ type MailboxThreadRow = {
   classification_confidence: number;
   classification_updated_at: number | null;
   classification_error: string | null;
+  sensitive_content_json: string | null;
 };
 
 type MailboxMessageRow = {
@@ -108,7 +142,6 @@ type MailboxSummaryRow = {
   key_asks_json: string | null;
   extracted_questions_json: string | null;
   suggested_next_action: string;
-  confidence: number;
   updated_at: number;
 };
 
@@ -169,11 +202,66 @@ type MailboxContactRow = {
   name: string | null;
   company: string | null;
   role: string | null;
+  encryption_preference: "required" | "preferred" | "optional" | null;
+  policy_flags_json: string | null;
   crm_links_json: string | null;
   learned_facts_json: string | null;
   response_tendency: string | null;
   last_interaction_at: number | null;
   open_commitments: number;
+};
+
+type MailboxEventRow = {
+  id: string;
+  fingerprint: string;
+  workspace_id: string;
+  event_type: MailboxEventType;
+  account_id: string | null;
+  thread_id: string | null;
+  provider: MailboxProvider | null;
+  subject: string | null;
+  summary_text: string | null;
+  evidence_refs_json: string | null;
+  payload_json: string;
+  duplicate_count: number;
+  created_at: number;
+  last_seen_at: number;
+};
+
+type MailboxMissionControlHandoffRow = {
+  id: string;
+  thread_id: string;
+  workspace_id: string;
+  company_id: string;
+  company_name: string;
+  operator_role_id: string;
+  operator_display_name: string;
+  issue_id: string;
+  issue_title: string;
+  source: "mailbox_handoff";
+  latest_outcome: string | null;
+  latest_wake_at: number | null;
+  created_at: number;
+  updated_at: number;
+};
+
+type MailboxEventRecordInput = {
+  type: MailboxEventType;
+  workspaceId?: string;
+  accountId?: string;
+  threadId?: string;
+  provider?: MailboxProvider;
+  subject?: string;
+  summary?: string;
+  evidenceRefs?: string[];
+  payload?: Record<string, unknown>;
+  timestamp?: number;
+};
+
+type MailboxEventRecordResult = {
+  event: MailboxEvent;
+  duplicateCount: number;
+  isDuplicate: boolean;
 };
 
 type ScheduleOption = {
@@ -231,6 +319,16 @@ type DraftStyleProfile = {
   styleSignals: string[];
   recentOutboundExample?: string;
 };
+
+let activeMailboxService: MailboxService | null = null;
+
+export function setMailboxServiceInstance(service: MailboxService | null): void {
+  activeMailboxService = service;
+}
+
+export function getMailboxServiceInstance(): MailboxService | null {
+  return activeMailboxService;
+}
 
 type NormalizedThreadInput = {
   id: string;
@@ -314,6 +412,107 @@ function parseCommitmentMetadata(value: string | null | undefined): MailboxCommi
   }
 }
 
+function parseMailboxSensitiveContent(value: string | null | undefined): MailboxSensitiveContent {
+  if (!value) {
+    return { hasSensitiveContent: false, categories: [], reasons: [] };
+  }
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    const categories = Array.isArray(parsed.categories)
+      ? parsed.categories.filter(
+          (entry): entry is MailboxSensitiveContent["categories"][number] =>
+            typeof entry === "string",
+        )
+      : [];
+    const reasons = Array.isArray(parsed.reasons)
+      ? parsed.reasons.filter((entry): entry is string => typeof entry === "string")
+      : [];
+    return {
+      hasSensitiveContent: Boolean(parsed.hasSensitiveContent),
+      categories,
+      reasons,
+    };
+  } catch {
+    return { hasSensitiveContent: false, categories: [], reasons: [] };
+  }
+}
+
+function detectSensitiveContent(text: string): MailboxSensitiveContent {
+  const lower = String(text || "").toLowerCase();
+  const categories: MailboxSensitiveContent["categories"] = [];
+  const reasons: string[] = [];
+
+  const add = (category: MailboxSensitiveContent["categories"][number], reason: string) => {
+    if (!categories.includes(category)) categories.push(category);
+    reasons.push(reason);
+  };
+
+  if (/\b(password|passcode|otp|one[- ]time code|verification code|secret key|api key|token|credential|login)\b/.test(lower)) {
+    add("credentials", "Credentials or authentication data detected");
+  }
+  if (/\b(invoice|payment|wire transfer|bank account|routing number|credit card|card number|ssn|tax id|salary|compensation)\b/.test(lower)) {
+    add("financial", "Financial or payment details detected");
+  }
+  if (/\b(ssn|social security|date of birth|dob|home address|phone number|personal data|pii)\b/.test(lower)) {
+    add("pii", "Potential personal information detected");
+  }
+  if (/\b(attorney|legal|agreement|contract|nda|non[- ]disclosure|litigation|settlement)\b/.test(lower)) {
+    add("legal", "Potential legal content detected");
+  }
+  if (/\b(medical|health|diagnosis|patient|insurance claim)\b/.test(lower)) {
+    add("health", "Potential health information detected");
+  }
+
+  return {
+    hasSensitiveContent: categories.length > 0,
+    categories,
+    reasons,
+  };
+}
+
+function parseJsonObject(value: string | null | undefined): Record<string, unknown> {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function normalizeMailboxEvidenceRefs(value: unknown): string[] {
+  return Array.isArray(value)
+    ? Array.from(
+        new Set(
+          value
+            .map((entry) => asString(entry))
+            .filter((entry): entry is string => Boolean(entry))
+            .map((entry) => entry.trim())
+            .filter(Boolean),
+        ),
+      )
+    : [];
+}
+
+function buildMailboxEventFingerprint(type: MailboxEventType, workspaceId: string, payload: Record<string, unknown>): string {
+  return sha256(
+    JSON.stringify({
+      type,
+      workspaceId,
+      threadId: asString(payload.threadId) || null,
+      accountId: asString(payload.accountId) || null,
+      actionType: asString(payload.actionType) || null,
+      draftId: asString(payload.draftId) || null,
+      commitmentId: asString(payload.commitmentId) || null,
+      subject: normalizeWhitespace(asString(payload.subject) || "", 180),
+      summary: normalizeWhitespace(asString(payload.summary) || "", 180),
+      evidenceRefs: Array.isArray(payload.evidenceRefs)
+        ? [...new Set((payload.evidenceRefs as unknown[]).map((item) => asString(item)).filter((item): item is string => Boolean(item)))].sort()
+        : [],
+    }),
+  );
+}
+
 function stripHtml(html: string): string {
   return html
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
@@ -354,6 +553,16 @@ function normalizeEmailAddress(value?: string | null): string | null {
 function formatScheduleLabel(date: Date): string {
   return date.toLocaleString(undefined, {
     weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function formatMailboxDateTime(timestamp?: number): string {
+  if (!timestamp) return "unscheduled";
+  return new Date(timestamp).toLocaleString("en-US", {
     month: "short",
     day: "numeric",
     hour: "numeric",
@@ -781,6 +990,43 @@ function excerptLines(text: string, count = 2): string[] {
     .slice(0, count);
 }
 
+/**
+ * After stripHtml(), tag attributes can become stray tokens (e.g. two width="96"
+ * attributes → a first "line" like "96 96"). Skip those so the summary reads like prose.
+ */
+function isLikelyHtmlArtifactOrNoiseLine(line: string): boolean {
+  const t = line.trim();
+  if (!t) return true;
+  if (t.length < 4) return true;
+  const hasLetter = /[a-zA-Z]/.test(t);
+  if (!hasLetter) {
+    if (/^[\d\s.,\-–—_]+$/.test(t)) return true;
+    if (t.length < 20) return true;
+  }
+  if (/^(\d{1,4})(\s+\1){1,}$/.test(t)) return true;
+  return false;
+}
+
+function pickThreadSummaryLine(lines: string[], snippet: string, subject: string): string {
+  for (const line of lines) {
+    if (!isLikelyHtmlArtifactOrNoiseLine(line)) {
+      return line;
+    }
+  }
+  const s = (snippet || "").trim();
+  if (s && !isLikelyHtmlArtifactOrNoiseLine(s)) {
+    return s;
+  }
+  if (s) {
+    for (const line of excerptLines(s, 8)) {
+      if (!isLikelyHtmlArtifactOrNoiseLine(line)) {
+        return line;
+      }
+    }
+  }
+  return `Recent email activity in ${subject || "this thread"}`;
+}
+
 function parseDueAt(text: string): number | undefined {
   const normalized = text.toLowerCase();
   if (/\btoday\b/.test(normalized)) {
@@ -812,6 +1058,9 @@ export class MailboxService {
   private channelRepo: ChannelRepository;
   private taskRepo: TaskRepository;
   private workspaceRepo: WorkspaceRepository;
+  private agentRoleRepo: AgentRoleRepository;
+  private controlPlaneCore: ControlPlaneCoreService;
+  private contactIdentityService: ContactIdentityService;
   private syncInFlight = false;
   private syncProgress: MailboxSyncProgress | null = null;
 
@@ -819,6 +1068,10 @@ export class MailboxService {
     this.channelRepo = new ChannelRepository(db);
     this.taskRepo = new TaskRepository(db);
     this.workspaceRepo = new WorkspaceRepository(db);
+    this.agentRoleRepo = new AgentRoleRepository(db);
+    this.controlPlaneCore = new ControlPlaneCoreService(db);
+    this.contactIdentityService = new ContactIdentityService(db);
+    setMailboxServiceInstance(this);
   }
 
   isAvailable(): boolean {
@@ -902,7 +1155,418 @@ export class MailboxService {
                 : countsRow.classification_pending_count
                   ? ` · ${countsRow.classification_pending_count} awaiting AI classification`
                   : ""
-            }`,
+        }`,
+    };
+  }
+
+  async listMailboxEvents(
+    limit = 50,
+    threadId?: string,
+  ): Promise<MailboxEvent[]> {
+    const workspaceId = this.resolveDefaultWorkspaceId();
+    if (!workspaceId) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT
+           id,
+           fingerprint,
+           workspace_id,
+           event_type,
+           account_id,
+           thread_id,
+           provider,
+           subject,
+           summary_text,
+           evidence_refs_json,
+           payload_json,
+           duplicate_count,
+           created_at,
+           last_seen_at
+         FROM mailbox_events
+         WHERE workspace_id = ?
+           AND (? IS NULL OR thread_id = ?)
+         ORDER BY last_seen_at DESC
+         LIMIT ?`,
+      )
+      .all(workspaceId, threadId || null, threadId || null, Math.min(Math.max(limit, 1), 200)) as MailboxEventRow[];
+    return rows.map((row) => ({
+      id: row.id,
+      fingerprint: row.fingerprint,
+      type: row.event_type,
+      workspaceId: row.workspace_id,
+      timestamp: row.last_seen_at,
+      accountId: row.account_id || undefined,
+      threadId: row.thread_id || undefined,
+      provider: (row.provider as MailboxProvider | null) || undefined,
+      subject: row.subject || undefined,
+      summary: row.summary_text || undefined,
+      evidenceRefs: normalizeMailboxEvidenceRefs(parseJsonArray<string>(row.evidence_refs_json)),
+      payload: parseJsonObject(row.payload_json),
+    }));
+  }
+
+  async listMailboxAutomations(input?: {
+    workspaceId?: string;
+    threadId?: string;
+  }): Promise<MailboxAutomationRecord[]> {
+    return MailboxAutomationRegistry.listAutomations({
+      workspaceId: input?.workspaceId || this.resolveDefaultWorkspaceId(),
+      threadId: input?.threadId,
+    });
+  }
+
+  async listThreadAutomations(threadId: string): Promise<MailboxAutomationRecord[]> {
+    return MailboxAutomationRegistry.listThreadAutomations(threadId);
+  }
+
+  async createMailboxRule(recipe: MailboxRuleRecipe): Promise<MailboxAutomationRecord> {
+    return MailboxAutomationRegistry.createRule({
+      ...recipe,
+      workspaceId: recipe.workspaceId || this.resolveDefaultWorkspaceId(),
+      source: "mailbox_event",
+    });
+  }
+
+  async updateMailboxRule(
+    automationId: string,
+    patch: Partial<MailboxRuleRecipe> & { status?: MailboxAutomationStatus },
+  ): Promise<MailboxAutomationRecord | null> {
+    return MailboxAutomationRegistry.updateRule(automationId, patch);
+  }
+
+  async deleteMailboxRule(automationId: string): Promise<boolean> {
+    return MailboxAutomationRegistry.deleteRule(automationId);
+  }
+
+  async createMailboxSchedule(recipe: MailboxScheduleRecipe): Promise<MailboxAutomationRecord> {
+    return MailboxAutomationRegistry.createSchedule({
+      ...recipe,
+      workspaceId: recipe.workspaceId || this.resolveDefaultWorkspaceId(),
+    });
+  }
+
+  async updateMailboxSchedule(
+    automationId: string,
+    patch: Partial<MailboxScheduleRecipe> & { status?: MailboxAutomationStatus },
+  ): Promise<MailboxAutomationRecord | null> {
+    return MailboxAutomationRegistry.updateSchedule(automationId, patch);
+  }
+
+  async deleteMailboxSchedule(automationId: string): Promise<boolean> {
+    return MailboxAutomationRegistry.deleteSchedule(automationId);
+  }
+
+  async listMailboxAutomationHistory(automationId: string, limit = 25): Promise<Any[]> {
+    return MailboxAutomationRegistry.listAutomationHistory(automationId, limit);
+  }
+
+  async previewMissionControlHandoff(
+    threadId: string,
+  ): Promise<MailboxMissionControlHandoffPreview | null> {
+    const detail = await this.getThread(threadId);
+    if (!detail) return null;
+
+    const workspaceId =
+      this.resolveThreadWorkspaceId(detail.accountId) ||
+      this.resolveDefaultWorkspaceId();
+    const companyCandidates = this.buildMissionControlCompanyCandidates(detail);
+    const operatorRecommendations = this.buildMissionControlOperatorRecommendations(
+      detail,
+      companyCandidates[0]?.companyId,
+    );
+    const evidenceRefs = this.buildMailboxEvidenceRefs(detail);
+    const sensitiveContentRedacted = Boolean(detail.sensitiveContent?.hasSensitiveContent);
+    const summary = this.buildMissionControlIssueSummary(detail, sensitiveContentRedacted);
+
+    return {
+      threadId,
+      workspaceId,
+      issueTitle: this.buildMissionControlIssueTitle(detail),
+      issueSummary: summary,
+      companyCandidates,
+      recommendedCompanyId:
+        companyCandidates[0] && companyCandidates[0].confidence >= 0.7
+          ? companyCandidates[0].companyId
+          : undefined,
+      companyConfirmationRequired: true,
+      operatorRecommendations,
+      recommendedOperatorRoleId: operatorRecommendations[0]?.agentRoleId,
+      sensitiveContentRedacted,
+      evidenceRefs,
+      existingHandoffs: this.listMissionControlHandoffs(threadId),
+    };
+  }
+
+  async createMissionControlHandoff(
+    request: MailboxMissionControlHandoffRequest,
+  ): Promise<MailboxMissionControlHandoffRecord> {
+    const detail = await this.getThread(request.threadId);
+    if (!detail) {
+      throw new Error("Mailbox thread not found");
+    }
+
+    const company = this.controlPlaneCore.getCompany(request.companyId);
+    if (!company) {
+      throw new Error("Company not found for inbox handoff");
+    }
+
+    const operator = this.agentRoleRepo.findById(request.operatorRoleId);
+    if (!operator || operator.companyId !== company.id || operator.isActive === false) {
+      throw new Error("Selected operator is not available for the chosen company");
+    }
+
+    const existing = this.findActiveMissionControlHandoff(
+      request.threadId,
+      company.id,
+      operator.id,
+    );
+    if (existing) {
+      return existing;
+    }
+
+    const workspaceId =
+      this.resolveThreadWorkspaceId(detail.accountId) ||
+      company.defaultWorkspaceId ||
+      this.resolveDefaultWorkspaceId();
+    if (!workspaceId) {
+      throw new Error("No workspace available for inbox handoff");
+    }
+
+    const sensitiveContentRedacted = Boolean(detail.sensitiveContent?.hasSensitiveContent);
+    const outputContract = this.buildMailboxHandoffOutputContract(
+      company.id,
+      operator.id,
+      detail,
+    );
+    const metadata = {
+      source: "mailbox_handoff",
+      plannerManaged: false,
+      plannerEligible: true,
+      plannerAdoptionMode: "linked_follow_up_only",
+      inboxHandoff: {
+        threadId: detail.id,
+        provider: detail.provider,
+        subject: detail.subject,
+        mailboxViewHint: detail.needsReply ? "needs_reply" : "reference",
+        primaryContactEmail: detail.research?.primaryContact?.email || detail.participants[0]?.email,
+        primaryContactName: detail.research?.primaryContact?.name || detail.participants[0]?.name,
+        companyHint: detail.research?.company,
+        projectHint: detail.research?.relatedEntities?.[0],
+        summary: stripMailboxSummaryHtmlArtifacts(detail.summary?.summary || detail.snippet),
+        sensitiveContentRedacted,
+        evidenceRefs: this.buildMailboxEvidenceRefs(detail),
+      },
+      outputContract,
+      completionContract: {
+        expectedArtifactType: "work_order",
+        doneWhen: [
+          "operator reviewed the email thread context",
+          "next concrete company action is captured",
+          "issue status reflects the handoff outcome",
+        ],
+      },
+    } satisfies Record<string, unknown>;
+
+    const issue = this.controlPlaneCore.createIssue({
+      companyId: company.id,
+      workspaceId,
+      title: request.issueTitle.trim(),
+      description:
+        request.issueSummary?.trim() || this.buildMissionControlIssueSummary(detail, sensitiveContentRedacted),
+      status: "backlog",
+      priority: this.mapMailboxPriorityToIssuePriority(detail.priorityBand),
+      assigneeAgentRoleId: operator.id,
+      metadata,
+    });
+
+    let wakeOutcome = "heartbeat_not_available";
+    const heartbeatService = getHeartbeatService();
+    if (heartbeatService) {
+      const result = await heartbeatService.triggerHeartbeat(operator.id);
+      wakeOutcome = result.status;
+    }
+
+    const record = this.persistMissionControlHandoff({
+      threadId: detail.id,
+      workspaceId,
+      companyId: company.id,
+      companyName: company.name,
+      operatorRoleId: operator.id,
+      operatorDisplayName: operator.displayName,
+      issueId: issue.id,
+      issueTitle: issue.title,
+      latestOutcome: wakeOutcome,
+      latestWakeAt: Date.now(),
+    });
+
+    const primaryContact = detail.research?.primaryContact || detail.participants[0];
+    this.emitMailboxEvent({
+      type: "mission_control_handoff_created",
+      threadId: detail.id,
+      accountId: detail.accountId,
+      provider: detail.provider,
+      subject: detail.subject,
+      summary: `Mission Control handoff created for ${company.name}`,
+      evidenceRefs: [
+        detail.id,
+        issue.id,
+        operator.id,
+      ],
+      payload: {
+        issueId: issue.id,
+        companyId: company.id,
+        companyName: company.name,
+        operatorRoleId: operator.id,
+        operatorDisplayName: operator.displayName,
+        source: "mailbox_handoff",
+        primaryContactEmail: primaryContact?.email,
+        primaryContactName: primaryContact?.name,
+        senderName: primaryContact?.name,
+        sensitiveContentRedacted,
+      },
+    });
+
+    return record;
+  }
+
+  listMissionControlHandoffs(threadId: string): MailboxMissionControlHandoffRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT
+           id,
+           thread_id,
+           workspace_id,
+           company_id,
+           company_name,
+           operator_role_id,
+           operator_display_name,
+           issue_id,
+           issue_title,
+           source,
+           latest_outcome,
+           latest_wake_at,
+           created_at,
+           updated_at
+         FROM mailbox_mission_control_handoffs
+         WHERE thread_id = ?
+         ORDER BY updated_at DESC`,
+      )
+      .all(threadId) as MailboxMissionControlHandoffRow[];
+    return rows.map((row) => this.mapMissionControlHandoffRow(row));
+  }
+
+  async getMailboxDigest(workspaceId?: string): Promise<MailboxDigestSnapshot> {
+    const resolvedWorkspaceId = workspaceId || this.resolveDefaultWorkspaceId();
+    if (!resolvedWorkspaceId) {
+      return {
+        workspaceId: "",
+        generatedAt: Date.now(),
+        threadCount: 0,
+        messageCount: 0,
+        unreadCount: 0,
+        needsReplyCount: 0,
+        proposalCount: 0,
+        commitmentCount: 0,
+        draftCount: 0,
+        overdueCommitmentCount: 0,
+        sensitiveThreadCount: 0,
+        eventCount: 0,
+        classificationPendingCount: 0,
+        recentEventTypes: [],
+      };
+    }
+
+    const counts = this.db
+      .prepare(
+        `SELECT
+           COALESCE(COUNT(*), 0) AS thread_count,
+           COALESCE(SUM(message_count), 0) AS message_count,
+           COALESCE(SUM(unread_count), 0) AS unread_count,
+           COALESCE(SUM(CASE WHEN needs_reply = 1 THEN 1 ELSE 0 END), 0) AS needs_reply_count,
+           COALESCE(
+             SUM(CASE WHEN classification_state IN ('pending', 'backfill_pending') THEN 1 ELSE 0 END),
+             0
+           ) AS classification_pending_count,
+           COALESCE(SUM(CASE WHEN sensitive_content_json IS NOT NULL AND sensitive_content_json != '' THEN 1 ELSE 0 END), 0) AS sensitive_thread_count
+         FROM mailbox_threads`,
+      )
+      .get() as {
+      thread_count: number;
+      message_count: number;
+      unread_count: number;
+      needs_reply_count: number;
+      classification_pending_count: number;
+      sensitive_thread_count: number;
+    };
+    const proposalCountRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM mailbox_action_proposals
+         WHERE status = 'suggested'`,
+      )
+      .get() as { count: number };
+    const commitmentCountRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM mailbox_commitments
+         WHERE state IN ('suggested', 'accepted')`,
+      )
+      .get() as { count: number };
+    const draftCountRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM mailbox_drafts`,
+      )
+      .get() as { count: number };
+    const overdueCommitmentCountRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM mailbox_commitments
+         WHERE state IN ('suggested', 'accepted')
+           AND due_at IS NOT NULL
+           AND due_at < ?`,
+      )
+      .get(Date.now()) as { count: number };
+    const eventCountRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM mailbox_events
+         WHERE workspace_id = ?`,
+      )
+      .get(resolvedWorkspaceId) as { count: number };
+    const recentEventRows = this.db
+      .prepare(
+        `SELECT event_type, COUNT(*) AS count
+         FROM mailbox_events
+         WHERE workspace_id = ?
+         GROUP BY event_type
+         ORDER BY MAX(last_seen_at) DESC
+         LIMIT 6`,
+      )
+      .all(resolvedWorkspaceId) as Array<{ event_type: MailboxEventType; count: number }>;
+    const lastSyncedRow = this.db
+      .prepare(
+        `SELECT MAX(last_synced_at) AS last_synced_at
+         FROM mailbox_accounts`,
+      )
+      .get() as { last_synced_at: number | null };
+
+    return {
+      workspaceId: resolvedWorkspaceId,
+      generatedAt: Date.now(),
+      threadCount: counts.thread_count || 0,
+      messageCount: counts.message_count || 0,
+      unreadCount: counts.unread_count || 0,
+      needsReplyCount: counts.needs_reply_count || 0,
+      proposalCount: proposalCountRow.count || 0,
+      commitmentCount: commitmentCountRow.count || 0,
+      draftCount: draftCountRow.count || 0,
+      overdueCommitmentCount: overdueCommitmentCountRow.count || 0,
+      sensitiveThreadCount: counts.sensitive_thread_count || 0,
+      eventCount: eventCountRow.count || 0,
+      classificationPendingCount: counts.classification_pending_count || 0,
+      lastSyncedAt: lastSyncedRow.last_synced_at || undefined,
+      recentEventTypes: recentEventRows.map((row) => ({ type: row.event_type, count: row.count })),
     };
   }
 
@@ -911,6 +1575,128 @@ export class MailboxService {
       ...progress,
       updatedAt: Date.now(),
     };
+  }
+
+  private resolveDefaultWorkspaceId(): string | undefined {
+    const workspaces = this.workspaceRepo.findAll();
+    const preferred = workspaces.find(
+      (workspace) => !workspace.isTemp && !isTempWorkspaceId(workspace.id),
+    );
+    return preferred?.id || workspaces[0]?.id;
+  }
+
+  private createThreadSensitiveContent(textParts: string[]): MailboxSensitiveContent {
+    return detectSensitiveContent(textParts.filter(Boolean).join("\n"));
+  }
+
+  private readThreadSensitiveContent(row: MailboxThreadRow): MailboxSensitiveContent {
+    return parseMailboxSensitiveContent(row.sensitive_content_json);
+  }
+
+  private buildMailboxEventRecord(event: MailboxEventRecordInput): MailboxEventRecordResult | null {
+    const workspaceId = event.workspaceId || this.resolveDefaultWorkspaceId();
+    if (!workspaceId) return null;
+
+    const evidenceRefs = normalizeMailboxEvidenceRefs(event.evidenceRefs);
+    const payload = {
+      ...(event.payload || {}),
+      accountId: event.accountId,
+      threadId: event.threadId,
+      provider: event.provider,
+      subject: event.subject,
+      summary: event.summary,
+      evidenceRefs,
+    };
+    const fingerprint = buildMailboxEventFingerprint(event.type, workspaceId, payload);
+    const timestamp = event.timestamp || Date.now();
+    const existing = this.db
+      .prepare(
+        `SELECT id, duplicate_count
+         FROM mailbox_events
+         WHERE fingerprint = ?`,
+      )
+      .get(fingerprint) as { id: string; duplicate_count: number } | undefined;
+
+    if (existing) {
+      const duplicateCount = (existing.duplicate_count || 0) + 1;
+      this.db
+        .prepare(
+          `UPDATE mailbox_events
+           SET duplicate_count = ?, last_seen_at = ?
+           WHERE id = ?`,
+        )
+        .run(duplicateCount, timestamp, existing.id);
+      return {
+        event: {
+          id: existing.id,
+          fingerprint,
+          type: event.type,
+          workspaceId,
+          timestamp,
+          accountId: event.accountId,
+          threadId: event.threadId,
+          provider: event.provider,
+          subject: event.subject,
+          summary: event.summary,
+          evidenceRefs,
+          payload,
+        },
+        duplicateCount,
+        isDuplicate: true,
+      };
+    }
+
+    const id = randomUUID();
+    this.db
+      .prepare(
+        `INSERT INTO mailbox_events
+          (id, fingerprint, workspace_id, event_type, account_id, thread_id, provider, subject, summary_text, evidence_refs_json, payload_json, duplicate_count, created_at, last_seen_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        fingerprint,
+        workspaceId,
+        event.type,
+        event.accountId || null,
+        event.threadId || null,
+        event.provider || null,
+        event.subject || null,
+        event.summary || null,
+        evidenceRefs.length ? JSON.stringify(evidenceRefs) : null,
+        JSON.stringify(payload),
+        0,
+        timestamp,
+        timestamp,
+      );
+
+    return {
+      event: {
+        id,
+        fingerprint,
+        type: event.type,
+        workspaceId,
+        timestamp,
+        accountId: event.accountId,
+        threadId: event.threadId,
+        provider: event.provider,
+        subject: event.subject,
+        summary: event.summary,
+        evidenceRefs,
+        payload,
+      },
+      duplicateCount: 0,
+      isDuplicate: false,
+    };
+  }
+
+  private emitMailboxEvent(event: MailboxEventRecordInput): MailboxEvent | null {
+    const record = this.buildMailboxEventRecord(event);
+    if (!record) return null;
+    if (!record.isDuplicate) {
+      MailboxAutomationHub.handleMailboxEvent(record.event);
+    }
+    return record.event;
   }
 
   async sync(limit = 25): Promise<MailboxSyncResult> {
@@ -968,7 +1754,22 @@ export class MailboxService {
         label:
           syncedThreads > 0
             ? `Synced ${syncedThreads} thread${syncedThreads === 1 ? "" : "s"} and ${syncedMessages} message${syncedMessages === 1 ? "" : "s"}`
-            : "Mailbox sync complete",
+          : "Mailbox sync complete",
+      });
+      this.emitMailboxEvent({
+        type: "sync_completed",
+        workspaceId: this.resolveDefaultWorkspaceId(),
+        accountId: accounts[0]?.id,
+        provider: accounts[0]?.provider,
+        summary: `Synced ${syncedThreads} thread${syncedThreads === 1 ? "" : "s"} and ${syncedMessages} message${syncedMessages === 1 ? "" : "s"}`,
+        evidenceRefs: accounts.map((account) => account.id),
+        payload: {
+          accountCount: accounts.length,
+          threadCount: syncedThreads,
+          messageCount: syncedMessages,
+          accountIds: accounts.map((account) => account.id),
+          providers: accounts.map((account) => account.provider),
+        },
       });
       return {
         accounts,
@@ -1085,7 +1886,7 @@ export class MailboxService {
             AND m.direction = 'incoming'
         )`,
       );
-    } else if (mailboxView === "sent") {
+         } else if (mailboxView === "sent") {
       conditions.push(
         `NOT EXISTS (
           SELECT 1
@@ -1163,12 +1964,13 @@ export class MailboxService {
            urgency_score,
            needs_reply,
            stale_followup,
-           cleanup_candidate,
-           handled,
-           unread_count,
-           message_count,
-           last_message_at,
-           classification_state
+          cleanup_candidate,
+          handled,
+          unread_count,
+          message_count,
+          last_message_at,
+          sensitive_content_json,
+          classification_state
          FROM mailbox_threads
          ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}
          ORDER BY ${orderBy}
@@ -1201,6 +2003,7 @@ export class MailboxService {
            unread_count,
            message_count,
            last_message_at,
+           sensitive_content_json,
            classification_state
          FROM mailbox_threads
          WHERE id = ?`,
@@ -1215,6 +2018,7 @@ export class MailboxService {
     const commitments = this.getCommitmentsForThread(threadId);
     const contactMemory = this.getPrimaryContactMemory(threadId);
     const research = await this.researchContact(threadId);
+    const sensitiveContent = this.readThreadSensitiveContent(row);
 
     return {
       ...this.mapThreadRow(row, summary || undefined),
@@ -1224,6 +2028,7 @@ export class MailboxService {
       commitments,
       contactMemory,
       research,
+      sensitiveContent,
     };
   }
 
@@ -1235,7 +2040,7 @@ export class MailboxService {
       .map((message) => message.body || message.snippet)
       .join("\n\n")
       .trim();
-    const lines = excerptLines(combinedText, 4);
+    const lines = excerptLines(combinedText, 12);
     const questions = detail.messages
       .flatMap((message) =>
         excerptLines(message.body, 6).filter((line) => line.includes("?")),
@@ -1249,10 +2054,13 @@ export class MailboxService {
       )
       .slice(0, 3);
 
-    const summaryText =
-      lines[0] ||
-      detail.snippet ||
-      `Recent email activity in ${detail.subject || "this thread"}`;
+    const picked = pickThreadSummaryLine(lines, detail.snippet, detail.subject);
+    let summaryText = stripMailboxSummaryHtmlArtifacts(picked);
+    if (!summaryText.trim()) {
+      summaryText =
+        detail.snippet?.trim() ||
+        `Recent email activity in ${detail.subject || "this thread"}`;
+    }
     const nextAction = detail.needsReply
       ? "Draft a reply"
       : detail.cleanupCandidate
@@ -1260,23 +2068,19 @@ export class MailboxService {
         : detail.category === "calendar"
           ? "Propose scheduling options"
           : "Keep as reference";
-    const confidence = Math.min(
-      0.94,
-      0.58 + (asks.length > 0 ? 0.16 : 0) + (questions.length > 0 ? 0.12 : 0),
-    );
     const updatedAt = Date.now();
+    const primaryContact = detail.participants[0];
 
     this.db
       .prepare(
         `INSERT INTO mailbox_summaries
-          (thread_id, summary_text, key_asks_json, extracted_questions_json, suggested_next_action, confidence, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+          (thread_id, summary_text, key_asks_json, extracted_questions_json, suggested_next_action, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(thread_id) DO UPDATE SET
            summary_text = excluded.summary_text,
            key_asks_json = excluded.key_asks_json,
            extracted_questions_json = excluded.extracted_questions_json,
            suggested_next_action = excluded.suggested_next_action,
-           confidence = excluded.confidence,
            updated_at = excluded.updated_at`,
       )
       .run(
@@ -1285,18 +2089,35 @@ export class MailboxService {
         JSON.stringify(asks),
         JSON.stringify(questions),
         nextAction,
-        confidence,
         updatedAt,
       );
 
     this.refreshThreadProposals(detail);
+    this.emitMailboxEvent({
+      type: "thread_summarized",
+      threadId,
+      accountId: detail.accountId,
+      provider: detail.provider,
+      subject: detail.subject,
+      summary: normalizeWhitespace(summaryText, 340),
+      evidenceRefs: [threadId, ...detail.messages.slice(-1).map((message) => message.id)],
+      payload: {
+        primaryContactEmail: primaryContact?.email,
+        primaryContactName: primaryContact?.name,
+        senderName: primaryContact?.name,
+        company: companyFromEmail(primaryContact?.email),
+        projectHint: detail.category === "calendar" ? detail.subject : undefined,
+        keyAsks: asks,
+        extractedQuestions: questions,
+        suggestedNextAction: nextAction,
+      },
+    });
 
     return {
       summary: normalizeWhitespace(summaryText, 340),
       keyAsks: asks,
       extractedQuestions: questions,
       suggestedNextAction: nextAction,
-      confidence,
       updatedAt,
     };
   }
@@ -1313,9 +2134,13 @@ export class MailboxService {
       options.includeAvailability !== false && detail.category === "calendar"
         ? await this.getScheduleSuggestion()
         : null;
+    const resolution = await this.resolveContactIdentity(threadId);
+    const scopedCompanyId = this.getPrimaryContactMemory(threadId)?.company;
     const relationshipContext = RelationshipMemoryService.buildPromptContext({
       maxPerLayer: 1,
       maxChars: 420,
+      contactIdentityId: resolution?.identity?.id,
+      companyId: scopedCompanyId,
     });
     const latestIncoming =
       detail.messages.filter((message) => message.direction === "incoming").slice(-1)[0] ||
@@ -1323,6 +2148,7 @@ export class MailboxService {
     const recipient =
       latestIncoming?.from?.name || latestIncoming?.from?.email || detail.participants[0]?.email || "there";
     const contactEmail = detail.participants[0]?.email;
+    const primaryContact = detail.participants[0];
     const styleProfile = this.buildDraftStyleProfile({
       outgoingMessages: contactEmail
         ? this.db
@@ -1436,6 +2262,26 @@ export class MailboxService {
         subject: detail.subject.startsWith("Re:") ? detail.subject : `Re: ${detail.subject}`,
       },
     });
+    this.emitMailboxEvent({
+      type: "draft_created",
+      threadId,
+      accountId: detail.accountId,
+      provider: detail.provider,
+      subject: detail.subject,
+      summary: normalizeWhitespace(rationale, 220),
+      evidenceRefs: [threadId, draftId],
+      payload: {
+        draftId,
+        tone,
+        subject: detail.subject.startsWith("Re:") ? detail.subject : `Re: ${detail.subject}`,
+        hasScheduleSuggestion: Boolean(scheduleSuggestion),
+        primaryContactEmail: primaryContact?.email,
+        primaryContactName: primaryContact?.name,
+        senderName: primaryContact?.name,
+        company: companyFromEmail(primaryContact?.email),
+        projectHint: detail.category === "calendar" ? detail.subject : undefined,
+      },
+    });
 
     return {
       id: draftId,
@@ -1472,6 +2318,9 @@ export class MailboxService {
     );
     const created: MailboxCommitment[] = [];
     const now = Date.now();
+    const primaryContact = detail.participants[0];
+    const resolution = await this.resolveContactIdentity(threadId);
+    const companyScope = this.getPrimaryContactMemory(threadId)?.company;
 
     for (const candidate of candidates.slice(0, 6)) {
       if (existingTitles.has(candidate.title.toLowerCase())) continue;
@@ -1502,6 +2351,8 @@ export class MailboxService {
             dueAt: candidate.dueAt,
           },
         ],
+        contactIdentityId: resolution?.identity?.id,
+        companyId: companyScope,
       });
       created.push({
         id,
@@ -1517,6 +2368,26 @@ export class MailboxService {
     }
 
     this.updateContactOpenCommitments(threadId);
+    if (created.length > 0) {
+      this.emitMailboxEvent({
+        type: "commitments_extracted",
+        threadId,
+        accountId: detail.accountId,
+        provider: detail.provider,
+        subject: detail.subject,
+        summary: `${created.length} commitment${created.length === 1 ? "" : "s"} extracted`,
+        evidenceRefs: [threadId, ...created.map((commitment) => commitment.id)],
+        payload: {
+          commitmentCount: created.length,
+          commitmentTitles: created.map((commitment) => commitment.title),
+          dueDates: created.map((commitment) => commitment.dueAt || null),
+          primaryContactEmail: primaryContact?.email,
+          primaryContactName: primaryContact?.name,
+          senderName: primaryContact?.name,
+          company: companyFromEmail(primaryContact?.email),
+        },
+      });
+    }
     return this.getCommitmentsForThread(threadId);
   }
 
@@ -1622,7 +2493,134 @@ export class MailboxService {
       return this.mapCommitmentRow(updatedRow);
     })();
 
+    if (result) {
+      const accountRow = this.db
+        .prepare("SELECT account_id FROM mailbox_threads WHERE id = ?")
+        .get(result.threadId) as { account_id: string } | undefined;
+      this.emitMailboxEvent({
+        type: "commitment_updated",
+        threadId: result.threadId,
+        accountId: accountRow?.account_id,
+        subject: result.title,
+        summary: `Commitment marked ${state}`,
+        evidenceRefs: [result.id, result.threadId],
+        payload: {
+          commitmentId: result.id,
+          state,
+          title: result.title,
+          dueAt: result.dueAt || null,
+        },
+      });
+    }
+
     return result;
+  }
+
+  async updateCommitmentDetails(
+    commitmentId: string,
+    patch: {
+      title?: string;
+      dueAt?: number | null;
+      ownerEmail?: string | null;
+      state?: MailboxCommitmentState;
+      sourceExcerpt?: string | null;
+    },
+  ): Promise<MailboxCommitment | null> {
+    const now = Date.now();
+    const row = this.db
+      .prepare(
+        `SELECT
+           id,
+           thread_id,
+           message_id,
+           title,
+           due_at,
+           state,
+           owner_email,
+           source_excerpt,
+           metadata_json,
+           created_at,
+           updated_at
+         FROM mailbox_commitments
+         WHERE id = ?`,
+      )
+      .get(commitmentId) as MailboxCommitmentRow | undefined;
+    if (!row) {
+      throw new Error("Commitment not found");
+    }
+
+    const nextTitle = patch.title?.trim() || row.title;
+    const nextDueAt = patch.dueAt === undefined ? row.due_at : patch.dueAt;
+    const nextOwnerEmail =
+      patch.ownerEmail === undefined ? row.owner_email : patch.ownerEmail?.trim() || null;
+    const nextState = patch.state || row.state;
+    const nextSourceExcerpt =
+      patch.sourceExcerpt === undefined ? row.source_excerpt : patch.sourceExcerpt?.trim() || null;
+    const metadata = parseCommitmentMetadata(row.metadata_json);
+
+    if (nextState === "accepted") {
+      const followUpTask = this.ensureFollowUpTaskForCommitment(
+        {
+          ...row,
+          due_at: nextDueAt || null,
+          title: nextTitle,
+          owner_email: nextOwnerEmail || null,
+          source_excerpt: nextSourceExcerpt || null,
+        },
+        metadata,
+      );
+      if (followUpTask && nextDueAt != null) {
+        this.taskRepo.update(followUpTask.id, {
+          dueDate: nextDueAt,
+        });
+      }
+    }
+
+    this.db
+      .prepare(
+        `UPDATE mailbox_commitments
+         SET title = ?, due_at = ?, state = ?, owner_email = ?, source_excerpt = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(nextTitle, nextDueAt || null, nextState, nextOwnerEmail || null, nextSourceExcerpt || null, now, commitmentId);
+
+    const updated = this.db
+      .prepare(
+        `SELECT
+           id,
+           thread_id,
+           message_id,
+           title,
+           due_at,
+           state,
+           owner_email,
+           source_excerpt,
+           metadata_json,
+           created_at,
+           updated_at
+         FROM mailbox_commitments
+         WHERE id = ?`,
+      )
+      .get(commitmentId) as MailboxCommitmentRow | undefined;
+    if (!updated) return null;
+
+    this.updateContactOpenCommitments(updated.thread_id);
+    const mapped = this.mapCommitmentRow(updated);
+    this.emitMailboxEvent({
+      type: "commitment_updated",
+      threadId: updated.thread_id,
+      subject: mapped.title,
+      summary: `Commitment updated: ${mapped.title}`,
+      evidenceRefs: [mapped.id, updated.thread_id],
+      payload: {
+        commitmentId: mapped.id,
+        title: mapped.title,
+        state: mapped.state,
+        dueAt: mapped.dueAt || null,
+        ownerEmail: mapped.ownerEmail || null,
+      },
+    });
+    return mapped;
   }
 
   async proposeCleanup(limit = 20): Promise<MailboxActionProposal[]> {
@@ -1647,6 +2645,7 @@ export class MailboxService {
            unread_count,
            message_count,
            last_message_at,
+           sensitive_content_json,
            classification_state
          FROM mailbox_threads
          WHERE cleanup_candidate = 1 OR (handled = 1 AND category IN ('promotions', 'updates'))
@@ -1695,6 +2694,7 @@ export class MailboxService {
            unread_count,
            message_count,
            last_message_at,
+           sensitive_content_json,
            classification_state
          FROM mailbox_threads
          WHERE needs_reply = 1 AND stale_followup = 1
@@ -1752,6 +2752,128 @@ export class MailboxService {
     };
   }
 
+  async resolveContactIdentity(threadId: string): Promise<ContactIdentityResolution | null> {
+    const detail = await this.getThreadCore(threadId);
+    if (!detail) return null;
+
+    const primary = detail.participants[0] || null;
+    const workspaceId = this.resolveThreadWorkspaceId(detail.accountId);
+    const contactMemory = this.getPrimaryContactMemory(threadId);
+    if (!primary?.email || !workspaceId) {
+      return {
+        identity: null,
+        confidence: 0,
+        reasonCodes: ["missing_primary_contact"],
+        candidates: [],
+      };
+    }
+
+    const phoneHints = this.collectPhoneHints({
+      primaryEmail: primary.email,
+      contactMemory,
+      messages: detail.messages,
+      snippet: detail.snippet,
+    });
+
+    return this.contactIdentityService.resolveMailboxContact({
+      workspaceId,
+      email: primary.email,
+      displayName: primary.name,
+      companyHint: contactMemory?.company || companyFromEmail(primary.email),
+      phoneHints,
+      crmHints: contactMemory?.crmLinks || [],
+      learnedFacts: contactMemory?.learnedFacts || [],
+    });
+  }
+
+  getContactIdentity(identityId: string): ContactIdentity | null {
+    return this.contactIdentityService.getIdentity(identityId);
+  }
+
+  listContactIdentities(workspaceId?: string): ContactIdentity[] {
+    return this.contactIdentityService.listIdentities(workspaceId || this.resolveDefaultWorkspaceId());
+  }
+
+  listIdentityCandidates(
+    workspaceId?: string,
+    status?: ContactIdentityCandidate["status"],
+  ): ContactIdentityCandidate[] {
+    return this.contactIdentityService.listCandidates(workspaceId || this.resolveDefaultWorkspaceId(), status);
+  }
+
+  confirmIdentityLink(candidateId: string): ContactIdentityCandidate | null {
+    return this.contactIdentityService.confirmCandidate(candidateId);
+  }
+
+  rejectIdentityLink(candidateId: string): ContactIdentityCandidate | null {
+    return this.contactIdentityService.rejectCandidate(candidateId);
+  }
+
+  unlinkIdentityHandle(handleId: string): boolean {
+    return this.contactIdentityService.unlinkHandle(handleId);
+  }
+
+  searchIdentityLinkTargets(workspaceId: string, query: string, limit?: number): ContactIdentitySearchResult[] {
+    return this.contactIdentityService.searchLinkTargets(workspaceId, query, limit);
+  }
+
+  linkIdentityHandle(input: {
+    workspaceId: string;
+    contactIdentityId: string;
+    handleType: ContactIdentityHandleType;
+    normalizedValue: string;
+    displayValue: string;
+    source?: "mailbox" | "gateway" | "manual" | "crm" | "kg";
+    channelId?: string;
+    channelType?: string;
+    channelUserId?: string;
+  }): ContactIdentity | null {
+    const handle = this.contactIdentityService.linkManualHandle(input);
+    return handle ? this.contactIdentityService.getIdentity(input.contactIdentityId) : null;
+  }
+
+  getIdentityCoverageStats(workspaceId?: string): ContactIdentityCoverageStats {
+    return this.contactIdentityService.getCoverageStats(workspaceId || this.resolveDefaultWorkspaceId());
+  }
+
+  getChannelPreferenceSummary(contactIdentityId: string): ChannelPreferenceSummary {
+    return this.contactIdentityService.getChannelPreferenceSummary(contactIdentityId);
+  }
+
+  async getReplyTargets(threadId: string): Promise<ContactIdentityReplyTarget[]> {
+    const contactResolution = await this.resolveContactIdentity(threadId);
+    return contactResolution?.identity?.id
+      ? this.contactIdentityService.getReplyTargets(contactResolution.identity.id)
+      : [];
+  }
+
+  async getRelationshipTimeline(query: RelationshipTimelineQuery): Promise<RelationshipTimelineEvent[]> {
+    if (query.contactIdentityId) {
+      return this.contactIdentityService.getTimeline(query);
+    }
+    if (query.threadId) {
+      const resolution = await this.resolveContactIdentity(query.threadId);
+      if (!resolution?.identity?.id) return [];
+      return this.contactIdentityService.getTimeline({
+        ...query,
+        contactIdentityId: resolution.identity.id,
+      });
+    }
+    if (query.companyHint) {
+      const workspaceId = this.resolveDefaultWorkspaceId();
+      const match = workspaceId
+        ? this.contactIdentityService.findIdentityByCompanyHint(workspaceId, query.companyHint)
+        : null;
+      if (match?.id) {
+        return this.contactIdentityService.getTimeline({
+          ...query,
+          contactIdentityId: match.id,
+        });
+      }
+    }
+    return [];
+  }
+
   async researchContact(threadId: string): Promise<MailboxResearchResult | null> {
     const detail = await this.getThreadCore(threadId);
     if (!detail) return null;
@@ -1760,12 +2882,36 @@ export class MailboxService {
     const domain = primary?.email?.split("@")[1];
     const company = companyFromEmail(primary?.email);
     const contactMemory = this.getPrimaryContactMemory(threadId);
+    const resolution = await this.resolveContactIdentity(threadId);
+    const identity = resolution?.identity || null;
+    const channelPreference =
+      identity?.id && (identity.handles.some((handle) => handle.handleType !== "email") || (resolution?.confidence || 0) >= 0.86)
+        ? this.contactIdentityService.getChannelPreferenceSummary(identity.id)
+        : undefined;
+    const unifiedTimeline =
+      identity?.id && (identity.handles.some((handle) => handle.handleType !== "email") || (resolution?.confidence || 0) >= 0.86)
+        ? this.contactIdentityService.getTimeline({
+            threadId,
+            contactIdentityId: identity.id,
+            limit: 12,
+          })
+        : [];
+    const scopedRelationshipItems =
+      identity?.id || contactMemory?.company
+        ? RelationshipMemoryService.listItems({
+            includeDone: false,
+            limit: 8,
+            contactIdentityId: identity?.id,
+            companyId: contactMemory?.company,
+          })
+        : [];
     const relationshipSummary = [
       contactMemory?.responseTendency,
       typeof contactMemory?.averageResponseHours === "number"
         ? `Average response time: ${contactMemory.averageResponseHours.toFixed(1)}h`
         : null,
       contactMemory?.openCommitments ? `${contactMemory.openCommitments} open commitment(s)` : null,
+      scopedRelationshipItems[0]?.text ? `Memory: ${scopedRelationshipItems[0].text}` : null,
     ]
       .filter((entry): entry is string => Boolean(entry))
       .join(" · ");
@@ -1776,7 +2922,7 @@ export class MailboxService {
       !detail.summary ? "Generate an AI summary before replying." : null,
     ].filter((entry): entry is string => Boolean(entry));
 
-    return {
+    const result: MailboxResearchResult = {
       primaryContact: primary,
       company,
       domain,
@@ -1793,7 +2939,44 @@ export class MailboxService {
       recentSubjects: contactMemory?.recentSubjects,
       recentOutboundExample: contactMemory?.recentOutboundExample,
       nextSteps,
+      relatedEntities: contactMemory?.learnedFacts?.slice(0, 3),
+      contactIdentityId: identity?.id,
+      identityConfidence: resolution?.confidence,
+      linkedChannels: identity?.handles
+        .filter((handle) => handle.handleType !== "email")
+        .map((handle) => ({
+          handleId: handle.id,
+          handleType: handle.handleType,
+          label: handle.displayValue,
+          channelType: handle.channelType,
+        })),
+      channelPreference,
+      unifiedTimeline,
+      identityCandidates: (resolution?.candidates || []).slice(0, 6),
+      replyTargets: identity?.id ? this.contactIdentityService.getReplyTargets(identity.id) : [],
     };
+    this.emitMailboxEvent({
+      type: "contact_researched",
+      threadId,
+      accountId: detail.accountId,
+      provider: detail.provider,
+      subject: detail.subject,
+      summary: relationshipSummary || company || primary?.email || "Contact researched",
+      evidenceRefs: [threadId],
+      payload: {
+        company,
+        domain,
+        crmHintCount: result.crmHints.length,
+        learnedFactCount: result.learnedFacts.length,
+        relatedEntities: result.relatedEntities || [],
+        primaryContactEmail: primary?.email,
+        primaryContactName: primary?.name,
+        senderName: primary?.name,
+        contactIdentityId: identity?.id,
+        linkedChannelCount: result.linkedChannels?.length || 0,
+      },
+    });
+    return result;
   }
 
   async applyAction(input: MailboxApplyActionInput): Promise<{ success: boolean; action: string; threadId?: string }> {
@@ -1811,6 +2994,7 @@ export class MailboxService {
     if (!thread) {
       throw new Error("Mailbox thread not found");
     }
+    const primaryContact = thread.participants[0];
 
     switch (input.type) {
       case "archive":
@@ -1842,6 +3026,29 @@ export class MailboxService {
     if (input.proposalId) {
       this.updateProposalStatus(input.proposalId, "applied");
     }
+
+    this.emitMailboxEvent({
+      type: "action_applied",
+      threadId,
+      accountId: thread.accountId,
+      provider: thread.provider,
+      subject: thread.subject,
+      summary: `Action applied: ${input.type}`,
+      evidenceRefs: [threadId, input.proposalId || input.draftId || input.commitmentId].filter(
+        (entry): entry is string => Boolean(entry),
+      ),
+      payload: {
+        actionType: input.type,
+        proposalId: input.proposalId || null,
+        draftId: input.draftId || null,
+        commitmentId: input.commitmentId || null,
+        label: input.label || null,
+        primaryContactEmail: primaryContact?.email,
+        primaryContactName: primaryContact?.name,
+        senderName: primaryContact?.name,
+        company: companyFromEmail(primaryContact?.email),
+      },
+    });
 
     return {
       success: true,
@@ -2663,10 +3870,7 @@ export class MailboxService {
         }
       | undefined;
     const isNewThread = !existing;
-    const keepExistingClassification =
-      existing?.classification_state === "classified" &&
-      existing.classification_fingerprint === fingerprint &&
-      existing.classification_prompt_version === MAILBOX_CLASSIFIER_PROMPT_VERSION;
+    const keepExistingClassification = existing?.classification_state === "classified";
     const preserveBackfillState =
       !keepExistingClassification &&
       existing?.classification_state === "backfill_pending" &&
@@ -2677,13 +3881,18 @@ export class MailboxService {
         ? "backfill_pending"
         : "pending";
     const classificationValues = keepExistingClassification || preserveBackfillState ? existing : null;
-    const shouldClassify = !existing || existing.classification_fingerprint !== fingerprint;
+    const shouldClassify = !existing || existing.classification_state !== "classified";
+    const sensitiveContent = this.createThreadSensitiveContent([
+      thread.subject,
+      thread.snippet,
+      ...thread.messages.map((message) => message.bodyHtml ? stripHtml(message.bodyHtml) : message.body),
+    ]);
 
     this.db
       .prepare(
         `INSERT INTO mailbox_threads
-          (id, account_id, provider_thread_id, provider, subject, snippet, participants_json, labels_json, category, priority_score, urgency_score, needs_reply, stale_followup, cleanup_candidate, handled, unread_count, message_count, last_message_at, last_synced_at, classification_state, classification_fingerprint, classification_model_key, classification_prompt_version, classification_confidence, classification_updated_at, classification_error, classification_json, metadata_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, account_id, provider_thread_id, provider, subject, snippet, participants_json, labels_json, category, priority_score, urgency_score, needs_reply, stale_followup, cleanup_candidate, handled, unread_count, message_count, last_message_at, last_synced_at, classification_state, classification_fingerprint, classification_model_key, classification_prompt_version, classification_confidence, classification_updated_at, classification_error, classification_json, sensitive_content_json, metadata_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            account_id = excluded.account_id,
            provider_thread_id = excluded.provider_thread_id,
@@ -2711,6 +3920,7 @@ export class MailboxService {
            classification_updated_at = excluded.classification_updated_at,
            classification_error = excluded.classification_error,
            classification_json = excluded.classification_json,
+           sensitive_content_json = excluded.sensitive_content_json,
            metadata_json = excluded.metadata_json,
            updated_at = excluded.updated_at`,
       )
@@ -2742,6 +3952,7 @@ export class MailboxService {
         classificationValues?.classification_updated_at || null,
         classificationValues?.classification_error || null,
         classificationValues?.classification_json || null,
+        JSON.stringify(sensitiveContent),
         JSON.stringify({
           priorityBand: priorityBandFromScore(classificationValues?.priority_score ?? thread.priorityScore),
         }),
@@ -3131,6 +4342,32 @@ export class MailboxService {
       category: result.category,
     });
     this.upsertPrimaryContact({ ...detail, needsReply: result.needsReply } as unknown as NormalizedThreadInput);
+    const primaryContact = detail.participants[0];
+    this.emitMailboxEvent({
+      type: "thread_classified",
+      threadId,
+      accountId: detail.accountId,
+      provider: detail.provider,
+      subject: detail.subject,
+      summary: result.rationale || `Classified as ${result.category}`,
+      evidenceRefs: [threadId, ...detail.messages.slice(-2).map((message) => message.id)],
+      payload: {
+        category: result.category,
+        needsReply: result.needsReply,
+        priorityScore: result.priorityScore,
+        urgencyScore: result.urgencyScore,
+        staleFollowup: result.staleFollowup,
+        cleanupCandidate: result.cleanupCandidate,
+        handled: result.handled,
+        confidence: result.confidence,
+        labels: result.labels || [],
+        classificationFingerprint: fingerprint,
+        primaryContactEmail: primaryContact?.email,
+        primaryContactName: primaryContact?.name,
+        senderName: primaryContact?.name,
+        company: companyFromEmail(primaryContact?.email),
+      },
+    });
     return true;
   }
 
@@ -3255,6 +4492,11 @@ export class MailboxService {
     if (!primary?.email) return;
     const now = Date.now();
     const company = companyFromEmail(primary.email);
+    const sensitiveContent = this.createThreadSensitiveContent([
+      thread.subject,
+      thread.snippet,
+      ...thread.messages.map((message) => message.bodyHtml ? stripHtml(message.bodyHtml) : message.body),
+    ]);
     const learnedFacts = [
       primary.name ? `Name: ${primary.name}` : null,
       company ? `Company: ${company}` : null,
@@ -3263,12 +4505,20 @@ export class MailboxService {
     this.db
       .prepare(
         `INSERT INTO mailbox_contacts
-          (id, account_id, email, name, company, role, crm_links_json, learned_facts_json, response_tendency, last_interaction_at, open_commitments, updated_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, account_id, email, name, company, role, encryption_preference, policy_flags_json, crm_links_json, learned_facts_json, response_tendency, last_interaction_at, open_commitments, updated_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(email) DO UPDATE SET
            account_id = excluded.account_id,
            name = COALESCE(excluded.name, mailbox_contacts.name),
            company = COALESCE(excluded.company, mailbox_contacts.company),
+           encryption_preference = CASE
+             WHEN mailbox_contacts.encryption_preference IS NULL THEN excluded.encryption_preference
+             ELSE mailbox_contacts.encryption_preference
+           END,
+           policy_flags_json = CASE
+             WHEN mailbox_contacts.policy_flags_json IS NULL THEN excluded.policy_flags_json
+             ELSE mailbox_contacts.policy_flags_json
+           END,
            learned_facts_json = excluded.learned_facts_json,
            last_interaction_at = excluded.last_interaction_at,
            updated_at = excluded.updated_at`,
@@ -3280,6 +4530,8 @@ export class MailboxService {
         primary.name || null,
         company || null,
         null,
+        sensitiveContent.hasSensitiveContent ? "preferred" : null,
+        JSON.stringify(sensitiveContent.hasSensitiveContent ? ["sensitive_content"] : []),
         JSON.stringify([]),
         JSON.stringify(learnedFacts),
         thread.needsReply ? "awaiting_reply" : "fyi",
@@ -3299,7 +4551,6 @@ export class MailboxService {
            key_asks_json,
            extracted_questions_json,
            suggested_next_action,
-           confidence,
            updated_at
          FROM mailbox_summaries
          WHERE thread_id = ?`,
@@ -3416,6 +4667,8 @@ export class MailboxService {
            name,
            company,
            role,
+           encryption_preference,
+           policy_flags_json,
            crm_links_json,
            learned_facts_json,
            response_tendency,
@@ -3430,6 +4683,38 @@ export class MailboxService {
       ...this.mapContactRow(row),
       ...this.getContactInsights(thread.account_id, email),
     };
+  }
+
+  private collectPhoneHints(input: {
+    primaryEmail?: string;
+    contactMemory?: MailboxContactMemory | null;
+    messages: MailboxMessage[];
+    snippet?: string;
+  }): string[] {
+    const candidates = new Set<string>();
+    const pushPhone = (value?: string | null) => {
+      const digits = String(value || "").replace(/[^\d]/g, "");
+      if (digits.length >= 8) candidates.add(digits);
+    };
+
+    for (const hint of input.contactMemory?.crmLinks || []) {
+      pushPhone(hint);
+    }
+    for (const fact of input.contactMemory?.learnedFacts || []) {
+      for (const match of fact.match(/\+?\d[\d\s().-]{7,}\d/g) || []) {
+        pushPhone(match);
+      }
+    }
+    for (const body of [
+      input.snippet,
+      ...input.messages.map((message) => message.body),
+      ...input.messages.map((message) => message.snippet),
+    ]) {
+      for (const match of String(body || "").match(/\+?\d[\d\s().-]{7,}\d/g) || []) {
+        pushPhone(match);
+      }
+    }
+    return [...candidates];
   }
 
   private getContactInsights(
@@ -3571,6 +4856,7 @@ export class MailboxService {
            unread_count,
            message_count,
            last_message_at,
+           sensitive_content_json,
            classification_state
          FROM mailbox_threads
          WHERE id = ?`,
@@ -3580,6 +4866,359 @@ export class MailboxService {
     return {
       ...this.mapThreadRow(row, this.getSummaryForThread(threadId) || undefined),
       messages: this.getMessagesForThread(threadId),
+    };
+  }
+
+  private resolveThreadWorkspaceId(_accountId?: string): string | undefined {
+    return this.resolveDefaultWorkspaceId();
+  }
+
+  private buildMissionControlIssueTitle(detail: MailboxThreadDetail): string {
+    const subject = normalizeWhitespace(detail.subject || "Inbox handoff", 120);
+    const primary = detail.research?.primaryContact?.name || detail.participants[0]?.name;
+    return primary ? `${subject} (${primary})` : subject;
+  }
+
+  private buildMissionControlIssueSummary(
+    detail: MailboxThreadDetail,
+    sensitiveContentRedacted: boolean,
+  ): string {
+    const primaryContact = detail.research?.primaryContact || detail.participants[0];
+    const lines = [
+      `Inbox handoff from ${primaryContact?.name || primaryContact?.email || "unknown sender"}.`,
+      detail.research?.company ? `Company hint: ${detail.research.company}.` : null,
+      `Thread subject: ${detail.subject || "Untitled thread"}.`,
+      detail.summary?.summary
+        ? `Summary: ${stripMailboxSummaryHtmlArtifacts(detail.summary.summary)}`
+        : detail.snippet
+          ? `Summary: ${stripMailboxSummaryHtmlArtifacts(detail.snippet)}`
+          : null,
+      detail.commitments.length
+        ? `Open commitments: ${detail.commitments
+            .map((commitment) =>
+              commitment.dueAt
+                ? `${commitment.title} (due ${formatMailboxDateTime(commitment.dueAt)})`
+                : commitment.title,
+            )
+            .join(" · ")}`
+        : null,
+      detail.research?.nextSteps?.length
+        ? `Mailbox next steps: ${detail.research.nextSteps.join(" · ")}`
+        : null,
+      sensitiveContentRedacted
+        ? "Sensitive content detected. Review mailbox evidence refs instead of relying on raw excerpts."
+        : this.buildMailboxExcerpt(detail),
+    ];
+    return lines.filter((entry): entry is string => Boolean(entry)).join("\n\n");
+  }
+
+  private buildMailboxExcerpt(detail: MailboxThreadDetail): string | null {
+    const latestRelevant = [...detail.messages]
+      .sort((a, b) => b.receivedAt - a.receivedAt)
+      .find((message) => normalizeWhitespace(message.body || message.snippet, 220).length > 0);
+    if (!latestRelevant) return null;
+    return `Latest message excerpt: ${normalizeWhitespace(
+      stripMailboxSummaryHtmlArtifacts(latestRelevant.body || latestRelevant.snippet),
+      220,
+    )}`;
+  }
+
+  private buildMailboxEvidenceRefs(detail: MailboxThreadDetail): CompanyEvidenceRef[] {
+    const refs: CompanyEvidenceRef[] = [
+      { type: "mailbox_thread", id: detail.id, label: detail.subject || "mailbox thread" },
+    ];
+    for (const message of detail.messages.slice(0, 3)) {
+      refs.push({
+        type: "mailbox_message",
+        id: message.id,
+        label: message.direction === "outgoing" ? "sent email" : "received email",
+      });
+    }
+    for (const commitment of detail.commitments.slice(0, 3)) {
+      refs.push({
+        type: "mailbox_commitment",
+        id: commitment.id,
+        label: commitment.title,
+      });
+    }
+    return refs;
+  }
+
+  private buildMissionControlCompanyCandidates(
+    detail: MailboxThreadDetail,
+  ): MailboxCompanyCandidate[] {
+    const companies = this.controlPlaneCore.listCompanies();
+    const email = detail.research?.primaryContact?.email || detail.participants[0]?.email;
+    const domain = (detail.research?.domain || email?.split("@")[1] || "").toLowerCase();
+    const companyHint = (
+      detail.research?.company ||
+      detail.contactMemory?.company ||
+      companyFromEmail(email) ||
+      ""
+    ).toLowerCase();
+    const relatedText = [
+      detail.subject,
+      detail.summary?.summary,
+      detail.research?.relatedEntities?.join(" "),
+      detail.research?.recommendedQueries?.join(" "),
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+
+    const scored = companies
+      .map((company) => {
+        let score = 0;
+        const reasons: string[] = [];
+        const name = company.name.toLowerCase();
+        const slug = company.slug.toLowerCase();
+        if (companyHint && (name.includes(companyHint) || companyHint.includes(name))) {
+          score += 0.45;
+          reasons.push("contact company matches company name");
+        }
+        if (domain) {
+          const domainLabel = domain.split(".")[0] || domain;
+          if (domainLabel === slug || name.includes(domainLabel) || slug.includes(domainLabel)) {
+            score += 0.32;
+            reasons.push("sender domain matches company slug");
+          }
+        }
+        if (relatedText && (relatedText.includes(name) || relatedText.includes(slug))) {
+          score += 0.22;
+          reasons.push("thread context references the company");
+        }
+        if (company.isDefault) {
+          score += 0.05;
+        }
+        return {
+          companyId: company.id,
+          name: company.name,
+          slug: company.slug,
+          confidence: Math.max(0, Math.min(1, score)),
+          reason: reasons[0] || "manual selection recommended",
+          defaultWorkspaceId: company.defaultWorkspaceId,
+        } satisfies MailboxCompanyCandidate;
+      })
+      .filter((candidate) => candidate.confidence > 0.05)
+      .sort((a, b) => b.confidence - a.confidence);
+
+    return scored.slice(0, 5);
+  }
+
+  private buildMissionControlOperatorRecommendations(
+    detail: MailboxThreadDetail,
+    companyId?: string,
+  ): MailboxOperatorRecommendation[] {
+    const companyRoles = companyId
+      ? this.agentRoleRepo.findByCompanyId(companyId, false)
+      : this.agentRoleRepo.findAll(false);
+    const roles = companyRoles.filter((role) => role.isActive !== false);
+    const text = [
+      detail.subject,
+      detail.summary?.summary,
+      detail.snippet,
+      detail.research?.relationshipSummary,
+      detail.research?.nextSteps?.join(" "),
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+
+    const desiredKind =
+      detail.commitments.length > 0 ||
+      detail.priorityBand === "critical" ||
+      /\b(support|customer|service|refund|issue|outage|incident|escalation|complaint|risk)\b/.test(text)
+        ? "customer_ops"
+        : /\b(sales|partnership|pipeline|candidate|recruit|hiring|outbound|lead)\b/.test(text)
+          ? "growth"
+          : /\b(plan|planning|scope|roadmap|project|blocker|spec|milestone)\b/.test(text)
+            ? "planner"
+            : "founder_office";
+
+    const scored = roles
+      .map((role) => {
+        const roleText = `${role.name} ${role.displayName} ${role.operatorMandate || ""}`.toLowerCase();
+        let roleKind: MailboxOperatorRecommendation["roleKind"] = "other";
+        let score = 0.2;
+        if (/\bcustomer|support|ops\b/.test(roleText)) {
+          roleKind = "customer_ops";
+          score += desiredKind === "customer_ops" ? 0.55 : 0.1;
+        } else if (/\bgrowth|sales|recruit|partnership\b/.test(roleText)) {
+          roleKind = "growth";
+          score += desiredKind === "growth" ? 0.55 : 0.1;
+        } else if (/\bplanner|strategy|program|project\b/.test(roleText)) {
+          roleKind = "planner";
+          score += desiredKind === "planner" ? 0.55 : 0.1;
+        } else if (/\bfounder|office\b/.test(roleText)) {
+          roleKind = "founder_office";
+          score += desiredKind === "founder_office" ? 0.55 : 0.1;
+        }
+        if (Array.isArray(role.allowedLoopTypes) && role.allowedLoopTypes.includes("execution")) {
+          score += 0.08;
+        }
+        if (Array.isArray(role.outputTypes) && role.outputTypes.includes("work_order")) {
+          score += 0.08;
+        }
+        return {
+          agentRoleId: role.id,
+          displayName: role.displayName,
+          companyId: role.companyId,
+          confidence: Math.max(0, Math.min(1, score)),
+          reason:
+            desiredKind === roleKind
+              ? `recommended for ${desiredKind.replace("_", " ")} inbox work`
+              : "available operator for selected company",
+          roleKind,
+        } satisfies MailboxOperatorRecommendation;
+      })
+      .filter((entry) => entry.confidence > 0.15)
+      .sort((a, b) => b.confidence - a.confidence);
+
+    return scored.slice(0, 5);
+  }
+
+  private buildMailboxHandoffOutputContract(
+    companyId: string,
+    operatorRoleId: string,
+    detail: MailboxThreadDetail,
+  ): CompanyOutputContract {
+    return {
+      companyId,
+      operatorRoleId,
+      loopType: "execution",
+      outputType: "work_order",
+      valueReason: "Inbox thread handed off into company operations",
+      reviewRequired: detail.sensitiveContent?.hasSensitiveContent === true,
+      reviewReason: detail.sensitiveContent?.hasSensitiveContent ? "customer_risk" : undefined,
+      evidenceRefs: this.buildMailboxEvidenceRefs(detail),
+      companyPriority:
+        detail.priorityBand === "critical"
+          ? "critical"
+          : detail.priorityBand === "high"
+            ? "high"
+            : "normal",
+      triggerReason: detail.needsReply ? "needs_reply" : "reference_handoff",
+      expectedOutputType: "status_digest",
+    };
+  }
+
+  private mapMailboxPriorityToIssuePriority(band: MailboxPriorityBand): number {
+    switch (band) {
+      case "critical":
+        return 1;
+      case "high":
+        return 2;
+      case "medium":
+        return 3;
+      default:
+        return 4;
+    }
+  }
+
+  private persistMissionControlHandoff(input: {
+    threadId: string;
+    workspaceId: string;
+    companyId: string;
+    companyName: string;
+    operatorRoleId: string;
+    operatorDisplayName: string;
+    issueId: string;
+    issueTitle: string;
+    latestOutcome?: string;
+    latestWakeAt?: number;
+  }): MailboxMissionControlHandoffRecord {
+    const id = randomUUID();
+    const now = Date.now();
+    this.db
+      .prepare(
+        `INSERT INTO mailbox_mission_control_handoffs (
+           id,
+           thread_id,
+           workspace_id,
+           company_id,
+           company_name,
+           operator_role_id,
+           operator_display_name,
+           issue_id,
+           issue_title,
+           source,
+           latest_outcome,
+           latest_wake_at,
+           created_at,
+           updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'mailbox_handoff', ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        input.threadId,
+        input.workspaceId,
+        input.companyId,
+        input.companyName,
+        input.operatorRoleId,
+        input.operatorDisplayName,
+        input.issueId,
+        input.issueTitle,
+        input.latestOutcome || null,
+        input.latestWakeAt || null,
+        now,
+        now,
+      );
+    const row = this.db
+      .prepare(
+        `SELECT * FROM mailbox_mission_control_handoffs WHERE id = ?`,
+      )
+      .get(id) as MailboxMissionControlHandoffRow;
+    return this.mapMissionControlHandoffRow(row);
+  }
+
+  private findActiveMissionControlHandoff(
+    threadId: string,
+    companyId: string,
+    operatorRoleId: string,
+  ): MailboxMissionControlHandoffRecord | null {
+    const rows = this.db
+      .prepare(
+        `SELECT *
+         FROM mailbox_mission_control_handoffs
+         WHERE thread_id = ?
+           AND company_id = ?
+           AND operator_role_id = ?
+         ORDER BY updated_at DESC`,
+      )
+      .all(threadId, companyId, operatorRoleId) as MailboxMissionControlHandoffRow[];
+    for (const row of rows) {
+      const record = this.mapMissionControlHandoffRow(row);
+      if (record.issueStatus === "open") return record;
+    }
+    return null;
+  }
+
+  private mapMissionControlHandoffRow(
+    row: MailboxMissionControlHandoffRow,
+  ): MailboxMissionControlHandoffRecord {
+    const issue = this.controlPlaneCore.getIssue(row.issue_id);
+    const issueStatus: MailboxMissionControlHandoffRecord["issueStatus"] =
+      issue?.status === "done"
+        ? "done"
+        : issue?.status === "cancelled"
+          ? "cancelled"
+          : "open";
+    return {
+      id: row.id,
+      threadId: row.thread_id,
+      workspaceId: row.workspace_id,
+      companyId: row.company_id,
+      companyName: row.company_name,
+      operatorRoleId: row.operator_role_id,
+      operatorDisplayName: row.operator_display_name,
+      issueId: row.issue_id,
+      issueTitle: row.issue_title,
+      issueStatus,
+      source: "mailbox_handoff",
+      latestOutcome: row.latest_outcome || undefined,
+      latestWakeAt: row.latest_wake_at || undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
     };
   }
 
@@ -4017,6 +5656,7 @@ export class MailboxService {
   }
 
   private mapThreadRow(row: MailboxThreadRow, summary?: MailboxSummaryCard | null): MailboxThreadListItem {
+    const sensitiveContent = this.readThreadSensitiveContent(row);
     return {
       id: row.id,
       accountId: row.account_id,
@@ -4037,6 +5677,7 @@ export class MailboxService {
       unreadCount: row.unread_count,
       messageCount: row.message_count,
       lastMessageAt: row.last_message_at,
+      hasSensitiveContent: sensitiveContent.hasSensitiveContent,
       summary: summary ?? undefined,
       classificationState: row.classification_state,
     };
@@ -4067,12 +5708,13 @@ export class MailboxService {
   }
 
   private mapSummaryRow(row: MailboxSummaryRow): MailboxSummaryCard {
+    const raw = row.summary_text;
+    const cleaned = stripMailboxSummaryHtmlArtifacts(raw);
     return {
-      summary: row.summary_text,
+      summary: cleaned.trim() ? cleaned : raw,
       keyAsks: parseJsonArray<string>(row.key_asks_json),
       extractedQuestions: parseJsonArray<string>(row.extracted_questions_json),
       suggestedNextAction: row.suggested_next_action,
-      confidence: row.confidence,
       updatedAt: row.updated_at,
     };
   }
@@ -4201,6 +5843,8 @@ export class MailboxService {
       name: row.name || undefined,
       company: row.company || undefined,
       role: row.role || undefined,
+      encryptionPreference: row.encryption_preference || undefined,
+      policyFlags: parseJsonArray<string>(row.policy_flags_json),
       crmLinks: parseJsonArray<string>(row.crm_links_json),
       learnedFacts: parseJsonArray<string>(row.learned_facts_json),
       responseTendency: row.response_tendency || undefined,
