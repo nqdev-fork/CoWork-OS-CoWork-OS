@@ -468,7 +468,7 @@ Expected behavior:
 - **Multi-Channel**: WhatsApp, Telegram, Discord, Slack, iMessage integration
 - **Multi-Provider**: 30+ LLM providers and compatible gateways, including Claude, GPT, Gemini, Bedrock, OpenRouter, and Ollama
 - **Local-First**: Your data stays on your machine, BYOK model
-- **Extensible**: MCP support (Client, Host, Registry), 139 built-in skills, and plugin packs
+- **Extensible**: MCP support (Client, Host, Registry), 137 built-in skills, and plugin packs
 
 ### Feature Highlights
 - Real Office document creation (Excel, Word, PDF, PowerPoint)
