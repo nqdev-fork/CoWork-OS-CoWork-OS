@@ -30,7 +30,60 @@ export type MailboxProposalStatus = "suggested" | "approved" | "applied" | "dism
 
 export type MailboxCommitmentState = "suggested" | "accepted" | "done" | "dismissed";
 
+export type MailboxAutomationKind = "rule" | "schedule" | "reminder";
+
+export type MailboxAutomationStatus = "active" | "paused" | "error" | "deleted";
+
+export type MailboxConditionOperator =
+  | "equals"
+  | "not_equals"
+  | "contains"
+  | "not_contains"
+  | "matches"
+  | "starts_with"
+  | "ends_with"
+  | "gt"
+  | "lt";
+
 export type MailboxDirection = "incoming" | "outgoing";
+
+export type ContactIdentityHandleType =
+  | "email"
+  | "slack_user_id"
+  | "teams_user_id"
+  | "whatsapp_e164"
+  | "signal_e164"
+  | "imessage_handle"
+  | "crm_contact_id";
+
+export type ContactIdentitySuggestionStatus =
+  | "suggested"
+  | "confirmed"
+  | "rejected"
+  | "auto_linked";
+
+export type RelationshipTimelineSource =
+  | "email"
+  | "slack"
+  | "teams"
+  | "whatsapp"
+  | "signal"
+  | "imessage"
+  | "crm"
+  | "commitment"
+  | "automation"
+  | "handoff";
+
+export type MailboxEventType =
+  | "sync_completed"
+  | "thread_classified"
+  | "thread_summarized"
+  | "draft_created"
+  | "commitments_extracted"
+  | "commitment_updated"
+  | "action_applied"
+  | "contact_researched"
+  | "mission_control_handoff_created";
 
 export interface MailboxParticipant {
   name?: string;
@@ -83,7 +136,6 @@ export interface MailboxSummaryCard {
   keyAsks: string[];
   extractedQuestions: string[];
   suggestedNextAction: string;
-  confidence: number;
   updatedAt: number;
 }
 
@@ -132,6 +184,8 @@ export interface MailboxContactMemory {
   name?: string;
   company?: string;
   role?: string;
+  encryptionPreference?: "required" | "preferred" | "optional";
+  policyFlags?: string[];
   crmLinks: string[];
   learnedFacts: string[];
   responseTendency?: string;
@@ -144,6 +198,136 @@ export interface MailboxContactMemory {
   recentSubjects?: string[];
   styleSignals?: string[];
   recentOutboundExample?: string;
+}
+
+export interface ContactIdentityHandle {
+  id: string;
+  contactIdentityId: string;
+  workspaceId: string;
+  handleType: ContactIdentityHandleType;
+  normalizedValue: string;
+  displayValue: string;
+  source: "mailbox" | "gateway" | "manual" | "crm" | "kg";
+  channelId?: string;
+  channelType?: string;
+  channelUserId?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ContactIdentity {
+  id: string;
+  workspaceId: string;
+  displayName: string;
+  primaryEmail?: string;
+  companyHint?: string;
+  kgEntityId?: string;
+  confidence: number;
+  createdAt: number;
+  updatedAt: number;
+  handles: ContactIdentityHandle[];
+}
+
+export interface ContactIdentityCandidate {
+  id: string;
+  workspaceId: string;
+  contactIdentityId: string;
+  handleType: ContactIdentityHandleType;
+  normalizedValue: string;
+  displayValue: string;
+  source: "mailbox" | "gateway" | "manual" | "crm" | "kg";
+  sourceLabel: string;
+  channelId?: string;
+  channelType?: string;
+  channelUserId?: string;
+  confidence: number;
+  status: ContactIdentitySuggestionStatus;
+  reasonCodes: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ContactIdentityResolution {
+  identity: ContactIdentity | null;
+  confidence: number;
+  reasonCodes: string[];
+  candidates: ContactIdentityCandidate[];
+}
+
+export interface ContactIdentitySearchResult {
+  id: string;
+  workspaceId: string;
+  handleType: ContactIdentityHandleType;
+  normalizedValue: string;
+  displayValue: string;
+  source: "mailbox" | "gateway" | "manual" | "crm" | "kg";
+  sourceLabel: string;
+  channelId?: string;
+  channelType?: string;
+  channelUserId?: string;
+  linkedIdentityId?: string;
+  linkedIdentityName?: string;
+  confidence: number;
+  reasonCodes: string[];
+}
+
+export interface ContactIdentityReplyTarget {
+  handleId: string;
+  contactIdentityId: string;
+  workspaceId: string;
+  channelType: "slack" | "teams" | "whatsapp" | "signal" | "imessage";
+  channelId: string;
+  chatId: string;
+  handleType: ContactIdentityHandleType;
+  label: string;
+  displayValue: string;
+  lastMessageAt?: number;
+}
+
+export interface RelationshipTimelineEvent {
+  id: string;
+  contactIdentityId: string;
+  source: RelationshipTimelineSource;
+  sourceLabel: string;
+  direction: "incoming" | "outgoing";
+  timestamp: number;
+  title: string;
+  summary: string;
+  rawRef: string;
+  threadId?: string;
+  chatId?: string;
+  sensitive: boolean;
+}
+
+export interface RelationshipTimelineQuery {
+  threadId?: string;
+  contactIdentityId?: string;
+  companyHint?: string;
+  limit?: number;
+  startAt?: number;
+  endAt?: number;
+}
+
+export interface ChannelPreferenceSummary {
+  preferredChannel?: "email" | "slack" | "teams" | "whatsapp" | "signal" | "imessage";
+  recommendedReason?: string;
+  responseLatencyHours: Partial<Record<"email" | "slack" | "teams" | "whatsapp" | "signal" | "imessage", number>>;
+  messageCountByChannel: Partial<Record<"email" | "slack" | "teams" | "whatsapp" | "signal" | "imessage", number>>;
+  lastInboundAtByChannel: Partial<Record<"email" | "slack" | "teams" | "whatsapp" | "signal" | "imessage", number>>;
+  lastOutboundAtByChannel: Partial<Record<"email" | "slack" | "teams" | "whatsapp" | "signal" | "imessage", number>>;
+}
+
+export interface ContactIdentityCoverageStats {
+  resolvedMailboxContacts: number;
+  unresolvedSlackUsers: number;
+  unresolvedTeamsUsers: number;
+  unresolvedWhatsAppUsers: number;
+  unresolvedSignalUsers: number;
+  unresolvedImessageUsers: number;
+  resolvedCrmContacts: number;
+  suggestedLinks: number;
+  confirmedLinks: number;
+  rejectedLinks: number;
 }
 
 export interface MailboxMessage {
@@ -183,6 +367,7 @@ export interface MailboxThreadListItem {
   unreadCount: number;
   messageCount: number;
   lastMessageAt: number;
+  hasSensitiveContent?: boolean;
   summary?: MailboxSummaryCard;
   classificationState?: MailboxClassificationState;
 }
@@ -199,6 +384,19 @@ export interface MailboxResearchResult {
   recentSubjects?: string[];
   recentOutboundExample?: string;
   nextSteps?: string[];
+  relatedEntities?: string[];
+  contactIdentityId?: string;
+  identityConfidence?: number;
+  linkedChannels?: Array<{
+    handleId: string;
+    handleType: ContactIdentityHandleType;
+    label: string;
+    channelType?: string;
+  }>;
+  channelPreference?: ChannelPreferenceSummary;
+  unifiedTimeline?: RelationshipTimelineEvent[];
+  identityCandidates?: ContactIdentityCandidate[];
+  replyTargets?: ContactIdentityReplyTarget[];
 }
 
 export interface MailboxThreadDetail extends MailboxThreadListItem {
@@ -208,6 +406,162 @@ export interface MailboxThreadDetail extends MailboxThreadListItem {
   commitments: MailboxCommitment[];
   contactMemory?: MailboxContactMemory | null;
   research?: MailboxResearchResult | null;
+  sensitiveContent?: MailboxSensitiveContent;
+}
+
+export interface MailboxSensitiveContent {
+  hasSensitiveContent: boolean;
+  categories: Array<"credentials" | "financial" | "pii" | "legal" | "health" | "other">;
+  reasons: string[];
+}
+
+export interface MailboxEvent {
+  id: string;
+  fingerprint: string;
+  type: MailboxEventType;
+  workspaceId: string;
+  timestamp: number;
+  accountId?: string;
+  threadId?: string;
+  provider?: MailboxProvider;
+  subject?: string;
+  summary?: string;
+  evidenceRefs: string[];
+  payload: Record<string, unknown>;
+}
+
+export interface MailboxRuleRecipe {
+  name: string;
+  description?: string;
+  workspaceId?: string;
+  threadId?: string;
+  source?: "mailbox_event";
+  conditions: Array<{
+    field: string;
+    operator: MailboxConditionOperator;
+    value: string;
+  }>;
+  conditionLogic?: "all" | "any";
+  actionType: "create_task" | "wake_agent";
+  actionTitle?: string;
+  actionPrompt: string;
+  agentRoleId?: string;
+  cooldownMs?: number;
+  enabled?: boolean;
+}
+
+export interface MailboxScheduleRecipe {
+  name: string;
+  description?: string;
+  workspaceId?: string;
+  threadId?: string;
+  kind?: MailboxAutomationKind;
+  schedule: import("../electron/cron/types").CronSchedule;
+  taskTitle: string;
+  taskPrompt: string;
+  enabled?: boolean;
+}
+
+export interface MailboxAutomationRecord {
+  id: string;
+  workspaceId: string;
+  kind: MailboxAutomationKind;
+  status: MailboxAutomationStatus;
+  name: string;
+  description?: string;
+  threadId?: string;
+  source: "mailbox_event" | "cron";
+  rule?: MailboxRuleRecipe;
+  schedule?: MailboxScheduleRecipe;
+  backingTriggerId?: string;
+  backingCronJobId?: string;
+  latestOutcome?: string;
+  latestRunAt?: number;
+  latestFireAt?: number;
+  nextRunAt?: number;
+  latestError?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface MailboxCompanyCandidate {
+  companyId: string;
+  name: string;
+  slug: string;
+  confidence: number;
+  reason: string;
+  defaultWorkspaceId?: string;
+}
+
+export interface MailboxOperatorRecommendation {
+  agentRoleId: string;
+  displayName: string;
+  companyId?: string;
+  confidence: number;
+  reason: string;
+  roleKind?: "customer_ops" | "growth" | "planner" | "founder_office" | "other";
+}
+
+export interface MailboxMissionControlHandoffRecord {
+  id: string;
+  threadId: string;
+  workspaceId: string;
+  companyId: string;
+  companyName: string;
+  operatorRoleId: string;
+  operatorDisplayName: string;
+  issueId: string;
+  issueTitle: string;
+  issueStatus: "open" | "done" | "cancelled";
+  source: "mailbox_handoff";
+  latestOutcome?: string;
+  latestWakeAt?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface MailboxMissionControlHandoffPreview {
+  threadId: string;
+  workspaceId?: string;
+  issueTitle: string;
+  issueSummary: string;
+  companyCandidates: MailboxCompanyCandidate[];
+  recommendedCompanyId?: string;
+  companyConfirmationRequired: boolean;
+  operatorRecommendations: MailboxOperatorRecommendation[];
+  recommendedOperatorRoleId?: string;
+  sensitiveContentRedacted: boolean;
+  evidenceRefs: import("./types").CompanyEvidenceRef[];
+  existingHandoffs: MailboxMissionControlHandoffRecord[];
+}
+
+export interface MailboxMissionControlHandoffRequest {
+  threadId: string;
+  companyId: string;
+  operatorRoleId: string;
+  issueTitle: string;
+  issueSummary?: string;
+}
+
+export interface MailboxDigest {
+  threadCount: number;
+  messageCount: number;
+  unreadCount: number;
+  needsReplyCount: number;
+  proposalCount: number;
+  commitmentCount: number;
+  draftCount: number;
+  overdueCommitmentCount: number;
+  sensitiveThreadCount: number;
+  eventCount: number;
+  classificationPendingCount: number;
+  lastSyncedAt?: number;
+  recentEventTypes: Array<{ type: MailboxEventType; count: number }>;
+}
+
+export interface MailboxDigestSnapshot extends MailboxDigest {
+  workspaceId: string;
+  generatedAt: number;
 }
 
 export interface MailboxListThreadsInput {
@@ -274,4 +628,16 @@ export interface MailboxApplyActionInput {
   label?: string;
   draftId?: string;
   commitmentId?: string;
+}
+
+/**
+ * Remove junk left at the start of plain text when HTML was stripped (e.g. stray
+ * `width="96"` attributes becoming "96 96" before the real sentence on the same line).
+ */
+export function stripMailboxSummaryHtmlArtifacts(text: string): string {
+  let t = String(text || "").trim();
+  if (!t) return t;
+  // `m`: line starts — strips "96 96 …" when junk is on the same line as real prose.
+  t = t.replace(/^(\d{1,4})(\s+\d{1,4})+\s*/gm, "").trim();
+  return t;
 }
