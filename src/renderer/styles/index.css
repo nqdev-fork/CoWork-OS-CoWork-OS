@@ -81,10 +81,10 @@ button:focus-visible,
 
   /* Typography - consistent font stacks */
   --font-ui:
-    -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", system-ui,
+    -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI",
     sans-serif;
   --font-content:
-    -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", system-ui,
+    -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI",
     sans-serif;
   --font-mono: "SF Mono", "Fira Code", "Consolas", monospace;
   --font-sans: var(--font-ui);
@@ -13763,6 +13763,14 @@ button {
 .cli-task-list {
   padding: 0;
   overflow-x: hidden;
+}
+
+.task-list-virtualized {
+  overflow-y: hidden;
+}
+
+.sidebar-virtual-list {
+  height: 100%;
 }
 
 .cli-list-header {
@@ -33786,6 +33794,10 @@ html.platform-darwin.opaque-vibrancy .remote-file-picker {
 .semantic-timeline-feed {
   display: flex;
   flex-direction: column;
+}
+
+.semantic-timeline-feed-virtual {
+  height: 100%;
 }
 
 .document-editor-modal {
