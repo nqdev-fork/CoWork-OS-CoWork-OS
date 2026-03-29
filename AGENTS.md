@@ -37,6 +37,7 @@ When a user reports a failure, error, or unexpected behavior:
 
 ## QA and Reliability Commands
 
+- Use `npm run kit:lint` to run workspace kit health checks from the CLI (human-readable by default, JSON export supported by the CLI).
 - Use `npm run skills:check` before test/merge when touching bundled skills; it runs routing/content/audit/eval quality gates.
 - Use `npm run qa:eval:build` to refresh the eval corpus when curating new reliability regressions.
 - Use `npm run qa:eval:run` to replay the eval suite, and `npm run qa:reliability` for the combined eval + battery loop.
@@ -46,5 +47,6 @@ When a user reports a failure, error, or unexpected behavior:
 ## Setup Commands
 
 - Use `npm run setup` for workstation setup; it chains native rebuild/install safeguards.
+- Use `npm run hooks:install` to (re)install local git hooks from `.githooks/` when setup hooks are missing or outdated.
 - Use `npm run setup:native` to isolate native module/driver setup issues.
 - Use `npm run setup:server` for server-only dependency/bootstrap flows (for example Linux VPS daemon/connectors).
