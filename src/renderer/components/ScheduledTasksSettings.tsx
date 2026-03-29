@@ -732,6 +732,9 @@ export function ScheduledTasksSettings() {
             const isExpanded = expandedJobId === job.id;
             const workspace = workspaces.find((w) => w.id === job.workspaceId);
             const lastStatus = job.state.lastStatus;
+            const isInboxAutomation = Boolean(job.description?.includes("mailbox-automation:"));
+            const threadMatch = job.description?.match(/thread:([^·]+)/i);
+            const threadId = threadMatch?.[1]?.trim();
 
             return (
               <div
@@ -809,6 +812,23 @@ export function ScheduledTasksSettings() {
                         {getScheduleIcon(job.schedule)}
                         {describeSchedule(job.schedule)}
                       </span>
+                      {isInboxAutomation && (
+                        <span
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: "4px",
+                            padding: "2px 8px",
+                            borderRadius: "999px",
+                            backgroundColor: "var(--color-accent-subtle)",
+                            color: "var(--color-accent)",
+                            fontSize: "12px",
+                            fontWeight: 600,
+                          }}
+                        >
+                          Inbox
+                        </span>
+                      )}
                       {workspace && <span style={{ opacity: 0.7 }}>{workspace.name}</span>}
                     </div>
                   </div>
@@ -877,6 +897,21 @@ export function ScheduledTasksSettings() {
                 {/* Expanded Content */}
                 {isExpanded && (
                   <div style={styles.expandedContent}>
+                    {isInboxAutomation && (
+                      <div
+                        style={{
+                          marginBottom: "16px",
+                          padding: "12px",
+                          backgroundColor: "var(--color-accent-subtle)",
+                          borderRadius: "6px",
+                          fontSize: "13px",
+                          color: "var(--color-text-secondary)",
+                        }}
+                      >
+                        Inbox automation
+                        {threadId ? ` · Thread ${threadId}` : ""}
+                      </div>
+                    )}
                     {job.description && (
                       <div
                         style={{
