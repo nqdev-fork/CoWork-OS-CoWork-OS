@@ -63,13 +63,29 @@ import type {
   HealthSourceConnectionMode,
 } from "../shared/health";
 import type {
+  ChannelPreferenceSummary,
+  ContactIdentity,
+  ContactIdentityCandidate,
+  ContactIdentityCoverageStats,
+  ContactIdentityResolution,
+  ContactIdentityReplyTarget,
+  ContactIdentitySearchResult,
   MailboxApplyActionInput,
+  MailboxAutomationRecord,
+  MailboxAutomationStatus,
+  MailboxRuleRecipe,
+  MailboxScheduleRecipe,
   MailboxBulkReviewResult,
   MailboxCommitment,
   MailboxCommitmentState,
+  MailboxDigestSnapshot,
   MailboxDraftOptions,
   MailboxDraftSuggestion,
+  MailboxEvent,
   MailboxListThreadsInput,
+  MailboxMissionControlHandoffPreview,
+  MailboxMissionControlHandoffRecord,
+  MailboxMissionControlHandoffRequest,
   MailboxReclassifyInput,
   MailboxReclassifyResult,
   MailboxResearchResult,
@@ -78,6 +94,8 @@ import type {
   MailboxSyncStatus,
   MailboxThreadDetail,
   MailboxThreadListItem,
+  RelationshipTimelineEvent,
+  RelationshipTimelineQuery,
 } from "../shared/mailbox";
 
 const ALLOWED_MESSAGE_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"] as const;
@@ -296,6 +314,16 @@ const IPC_CHANNELS = {
   MAILBOX_SYNC: "mailbox:sync",
   MAILBOX_LIST_THREADS: "mailbox:listThreads",
   MAILBOX_GET_THREAD: "mailbox:getThread",
+  MAILBOX_LIST_EVENTS: "mailbox:listEvents",
+  MAILBOX_AUTOMATION_LIST: "mailboxAutomation:list",
+  MAILBOX_AUTOMATION_LIST_THREAD: "mailboxAutomation:listThread",
+  MAILBOX_AUTOMATION_CREATE_RULE: "mailboxAutomation:createRule",
+  MAILBOX_AUTOMATION_UPDATE_RULE: "mailboxAutomation:updateRule",
+  MAILBOX_AUTOMATION_DELETE_RULE: "mailboxAutomation:deleteRule",
+  MAILBOX_AUTOMATION_CREATE_SCHEDULE: "mailboxAutomation:createSchedule",
+  MAILBOX_AUTOMATION_UPDATE_SCHEDULE: "mailboxAutomation:updateSchedule",
+  MAILBOX_AUTOMATION_DELETE_SCHEDULE: "mailboxAutomation:deleteSchedule",
+  MAILBOX_GET_DIGEST: "mailbox:getDigest",
   MAILBOX_SUMMARIZE_THREAD: "mailbox:summarizeThread",
   MAILBOX_GENERATE_DRAFT: "mailbox:generateDraft",
   MAILBOX_EXTRACT_COMMITMENTS: "mailbox:extractCommitments",
@@ -304,8 +332,26 @@ const IPC_CHANNELS = {
   MAILBOX_RESEARCH_CONTACT: "mailbox:researchContact",
   MAILBOX_APPLY_ACTION: "mailbox:applyAction",
   MAILBOX_UPDATE_COMMITMENT_STATE: "mailbox:updateCommitmentState",
+  MAILBOX_UPDATE_COMMITMENT_DETAILS: "mailbox:updateCommitmentDetails",
   MAILBOX_RECLASSIFY_THREAD: "mailbox:reclassifyThread",
   MAILBOX_RECLASSIFY_ACCOUNT: "mailbox:reclassifyAccount",
+  MAILBOX_IDENTITY_RESOLVE: "mailbox:identityResolve",
+  MAILBOX_IDENTITY_GET: "mailbox:identityGet",
+  MAILBOX_IDENTITY_LIST: "mailbox:identityList",
+  MAILBOX_IDENTITY_SEARCH: "mailbox:identitySearch",
+  MAILBOX_IDENTITY_LINK: "mailbox:identityLink",
+  MAILBOX_IDENTITY_TIMELINE: "mailbox:identityTimeline",
+  MAILBOX_IDENTITY_CANDIDATES: "mailbox:identityCandidates",
+  MAILBOX_IDENTITY_CONFIRM: "mailbox:identityConfirm",
+  MAILBOX_IDENTITY_REJECT: "mailbox:identityReject",
+  MAILBOX_IDENTITY_UNLINK: "mailbox:identityUnlink",
+  MAILBOX_IDENTITY_PREFERENCE: "mailbox:identityPreference",
+  MAILBOX_IDENTITY_COVERAGE: "mailbox:identityCoverage",
+  MAILBOX_REPLY_VIA_CHANNEL: "mailbox:replyViaChannel",
+  MAILBOX_MC_HANDOFF_PREVIEW: "mailbox:missionControlHandoffPreview",
+  MAILBOX_MC_HANDOFF_CREATE: "mailbox:missionControlHandoffCreate",
+  MAILBOX_MC_HANDOFF_LIST: "mailbox:missionControlHandoffList",
+  MAILBOX_EVENT: "mailbox:event",
   TASK_EVENT: "task:event",
   TASK_EVENTS: "task:events",
   TASK_SEMANTIC_TIMELINE: "task:semanticTimeline",
@@ -2444,6 +2490,35 @@ contextBridge.exposeInMainWorld("electronAPI", {
   listMailboxThreads: (query?: MailboxListThreadsInput) =>
     ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_LIST_THREADS, query),
   getMailboxThread: (threadId: string) => ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_GET_THREAD, threadId),
+  listMailboxEvents: (limit?: number, threadId?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_LIST_EVENTS, { limit, threadId }) as Promise<MailboxEvent[]>,
+  listMailboxAutomations: (query?: {
+    workspaceId?: string;
+    threadId?: string;
+  }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_AUTOMATION_LIST, query) as Promise<MailboxAutomationRecord[]>,
+  listThreadMailboxAutomations: (threadId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_AUTOMATION_LIST_THREAD, threadId) as Promise<MailboxAutomationRecord[]>,
+  createMailboxRule: (recipe: MailboxRuleRecipe) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_AUTOMATION_CREATE_RULE, { recipe }) as Promise<MailboxAutomationRecord>,
+  updateMailboxRule: (
+    id: string,
+    patch: Partial<MailboxRuleRecipe> & { status?: MailboxAutomationStatus },
+  ) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_AUTOMATION_UPDATE_RULE, { id, patch }) as Promise<MailboxAutomationRecord | null>,
+  deleteMailboxRule: (id: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_AUTOMATION_DELETE_RULE, id) as Promise<boolean>,
+  createMailboxSchedule: (recipe: MailboxScheduleRecipe) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_AUTOMATION_CREATE_SCHEDULE, { recipe }) as Promise<MailboxAutomationRecord>,
+  updateMailboxSchedule: (
+    id: string,
+    patch: Partial<MailboxScheduleRecipe> & { status?: MailboxAutomationStatus },
+  ) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_AUTOMATION_UPDATE_SCHEDULE, { id, patch }) as Promise<MailboxAutomationRecord | null>,
+  deleteMailboxSchedule: (id: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_AUTOMATION_DELETE_SCHEDULE, id) as Promise<boolean>,
+  getMailboxDigest: (workspaceId?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_GET_DIGEST, { workspaceId }) as Promise<MailboxDigestSnapshot>,
   summarizeMailboxThread: (threadId: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_SUMMARIZE_THREAD, { threadId }),
   generateMailboxDraft: (threadId: string, options?: MailboxDraftOptions) =>
@@ -2456,16 +2531,82 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_SCHEDULE_REPLY, { threadId }),
   researchMailboxContact: (threadId: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_RESEARCH_CONTACT, { threadId }),
+  resolveMailboxContactIdentity: (threadId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_IDENTITY_RESOLVE, { threadId }) as Promise<ContactIdentityResolution | null>,
+  getContactIdentity: (contactIdentityId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_IDENTITY_GET, { contactIdentityId }) as Promise<ContactIdentity | null>,
+  listContactIdentities: (workspaceId?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_IDENTITY_LIST, { workspaceId }) as Promise<ContactIdentity[]>,
+  searchIdentityLinkTargets: (workspaceId: string, query: string, limit?: number) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_IDENTITY_SEARCH, { workspaceId, query, limit }) as Promise<ContactIdentitySearchResult[]>,
+  linkIdentityHandle: (input: {
+    workspaceId: string;
+    contactIdentityId: string;
+    handleType: string;
+    normalizedValue: string;
+    displayValue: string;
+    source?: string;
+    channelId?: string;
+    channelType?: string;
+    channelUserId?: string;
+  }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_IDENTITY_LINK, input) as Promise<ContactIdentity | null>,
+  getMailboxRelationshipTimeline: (query: RelationshipTimelineQuery) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_IDENTITY_TIMELINE, query) as Promise<RelationshipTimelineEvent[]>,
+  listIdentityCandidates: (workspaceId?: string, status?: ContactIdentityCandidate["status"]) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_IDENTITY_CANDIDATES, { workspaceId, status }) as Promise<ContactIdentityCandidate[]>,
+  confirmIdentityLink: (candidateId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_IDENTITY_CONFIRM, { candidateId }) as Promise<ContactIdentityCandidate | null>,
+  rejectIdentityLink: (candidateId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_IDENTITY_REJECT, { candidateId }) as Promise<ContactIdentityCandidate | null>,
+  unlinkIdentityHandle: (handleId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_IDENTITY_UNLINK, { handleId }) as Promise<boolean>,
+  getChannelPreferenceSummary: (contactIdentityId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_IDENTITY_PREFERENCE, { contactIdentityId }) as Promise<ChannelPreferenceSummary>,
+  getContactIdentityCoverageStats: (workspaceId?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_IDENTITY_COVERAGE, { workspaceId }) as Promise<ContactIdentityCoverageStats>,
+  replyViaChannel: (input: {
+    threadId: string;
+    handleId: string;
+    channelType: "slack" | "teams" | "whatsapp" | "signal" | "imessage";
+    message: string;
+    parseMode?: "text" | "markdown";
+  }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_REPLY_VIA_CHANNEL, input) as Promise<{
+      ok: boolean;
+      target: ContactIdentityReplyTarget;
+    }>,
+  previewMailboxMissionControlHandoff: (threadId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_MC_HANDOFF_PREVIEW, { threadId }) as Promise<MailboxMissionControlHandoffPreview | null>,
+  createMailboxMissionControlHandoff: (request: MailboxMissionControlHandoffRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_MC_HANDOFF_CREATE, request) as Promise<MailboxMissionControlHandoffRecord>,
+  listMailboxMissionControlHandoffs: (threadId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_MC_HANDOFF_LIST, { threadId }) as Promise<MailboxMissionControlHandoffRecord[]>,
   applyMailboxAction: (input: MailboxApplyActionInput) =>
     ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_APPLY_ACTION, input),
   updateMailboxCommitmentState: (
     commitmentId: string,
     state: MailboxCommitmentState,
   ) => ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_UPDATE_COMMITMENT_STATE, { commitmentId, state }),
+  updateMailboxCommitmentDetails: (
+    commitmentId: string,
+    patch: {
+      title?: string;
+      dueAt?: number | null;
+      ownerEmail?: string | null;
+      state?: MailboxCommitmentState;
+      sourceExcerpt?: string | null;
+    },
+  ) => ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_UPDATE_COMMITMENT_DETAILS, { commitmentId, patch }),
   reclassifyMailboxThread: (threadId: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_RECLASSIFY_THREAD, { threadId }) as Promise<MailboxReclassifyResult>,
   reclassifyMailboxAccount: (input: MailboxReclassifyInput) =>
     ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_RECLASSIFY_ACCOUNT, input) as Promise<MailboxReclassifyResult>,
+  onMailboxEvent: (callback: (event: MailboxEvent) => void) => {
+    const subscription = (_: Any, data: MailboxEvent) => callback(data);
+    ipcRenderer.on(IPC_CHANNELS.MAILBOX_EVENT, subscription);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.MAILBOX_EVENT, subscription);
+  },
 
   // Shell APIs
   openExternal: (url: string) => ipcRenderer.invoke("shell:openExternal", url),
@@ -4067,6 +4208,25 @@ export interface ElectronAPI {
   syncMailbox: (limit?: number) => Promise<MailboxSyncResult>;
   listMailboxThreads: (query?: MailboxListThreadsInput) => Promise<MailboxThreadListItem[]>;
   getMailboxThread: (threadId: string) => Promise<MailboxThreadDetail | null>;
+  listMailboxEvents: (limit?: number, threadId?: string) => Promise<MailboxEvent[]>;
+  listMailboxAutomations: (query?: {
+    workspaceId?: string;
+    threadId?: string;
+  }) => Promise<MailboxAutomationRecord[]>;
+  listThreadMailboxAutomations: (threadId: string) => Promise<MailboxAutomationRecord[]>;
+  createMailboxRule: (recipe: MailboxRuleRecipe) => Promise<MailboxAutomationRecord>;
+  updateMailboxRule: (
+    id: string,
+    patch: Partial<MailboxRuleRecipe> & { status?: MailboxAutomationStatus },
+  ) => Promise<MailboxAutomationRecord | null>;
+  deleteMailboxRule: (id: string) => Promise<boolean>;
+  createMailboxSchedule: (recipe: MailboxScheduleRecipe) => Promise<MailboxAutomationRecord>;
+  updateMailboxSchedule: (
+    id: string,
+    patch: Partial<MailboxScheduleRecipe> & { status?: MailboxAutomationStatus },
+  ) => Promise<MailboxAutomationRecord | null>;
+  deleteMailboxSchedule: (id: string) => Promise<boolean>;
+  getMailboxDigest: (workspaceId?: string) => Promise<MailboxDigestSnapshot>;
   summarizeMailboxThread: (threadId: string) => Promise<MailboxSummaryCard | null>;
   generateMailboxDraft: (
     threadId: string,
@@ -4083,6 +4243,46 @@ export interface ElectronAPI {
     summary: string;
   }>;
   researchMailboxContact: (threadId: string) => Promise<MailboxResearchResult | null>;
+  resolveMailboxContactIdentity: (threadId: string) => Promise<ContactIdentityResolution | null>;
+  getContactIdentity: (contactIdentityId: string) => Promise<ContactIdentity | null>;
+  listContactIdentities: (workspaceId?: string) => Promise<ContactIdentity[]>;
+  searchIdentityLinkTargets: (workspaceId: string, query: string, limit?: number) => Promise<ContactIdentitySearchResult[]>;
+  linkIdentityHandle: (input: {
+    workspaceId: string;
+    contactIdentityId: string;
+    handleType: string;
+    normalizedValue: string;
+    displayValue: string;
+    source?: string;
+    channelId?: string;
+    channelType?: string;
+    channelUserId?: string;
+  }) => Promise<ContactIdentity | null>;
+  getMailboxRelationshipTimeline: (query: RelationshipTimelineQuery) => Promise<RelationshipTimelineEvent[]>;
+  listIdentityCandidates: (
+    workspaceId?: string,
+    status?: ContactIdentityCandidate["status"],
+  ) => Promise<ContactIdentityCandidate[]>;
+  confirmIdentityLink: (candidateId: string) => Promise<ContactIdentityCandidate | null>;
+  rejectIdentityLink: (candidateId: string) => Promise<ContactIdentityCandidate | null>;
+  unlinkIdentityHandle: (handleId: string) => Promise<boolean>;
+  getChannelPreferenceSummary: (contactIdentityId: string) => Promise<ChannelPreferenceSummary>;
+  getContactIdentityCoverageStats: (workspaceId?: string) => Promise<ContactIdentityCoverageStats>;
+  replyViaChannel: (input: {
+    threadId: string;
+    handleId: string;
+    channelType: "slack" | "teams" | "whatsapp" | "signal" | "imessage";
+    message: string;
+    parseMode?: "text" | "markdown";
+  }) => Promise<{
+    ok: boolean;
+    target: ContactIdentityReplyTarget;
+  }>;
+  previewMailboxMissionControlHandoff: (threadId: string) => Promise<MailboxMissionControlHandoffPreview | null>;
+  createMailboxMissionControlHandoff: (
+    request: MailboxMissionControlHandoffRequest,
+  ) => Promise<MailboxMissionControlHandoffRecord>;
+  listMailboxMissionControlHandoffs: (threadId: string) => Promise<MailboxMissionControlHandoffRecord[]>;
   applyMailboxAction: (input: MailboxApplyActionInput) => Promise<{
     success: boolean;
     action: string;
@@ -4092,8 +4292,19 @@ export interface ElectronAPI {
     commitmentId: string,
     state: MailboxCommitmentState,
   ) => Promise<MailboxCommitment | null>;
+  updateMailboxCommitmentDetails: (
+    commitmentId: string,
+    patch: {
+      title?: string;
+      dueAt?: number | null;
+      ownerEmail?: string | null;
+      state?: MailboxCommitmentState;
+      sourceExcerpt?: string | null;
+    },
+  ) => Promise<MailboxCommitment | null>;
   reclassifyMailboxThread: (threadId: string) => Promise<MailboxReclassifyResult>;
   reclassifyMailboxAccount: (input: MailboxReclassifyInput) => Promise<MailboxReclassifyResult>;
+  onMailboxEvent: (callback: (event: MailboxEvent) => void) => () => void;
   openExternal: (url: string) => Promise<void>;
   openSystemSettings: (
     target: "microphone" | "dictation",
