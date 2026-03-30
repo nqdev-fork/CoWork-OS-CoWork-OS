@@ -22,6 +22,7 @@
 <p align="center">
   <a href="docs/getting-started.md">Getting Started</a> &middot;
   <a href="docs/showcase.md">Use Cases</a> &middot;
+  <a href="docs/release-notes-next.md">Next Release Notes</a> &middot;
   <a href="docs/integration-skill-bootstrap-lifecycle.md">Platform Updates</a> &middot;
   <a href="docs/">Documentation</a> &middot;
   <a href="CHANGELOG.md">Changelog</a> &middot;
@@ -70,6 +71,10 @@ Stable workflow entry points for the newest high-impact capabilities.
 - **Video generation** — text-to-video and image-to-video routing with polling tools and inline preview.
 
 See [Features](docs/features.md), [Heartbeat v3](docs/heartbeat-v3.md), [Providers](docs/providers.md), and [Plugin Packs](docs/plugin-packs.md) for current runtime details.
+
+### Next Release
+
+The first release after `v0.5.14` is centered on five product areas: visible runtime learning/routing state, Discord supervisor mode, Microsoft OAuth for Outlook.com-family personal mailboxes, ClawHub/external skill imports, and mailbox/security hardening. Start with the [Next Release Notes](docs/release-notes-next.md), then use the [Changelog](CHANGELOG.md) for the condensed delta since the last tag.
 
 ## Quick Start
 
