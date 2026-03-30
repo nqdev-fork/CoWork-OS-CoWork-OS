@@ -1046,6 +1046,28 @@ describe("getSkillDescriptionsForModel", () => {
     expect(descriptions.length).toBeLessThanOrEqual(1700);
     expect(descriptions).toContain("truncated for prompt budget");
   });
+
+  it("should reject updating external read-only skills", async () => {
+    const externalSkill = createTestSkill({
+      id: "external-skill",
+      source: "external",
+      filePath: "/shared/skills/external-skill.json",
+    });
+    (loader as Any).skills.set(externalSkill.id, externalSkill);
+
+    await expect(
+      loader.updateSkill("external-skill", { description: "Updated description" }),
+    ).rejects.toThrow("Cannot update external read-only skills");
+  });
+
+  it("should validate external skill directories before saving them", () => {
+    mockDirs.add("/shared/skills");
+
+    expect(loader.setExternalSkillDirs(["/shared/skills"])).toEqual(["/shared/skills"]);
+    expect(() => loader.setExternalSkillDirs(["relative/skills"])).toThrow(
+      "External skill directory must be a directory",
+    );
+  });
 });
 
 describe("getCustomSkillLoader", () => {
