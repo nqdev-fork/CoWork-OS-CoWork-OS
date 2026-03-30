@@ -33,6 +33,7 @@ import {
   MailboxThreadDetail,
   MailboxThreadListItem,
   MailboxThreadMailboxView,
+  getMailboxNoReplySender,
   stripMailboxSummaryHtmlArtifacts,
 } from "../../shared/mailbox";
 import type { AgentRoleData } from "../../electron/preload";
@@ -44,6 +45,8 @@ type QueueMode = "cleanup" | "follow_up" | null;
 type ThreadSortOrder = "recent" | "priority";
 const MAILBOX_AUTO_SYNC_MAX_AGE_MS = 15 * 60 * 1000;
 const MAILBOX_CLASSIFICATION_WARNING_KEY = "mailboxClassificationWarningAcknowledged";
+const MAILBOX_SERVER_ACTION_WARNING_KEY = "mailboxServerActionWarningAcknowledged";
+const ALL_MAILBOX_ACCOUNTS_FILTER = "__all__";
 type FocusFilter = "unread" | "needsReply" | "queue" | "commitments" | null;
 type ThreadMailboxView = MailboxThreadMailboxView;
 type ThreadGroup = {
@@ -118,6 +121,10 @@ function formatChannelLabel(channelType: string): string {
   if (channelType === "imessage") return "iMessage";
   if (channelType === "signal") return "Signal";
   return channelType.charAt(0).toUpperCase() + channelType.slice(1);
+}
+
+function formatMailboxAccountLabel(account: MailboxSyncStatus["accounts"][number]): string {
+  return account.displayName || account.address || account.id;
 }
 
 function previewStringList(preview: Record<string, unknown> | undefined, key: string): string[] {
@@ -210,7 +217,8 @@ function EmailHtmlBody({ html }: { html: string }) {
 <style>
   html, body { margin: 0; padding: 0; width: 100%; max-width: 100%; overflow-x: hidden; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #1a1a2e; word-wrap: break-word; overflow-wrap: break-word; }
-  #cowork-email-root { width: 100%; max-width: 100%; }
+  #cowork-email-viewport { width: 100%; max-width: 100%; overflow: hidden; }
+  #cowork-email-root { display: block; width: 100%; max-width: 100%; transform-origin: top left; }
   img { max-width: 100%; height: auto; }
   a { color: #7c5cbf; }
   pre, code { white-space: pre-wrap; word-break: break-word; }
@@ -233,16 +241,82 @@ function EmailHtmlBody({ html }: { html: string }) {
   }
   td, th { word-break: break-word; }
 </style>
-</head><body><div id="cowork-email-root">${clean}</div></body></html>`;
+</head><body><div id="cowork-email-viewport"><div id="cowork-email-root">${clean}</div></div></body></html>`;
   }, [html]);
 
-  const handleLoad = useCallback(() => {
+  const updateIframeLayout = useCallback(() => {
     const iframe = iframeRef.current;
-    if (!iframe?.contentDocument?.body) return;
-    const contentHeight = iframe.contentDocument.body.scrollHeight;
-    if (contentHeight > 0) {
-      setHeight(contentHeight + 16);
+    const doc = iframe?.contentDocument;
+    const root = doc?.getElementById("cowork-email-root") as HTMLDivElement | null;
+    if (!iframe || !doc?.body || !root) return;
+
+    const docEl = doc.documentElement;
+    root.style.transform = "none";
+    root.style.width = "auto";
+    root.style.maxWidth = "none";
+
+    const availableWidth = iframe.clientWidth;
+    const contentWidth = Math.max(root.scrollWidth, doc.body.scrollWidth, docEl.scrollWidth);
+    const contentHeight = Math.max(root.scrollHeight, doc.body.scrollHeight, docEl.scrollHeight);
+
+    let scale = 1;
+    if (availableWidth > 0 && contentWidth > availableWidth) {
+      scale = availableWidth / contentWidth;
     }
+
+    if (scale < 0.999) {
+      root.style.width = `${contentWidth}px`;
+      root.style.maxWidth = "none";
+      root.style.transform = `scale(${scale})`;
+    } else {
+      root.style.width = "100%";
+      root.style.maxWidth = "100%";
+      root.style.transform = "none";
+    }
+
+    if (contentHeight > 0) {
+      setHeight(Math.ceil(contentHeight * scale) + 16);
+    }
+  }, []);
+
+  const handleLoad = useCallback(() => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        updateIframeLayout();
+      });
+    });
+  }, [updateIframeLayout]);
+
+  useEffect(() => {
+    const iframe = iframeRef.current;
+    if (!iframe) return;
+
+    let rafId = 0;
+    const scheduleUpdate = () => {
+      cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        updateIframeLayout();
+      });
+    };
+
+    scheduleUpdate();
+
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(() => {
+        scheduleUpdate();
+      });
+      observer.observe(iframe);
+      return () => {
+        observer.disconnect();
+        cancelAnimationFrame(rafId);
+      };
+    }
+
+    window.addEventListener("resize", scheduleUpdate);
+    return () => {
+      window.removeEventListener("resize", scheduleUpdate);
+      cancelAnimationFrame(rafId);
+    };
   }, []);
 
   return (
@@ -456,6 +530,7 @@ export function InboxAgentPanel() {
   const [messageSortOrder, setMessageSortOrder] = useState<"newest" | "oldest">("newest");
   const [threadSortOrder, setThreadSortOrder] = useState<ThreadSortOrder>("recent");
   const [mailboxView, setMailboxView] = useState<ThreadMailboxView>("inbox");
+  const [selectedAccountId, setSelectedAccountId] = useState<string>(ALL_MAILBOX_ACCOUNTS_FILTER);
   const [googleWorkspaceEnabled, setGoogleWorkspaceEnabled] = useState(false);
   const [googleWorkspaceScopes, setGoogleWorkspaceScopes] = useState<string[] | null>(null);
   const [editingCommitmentId, setEditingCommitmentId] = useState<string | null>(null);
@@ -478,6 +553,10 @@ export function InboxAgentPanel() {
   const [classificationWarningAcknowledged, setClassificationWarningAcknowledged] = useState(() =>
     typeof window !== "undefined" &&
       window.localStorage.getItem(MAILBOX_CLASSIFICATION_WARNING_KEY) === "1",
+  );
+  const [mailboxServerActionWarningAcknowledged, setMailboxServerActionWarningAcknowledged] = useState(() =>
+    typeof window !== "undefined" &&
+      window.localStorage.getItem(MAILBOX_SERVER_ACTION_WARNING_KEY) === "1",
   );
 
   const loadStatus = async () => {
@@ -507,6 +586,7 @@ export function InboxAgentPanel() {
   };
 
   const loadThreads = async (opts?: {
+    accountId?: string | undefined;
     query?: string;
     category?: string;
     mailboxView?: ThreadMailboxView | undefined;
@@ -519,7 +599,10 @@ export function InboxAgentPanel() {
     const nextMailboxView = hasMailboxView ? opts?.mailboxView ?? mailboxView : mailboxView;
     const hasSortBy = opts && Object.prototype.hasOwnProperty.call(opts, "sortBy");
     const nextSort = hasSortBy ? opts?.sortBy ?? threadSortOrder : threadSortOrder;
+    const hasAccountId = opts && Object.prototype.hasOwnProperty.call(opts, "accountId");
+    const nextAccountId = hasAccountId ? opts?.accountId ?? selectedAccountId : selectedAccountId;
     const list = await window.electronAPI.listMailboxThreads({
+      accountId: nextAccountId !== ALL_MAILBOX_ACCOUNTS_FILTER ? nextAccountId : undefined,
       query: opts?.query ?? query,
       category: (opts?.category as Any) ?? category,
       mailboxView: nextMailboxView,
@@ -633,6 +716,18 @@ export function InboxAgentPanel() {
     [agentRoles, handoffCompanyId],
   );
 
+  const mailboxAccounts = status?.accounts || [];
+  const mailboxAccountById = useMemo(
+    () => new Map(mailboxAccounts.map((account) => [account.id, account])),
+    [mailboxAccounts],
+  );
+  const activeAccount = selectedAccountId === ALL_MAILBOX_ACCOUNTS_FILTER
+    ? null
+    : mailboxAccountById.get(selectedAccountId) || null;
+  const selectedThreadAccount = selectedThread
+    ? mailboxAccountById.get(selectedThread.accountId) || null
+    : null;
+
   const gmailScopesKnown = googleWorkspaceScopes !== null;
   const gmailModifyScopeGranted =
     !gmailScopesKnown || hasScope(googleWorkspaceScopes ?? undefined, GOOGLE_SCOPE_GMAIL_MODIFY);
@@ -741,7 +836,7 @@ export function InboxAgentPanel() {
       }
     });
     return unsubscribe;
-  }, [selectedThreadId, query, category, mailboxView, focusFilter, threadSortOrder]);
+  }, [selectedThreadId, query, category, mailboxView, focusFilter, threadSortOrder, selectedAccountId]);
 
   useEffect(() => {
     if (!handoffPanelOpen || !handoffCompanyId) return;
@@ -817,6 +912,49 @@ export function InboxAgentPanel() {
     }
   };
 
+  const getThreadDetailForDraft = useCallback(
+    async (threadId: string): Promise<MailboxThreadDetail | null> => {
+      if (selectedThread?.id === threadId) {
+        return selectedThread;
+      }
+      return window.electronAPI.getMailboxThread(threadId);
+    },
+    [selectedThread],
+  );
+
+  const generateDraftForThread = useCallback(
+    async (
+      threadId: string,
+      options: {
+        tone?: "concise" | "warm" | "direct" | "executive";
+        includeAvailability?: boolean;
+        manual?: boolean;
+      } = {},
+    ) => {
+      const detail = await getThreadDetailForDraft(threadId);
+      const noReplySender = detail ? getMailboxNoReplySender(detail.messages, detail.participants) : null;
+
+      if (noReplySender) {
+        if (!options.manual) {
+          return null;
+        }
+        const confirmed = window.confirm(
+          `This email appears to come from a no-reply sender (${noReplySender.email}). Automatic drafts are disabled for no-reply senders.\n\nGenerate a reply draft anyway?`,
+        );
+        if (!confirmed) {
+          return null;
+        }
+      }
+
+      return window.electronAPI.generateMailboxDraft(threadId, {
+        tone: options.tone,
+        includeAvailability: options.includeAvailability,
+        allowNoreplySender: noReplySender ? true : undefined,
+      });
+    },
+    [getThreadDetailForDraft],
+  );
+
   const syncMailboxWithProgress = async () => {
     setBusy(true);
     setError(null);
@@ -850,6 +988,23 @@ export function InboxAgentPanel() {
     setClassificationWarningAcknowledged(true);
   };
 
+  const confirmServerMailboxAction = (type: "archive" | "trash" | "mark_read", threadCount = 1): boolean => {
+    if (type === "mark_read" || mailboxServerActionWarningAcknowledged) {
+      return true;
+    }
+    const actionLabel = type === "archive" ? "archive" : "trash";
+    const targetLabel = threadCount === 1 ? "this email thread" : `${threadCount} email threads`;
+    const confirmed = window.confirm(
+      `This will ${actionLabel} ${targetLabel} on the mail server, not just inside Cowork.\n\nUse Apply cleanup to hide threads only in Cowork.\n\nContinue?`,
+    );
+    if (!confirmed) {
+      return false;
+    }
+    window.localStorage.setItem(MAILBOX_SERVER_ACTION_WARNING_KEY, "1");
+    setMailboxServerActionWarningAcknowledged(true);
+    return true;
+  };
+
   const reclassifySelectedThread = async () => {
     if (!selectedThread) return;
     await runAction(async () => {
@@ -859,27 +1014,33 @@ export function InboxAgentPanel() {
   };
 
   const reclassifyMailboxBackfill = async () => {
-    const accountId = status?.accounts[0]?.id;
-    if (!accountId) return;
+    const accountIds =
+      selectedAccountId !== ALL_MAILBOX_ACCOUNTS_FILTER
+        ? [selectedAccountId]
+        : (status?.accounts || []).map((account) => account.id);
+    if (!accountIds.length) return;
     await runAction(async () => {
-      await window.electronAPI.reclassifyMailboxAccount({
-        accountId,
-        scope: "backfill",
-        limit: 50,
-      });
+      for (const accountId of accountIds) {
+        await window.electronAPI.reclassifyMailboxAccount({
+          accountId,
+          scope: "backfill",
+          limit: 50,
+        });
+      }
       await reloadAll();
     });
   };
 
   const handleApplyProposal = async (proposal: MailboxActionProposal) => {
     await runAction(async () => {
+      let reloadThreadId: string | undefined = proposal.threadId;
       if (proposal.type === "cleanup") {
-        const suggested = String(proposal.preview?.suggestedAction || "archive");
         await window.electronAPI.applyMailboxAction({
           proposalId: proposal.id,
           threadId: proposal.threadId,
-          type: suggested === "trash" ? "trash" : "archive",
+          type: "cleanup_local",
         });
+        reloadThreadId = undefined;
       } else if (proposal.type === "schedule") {
         await window.electronAPI.applyMailboxAction({
           proposalId: proposal.id,
@@ -887,12 +1048,13 @@ export function InboxAgentPanel() {
           type: "schedule_event",
         });
       } else if (proposal.type === "reply" || proposal.type === "follow_up") {
-        await window.electronAPI.generateMailboxDraft(proposal.threadId, {
+        await generateDraftForThread(proposal.threadId, {
           tone: "concise",
           includeAvailability: true,
+          manual: true,
         });
       }
-      await reloadAll(proposal.threadId);
+      await reloadAll(reloadThreadId);
       if (queueMode) {
         const result = await window.electronAPI.reviewMailboxBulkAction({ type: queueMode, limit: 20 });
         setQueueProposals(result.proposals);
@@ -912,12 +1074,13 @@ export function InboxAgentPanel() {
 
   const handleThreadAction = async (type: "archive" | "trash" | "mark_read") => {
     if (!selectedThread) return;
+    if (!confirmServerMailboxAction(type, 1)) return;
     await runAction(async () => {
       await window.electronAPI.applyMailboxAction({
         threadId: selectedThread.id,
         type,
       });
-      await reloadAll(selectedThread.id);
+      await reloadAll(type === "mark_read" ? selectedThread.id : undefined);
     });
   };
 
@@ -959,12 +1122,24 @@ export function InboxAgentPanel() {
 
   const handleBulkThreadAction = async (type: "archive" | "trash" | "mark_read") => {
     if (!selectedBulkThreadIds.length) return;
+    if (type !== "mark_read") {
+      if (!gmailCleanupActionsEnabled) {
+        setError(gmailCleanupDisabledReason || "Reconnect Google Workspace to archive or trash Gmail threads.");
+        return;
+      }
+      const selectedThreads = threads.filter((thread) => selectedBulkThreadIds.includes(thread.id));
+      if (selectedThreads.some((thread) => thread.provider !== "gmail")) {
+        setError("Archive and Trash are currently supported only for Gmail threads.");
+        return;
+      }
+    }
+    if (!confirmServerMailboxAction(type, selectedBulkThreadIds.length)) return;
     await runAction(async () => {
       for (const threadId of selectedBulkThreadIds) {
         await window.electronAPI.applyMailboxAction({ threadId, type });
       }
       clearThreadSelection();
-      await reloadAll(selectedBulkThreadIds[0]);
+      await reloadAll(type === "mark_read" ? selectedBulkThreadIds[0] : undefined);
     });
   };
 
@@ -1050,7 +1225,7 @@ export function InboxAgentPanel() {
       await window.electronAPI.summarizeMailboxThread(selectedThread.id);
       await window.electronAPI.extractMailboxCommitments(selectedThread.id);
       if (selectedThread.needsReply) {
-        await window.electronAPI.generateMailboxDraft(selectedThread.id, {
+        await generateDraftForThread(selectedThread.id, {
           tone: "concise",
           includeAvailability: true,
         });
@@ -1145,7 +1320,13 @@ export function InboxAgentPanel() {
 
   const threadGroups = useMemo<ThreadGroup[]>(() => {
     if (!displayedThreads.length) return [];
-    const hasNarrowFilter = Boolean(query.trim() || focusFilter || category !== "all" || mailboxView !== "inbox");
+    const hasNarrowFilter = Boolean(
+      query.trim() ||
+      focusFilter ||
+      category !== "all" ||
+      mailboxView !== "inbox" ||
+      selectedAccountId !== ALL_MAILBOX_ACCOUNTS_FILTER,
+    );
     if (hasNarrowFilter) {
       return [
         {
@@ -1180,10 +1361,19 @@ export function InboxAgentPanel() {
       });
     }
     return groups;
-  }, [category, displayedThreads, focusFilter, mailboxView, query]);
+  }, [category, displayedThreads, focusFilter, mailboxView, query, selectedAccountId]);
+
+  useEffect(() => {
+    if (selectedAccountId === ALL_MAILBOX_ACCOUNTS_FILTER) return;
+    if (mailboxAccounts.some((account) => account.id === selectedAccountId)) return;
+    setSelectedAccountId(ALL_MAILBOX_ACCOUNTS_FILTER);
+    void loadThreads({ accountId: ALL_MAILBOX_ACCOUNTS_FILTER });
+  }, [mailboxAccounts, selectedAccountId]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+
       const target = event.target as HTMLElement | null;
       const isTyping =
         target &&
@@ -1216,12 +1406,13 @@ export function InboxAgentPanel() {
         return;
       }
 
-      if (event.key === "r" && selectedThread) {
+      if (event.key.toLowerCase() === "d" && selectedThread) {
         event.preventDefault();
         void runAction(async () => {
-          await window.electronAPI.generateMailboxDraft(selectedThread.id, {
+          await generateDraftForThread(selectedThread.id, {
             tone: "concise",
             includeAvailability: true,
+            manual: true,
           });
           await reloadAll(selectedThread.id);
         });
@@ -1230,7 +1421,7 @@ export function InboxAgentPanel() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [busy, displayedThreads, selectedThread, selectedThreadId, selectedBulkThreadIds.join("|")]);
+  }, [busy, displayedThreads, generateDraftForThread, selectedThread, selectedThreadId, selectedBulkThreadIds.join("|")]);
 
   const incomingMessages = useMemo(
     () => sortedThreadMessages.filter((message) => message.direction === "incoming"),
@@ -1515,6 +1706,60 @@ export function InboxAgentPanel() {
               );
             })}
           </div>
+
+          {mailboxAccounts.length > 1 && (
+            <div style={{ display: "flex", gap: "4px", flexWrap: "wrap", marginBottom: "12px" }}>
+              {[
+                { id: ALL_MAILBOX_ACCOUNTS_FILTER, label: "All accounts" },
+                ...mailboxAccounts.map((account) => ({
+                  id: account.id,
+                  label: formatMailboxAccountLabel(account),
+                })),
+              ].map((accountOption) => {
+                const active = selectedAccountId === accountOption.id;
+                return (
+                  <button
+                    key={accountOption.id}
+                    type="button"
+                    onClick={() => {
+                      setSelectedAccountId(accountOption.id);
+                      void loadThreads({ accountId: accountOption.id });
+                    }}
+                    style={{
+                      padding: "4px 10px",
+                      borderRadius: "20px",
+                      fontSize: "0.72rem",
+                      fontWeight: active ? 700 : 500,
+                      border: active
+                        ? "1px solid var(--color-accent)"
+                        : "1px solid var(--color-border-subtle)",
+                      background: active ? "var(--color-accent-subtle)" : "transparent",
+                      color: active ? "var(--color-accent)" : "var(--color-text-secondary)",
+                      cursor: "pointer",
+                      transition: "all 0.12s ease",
+                      fontFamily: "var(--font-ui)",
+                      maxWidth: "100%",
+                    }}
+                    aria-pressed={active}
+                    title={accountOption.label}
+                  >
+                    <span
+                      style={{
+                        display: "inline-block",
+                        maxWidth: "180px",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        verticalAlign: "bottom",
+                      }}
+                    >
+                      {accountOption.label}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
 
           {/* Inbox pulse */}
             <div
@@ -1923,7 +2168,7 @@ export function InboxAgentPanel() {
             >
               <Inbox size={32} strokeWidth={1.25} />
               <div style={{ fontSize: "0.82rem" }}>
-                No threads yet.
+                {activeAccount ? "No threads yet for this account." : "No threads yet."}
                 <br />
                 Click the sync button to populate the inbox.
               </div>
@@ -1987,6 +2232,10 @@ export function InboxAgentPanel() {
                     const selectedForBulk = selectedThreadIds.includes(thread.id);
                     const badge = priorityBadge(thread.priorityBand);
                     const sender = thread.participants[0];
+                    const accountLabel =
+                      mailboxAccountById.get(thread.accountId)
+                        ? formatMailboxAccountLabel(mailboxAccountById.get(thread.accountId)!)
+                        : thread.accountId;
                     const summaryLabel = thread.summary?.suggestedNextAction || thread.snippet;
                     return (
                       <button
@@ -2107,6 +2356,25 @@ export function InboxAgentPanel() {
                               </span>
                             </div>
                             <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                              {mailboxAccounts.length > 1 && (
+                                <span
+                                  style={{
+                                    fontSize: "0.64rem",
+                                    padding: "2px 6px",
+                                    borderRadius: "999px",
+                                    background: "rgba(16,185,129,0.08)",
+                                    color: "#0f766e",
+                                    border: "1px solid rgba(16,185,129,0.16)",
+                                    maxWidth: "160px",
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                    whiteSpace: "nowrap",
+                                  }}
+                                  title={accountLabel}
+                                >
+                                  {accountLabel}
+                                </span>
+                              )}
                               <span
                                 style={{
                                   fontSize: "0.64rem",
@@ -2251,6 +2519,20 @@ export function InboxAgentPanel() {
                     .join(", ")}
                 </div>
                 <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginTop: "8px" }}>
+                  {mailboxAccounts.length > 1 && selectedThreadAccount && (
+                    <span
+                      style={{
+                        padding: "3px 8px",
+                        borderRadius: "999px",
+                        background: "rgba(16,185,129,0.08)",
+                        color: "#0f766e",
+                        fontSize: "0.68rem",
+                        border: "1px solid rgba(16,185,129,0.16)",
+                      }}
+                    >
+                      {formatMailboxAccountLabel(selectedThreadAccount)}
+                    </span>
+                  )}
                   <span
                     style={{
                       padding: "3px 8px",
@@ -2357,9 +2639,10 @@ export function InboxAgentPanel() {
                 <IconBtn
                   onClick={() =>
                     runAction(async () => {
-                      await window.electronAPI.generateMailboxDraft(selectedThread.id, {
+                      await generateDraftForThread(selectedThread.id, {
                         tone: "concise",
                         includeAvailability: true,
+                        manual: true,
                       });
                       await loadThread(selectedThread.id);
                     })
@@ -3377,12 +3660,6 @@ export function InboxAgentPanel() {
                 </span>
               </div>
               {queueProposals.map((proposal) => {
-                const proposalThread = threads.find((thread) => thread.id === proposal.threadId);
-                const proposalRequiresGmailModify =
-                  proposal.type === "cleanup" &&
-                  proposalThread?.provider === "gmail" &&
-                  Boolean(gmailCleanupDisabledReason);
-
                 return (
                   <div
                     key={proposal.id}
@@ -3420,8 +3697,7 @@ export function InboxAgentPanel() {
                         icon={<CheckSquare size={12} />}
                         label={proposalActionLabel(proposal)}
                         variant="primary"
-                        disabled={busy || proposalRequiresGmailModify}
-                        title={proposalRequiresGmailModify ? gmailCleanupDisabledReason || undefined : undefined}
+                        disabled={busy}
                       />
                       <ActionBtn
                         onClick={() =>
@@ -3479,11 +3755,6 @@ export function InboxAgentPanel() {
                   const draftSubject = typeof proposal.preview?.subject === "string"
                     ? proposal.preview.subject
                     : null;
-                  const proposalThread = threads.find((thread) => thread.id === proposal.threadId);
-                  const proposalRequiresGmailModify =
-                    proposal.type === "cleanup" &&
-                    proposalThread?.provider === "gmail" &&
-                    Boolean(gmailCleanupDisabledReason);
                   return (
                     <div
                       key={proposal.id}
@@ -3554,8 +3825,7 @@ export function InboxAgentPanel() {
                           icon={<CheckSquare size={12} />}
                           label={proposalActionLabel(proposal)}
                           variant="primary"
-                          disabled={busy || proposalRequiresGmailModify}
-                          title={proposalRequiresGmailModify ? gmailCleanupDisabledReason || undefined : undefined}
+                          disabled={busy}
                         />
                         <ActionBtn
                           onClick={() =>
