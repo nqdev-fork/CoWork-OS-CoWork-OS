@@ -559,7 +559,8 @@ SkillHub includes multiple security measures to prevent attacks via malicious sk
 ### Running Security Tests
 
 ```bash
-npm test                    # Run all 132 security tests
+npm run test                # Full suite (~4,583 passing tests; includes security)
+npx vitest run tests/security   # Security-focused tests only (135 tests)
 npm run test:coverage       # With coverage report
 ```
 
