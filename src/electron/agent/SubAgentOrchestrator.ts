@@ -14,9 +14,10 @@
 
 import { EventEmitter } from "events";
 import Database from "better-sqlite3";
-import { v4 as uuidv4 } from "uuid";
 import { OrchestrationRepository, OrchestrationRun, OrchestrationTask } from "./OrchestrationRepository";
 import type { AgentDaemon } from "./daemon";
+import { getACPRegistry } from "../acp";
+import { RemoteAgentInvoker } from "../acp/remote-invoker";
 
 export interface OrchestratorDeps {
   daemon: AgentDaemon;
@@ -33,6 +34,7 @@ export type OrchestratorEvent =
 
 export class SubAgentOrchestrator extends EventEmitter {
   private repo: OrchestrationRepository;
+  private remoteInvoker = new RemoteAgentInvoker();
 
   constructor(
     private db: Database.Database,
@@ -137,29 +139,75 @@ export class SubAgentOrchestrator extends EventEmitter {
     this.repo.update(updated.id, { tasks: updated.tasks });
 
     try {
-      const childTask = await this.deps.daemon.createChildTask({
-        title: task.title,
-        prompt: this.buildPromptWithContext(task, run),
-        workspaceId: this.deps.workspaceId,
-        parentTaskId: this.deps.parentTaskId,
-        agentType: "sub",
-        agentConfig: {
-          maxTurns: 30,
-          retainMemory: false,
-          ...(task.capabilityHint ? { capabilityHint: task.capabilityHint } : {}),
-        },
-      });
+      let taskId = "";
+      let remoteTaskId: string | undefined;
+      if (task.acpAgentId) {
+        const agent = getACPRegistry(this.db).getAgent(
+          task.acpAgentId,
+          this.deps.daemon.getActiveAgentRoles(),
+        );
+        if (!agent) {
+          throw new Error(`ACP agent not found: ${task.acpAgentId}`);
+        }
+        if (agent.origin === "remote" && agent.endpoint) {
+          const remoteResult = await this.remoteInvoker.invoke(agent, {
+            assigneeId: task.acpAgentId,
+            title: task.title,
+            prompt: this.buildPromptWithContext(task, run),
+            workspaceId: this.deps.workspaceId,
+          });
+          taskId = remoteResult.remoteTaskId || task.acpAgentId;
+          remoteTaskId = remoteResult.remoteTaskId;
+          if (remoteResult.status === "failed" || remoteResult.status === "cancelled") {
+            throw new Error(remoteResult.error || `Remote ACP task ${remoteResult.status}`);
+          }
+        } else if (agent.origin === "local" && agent.localRoleId) {
+          const childTask = await this.deps.daemon.createChildTask({
+            title: task.title,
+            prompt: this.buildPromptWithContext(task, run),
+            workspaceId: this.deps.workspaceId,
+            parentTaskId: this.deps.parentTaskId,
+            agentType: "sub",
+            assignedAgentRoleId: agent.localRoleId,
+            agentConfig: {
+              maxTurns: 30,
+              retainMemory: false,
+              ...(task.capabilityHint ? { capabilityHint: task.capabilityHint } : {}),
+            },
+          });
+          taskId = childTask.id;
+        } else {
+          throw new Error(`ACP agent ${task.acpAgentId} is not invokable`);
+        }
+      } else {
+        const childTask = await this.deps.daemon.createChildTask({
+          title: task.title,
+          prompt: this.buildPromptWithContext(task, run),
+          workspaceId: this.deps.workspaceId,
+          parentTaskId: this.deps.parentTaskId,
+          agentType: "sub",
+          agentConfig: {
+            maxTurns: 30,
+            retainMemory: false,
+            ...(task.capabilityHint ? { capabilityHint: task.capabilityHint } : {}),
+          },
+        });
+        taskId = childTask.id;
+      }
 
       const afterSpawn = this.updateTask(updated, task.id, {
         status: "running",
-        taskId: childTask.id,
+        taskId,
+        remoteTaskId,
         startedAt: Date.now(),
       });
       this.repo.update(afterSpawn.id, { tasks: afterSpawn.tasks });
-      this.emit("task_spawned", { type: "task_spawned", nodeId: task.id, taskId: childTask.id });
+      this.emit("task_spawned", { type: "task_spawned", nodeId: task.id, taskId });
 
       // Wait for completion
-      const result = await this.waitForTask(childTask.id, 600);
+      const result = task.acpAgentId && remoteTaskId
+        ? await this.waitForRemoteTask(task.acpAgentId, remoteTaskId, 600)
+        : await this.waitForTask(taskId, 600);
 
       if (result.success) {
         const afterDone = this.updateTask(afterSpawn, task.id, {
@@ -171,7 +219,7 @@ export class SubAgentOrchestrator extends EventEmitter {
         this.emit("task_completed", {
           type: "task_completed",
           nodeId: task.id,
-          taskId: childTask.id,
+          taskId,
           output: result.output ?? "",
         });
         return afterDone;
@@ -185,7 +233,7 @@ export class SubAgentOrchestrator extends EventEmitter {
         this.emit("task_failed", {
           type: "task_failed",
           nodeId: task.id,
-          taskId: childTask.id,
+          taskId,
           error: result.error ?? "unknown",
         });
         return afterFail;
@@ -239,6 +287,36 @@ export class SubAgentOrchestrator extends EventEmitter {
         }
       } catch {
         // Transient error — keep polling
+      }
+      await sleep(3000);
+    }
+    return { success: false, error: `Timed out after ${timeoutSeconds}s` };
+  }
+
+  private async waitForRemoteTask(
+    acpAgentId: string,
+    remoteTaskId: string,
+    timeoutSeconds: number,
+  ): Promise<{ success: boolean; output?: string; error?: string }> {
+    const deadline = Date.now() + timeoutSeconds * 1000;
+    while (Date.now() < deadline) {
+      try {
+        const agent = getACPRegistry(this.db).getAgent(
+          acpAgentId,
+          this.deps.daemon.getActiveAgentRoles(),
+        );
+        if (!agent || agent.origin !== "remote" || !agent.endpoint) {
+          return { success: false, error: "ACP agent unavailable" };
+        }
+        const result = await this.remoteInvoker.pollStatus(agent, remoteTaskId);
+        if (result.status === "completed") {
+          return { success: true, output: result.result };
+        }
+        if (result.status === "failed" || result.status === "cancelled") {
+          return { success: false, error: result.error || result.status };
+        }
+      } catch {
+        // Keep polling on transient errors.
       }
       await sleep(3000);
     }
