@@ -483,12 +483,11 @@ export class SignalAdapter implements ChannelAdapter {
     }
 
     // Check access policy
-    if (!this.isAllowedSender(envelope.source)) {
+    const isGroup = Boolean(dataMessage.groupInfo?.groupId);
+    if (!this.isAllowedSender(envelope.source, isGroup)) {
       console.log(`Ignoring message from unauthorized sender: ${envelope.source}`);
       return;
     }
-
-    const isGroup = Boolean(dataMessage.groupInfo?.groupId);
 
     // Convert to IncomingMessage
     const message: IncomingMessage = {
@@ -556,7 +555,7 @@ export class SignalAdapter implements ChannelAdapter {
   /**
    * Check if sender is allowed
    */
-  private isAllowedSender(sender: string): boolean {
+  private isAllowedSender(sender: string, isGroup: boolean): boolean {
     // Skip messages from self
     if (sender === this.config.phoneNumber) {
       return false;
@@ -566,20 +565,29 @@ export class SignalAdapter implements ChannelAdapter {
     if (this.config.allowedNumbers && this.config.allowedNumbers.length > 0) {
       // Normalize phone numbers for comparison
       const normalizedSender = sender.replace(/[^+\d]/g, "");
-      return this.config.allowedNumbers.some((num) => {
+      const isExplicitlyAllowed = this.config.allowedNumbers.some((num) => {
         const normalizedNum = num.replace(/[^+\d]/g, "");
         return normalizedSender === normalizedNum || normalizedSender.endsWith(normalizedNum);
       });
+      if (isExplicitlyAllowed) {
+        return true;
+      }
+      if (
+        (isGroup && this.config.groupPolicy === "allowlist") ||
+        (!isGroup && this.config.dmPolicy === "allowlist")
+      ) {
+        return false;
+      }
     }
 
-    // Check DM policy
-    switch (this.config.dmPolicy) {
+    const policy = isGroup ? this.config.groupPolicy : this.config.dmPolicy;
+    switch (policy) {
       case "disabled":
         return false;
       case "allowlist":
         return false; // No allowlist configured
       case "pairing":
-        // TODO: Implement pairing code system
+        // Let the shared gateway security layer handle pairing challenges.
         return true;
       case "open":
       default:
