@@ -537,6 +537,12 @@ export type EventType =
   | "verification_missing_artifact_ignored"
   | "verification_text_checklist_evaluated"
   | "progress_update"
+  | "learning_progress"
+  | "shell_session_created"
+  | "shell_session_updated"
+  | "shell_session_reset"
+  | "shell_session_closed"
+  | "llm_routing_changed"
   | "llm_retry"
   | "follow_up_completed"
   | "follow_up_failed"
@@ -1968,6 +1974,148 @@ export interface TaskOutputSummary {
   primaryOutputPath?: string;
   outputCount: number;
   folders: string[];
+}
+
+export type LearningProgressStage =
+  | "memory_captured"
+  | "playbook_reinforced"
+  | "skill_proposed"
+  | "skill_reviewed"
+  | "skill_approved"
+  | "skill_rejected"
+  | "no_learning";
+
+export type LearningProgressStatus = "done" | "pending" | "skipped" | "failed";
+
+export interface LearningProgressStep {
+  stage: LearningProgressStage;
+  status: LearningProgressStatus;
+  title: string;
+  summary: string;
+  evidenceRefs: EvidenceRef[];
+  createdAt: number;
+  relatedIds?: {
+    memoryId?: string;
+    proposalId?: string;
+    skillId?: string;
+  };
+  details?: Record<string, unknown>;
+}
+
+export interface TaskLearningProgress {
+  id: string;
+  taskId: string;
+  workspaceId: string;
+  taskTitle: string;
+  taskStatus: TaskStatus;
+  outcome: "success" | "failure" | "reinforced" | "pending_review" | "noop";
+  completedAt: number;
+  summary: string;
+  steps: LearningProgressStep[];
+  nextAction?: string;
+  evidenceRefs: EvidenceRef[];
+  sourceEventId?: string;
+}
+
+export type UnifiedRecallSourceType =
+  | "task"
+  | "message"
+  | "file"
+  | "workspace_note"
+  | "memory"
+  | "knowledge_graph";
+
+export interface UnifiedRecallResult {
+  sourceType: UnifiedRecallSourceType;
+  objectId: string;
+  timestamp: number;
+  rank: number;
+  snippet: string;
+  title?: string;
+  workspaceId?: string;
+  taskId?: string;
+  sourceLabel?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface UnifiedRecallQuery {
+  workspaceId?: string;
+  query: string;
+  limit?: number;
+  sourceTypes?: UnifiedRecallSourceType[];
+}
+
+export interface UnifiedRecallResponse {
+  query: string;
+  workspaceId?: string;
+  generatedAt: number;
+  results: UnifiedRecallResult[];
+}
+
+export type ShellSessionScope = "task" | "workspace";
+export type ShellSessionStatus = "inactive" | "active" | "resetting" | "ended" | "fallback";
+
+export interface ShellSessionInfo {
+  id: string;
+  taskId: string;
+  workspaceId: string;
+  scope: ShellSessionScope;
+  cwd: string;
+  status: ShellSessionStatus;
+  retained: boolean;
+  commandCount: number;
+  aliases: string[];
+  envKeys: string[];
+  createdAt: number;
+  updatedAt: number;
+  lastCommandAt?: number;
+  lastCommand?: string;
+  lastExitCode?: number | null;
+  lastTerminationReason?: CommandTerminationReason;
+  lastError?: string;
+}
+
+export interface ShellSessionLifecycleEvent {
+  action: "created" | "reused" | "reset" | "closed" | "fallback" | "updated";
+  taskId: string;
+  workspaceId: string;
+  session: ShellSessionInfo;
+  commandId?: string;
+  reason?: string;
+  timestamp: number;
+}
+
+export type LLMRoutingReason =
+  | "manual_override"
+  | "profile_routing"
+  | "automatic_execution"
+  | "verification"
+  | "fallback"
+  | "provider_outage"
+  | "quota"
+  | "model_capability"
+  | "unknown";
+
+export interface LLMRoutingFallbackStep {
+  providerType: LLMProviderType;
+  modelKey: string;
+  reason: string;
+  attemptedAt: number;
+  success: boolean;
+  error?: string;
+}
+
+export interface LLMRoutingRuntimeState {
+  currentProvider: LLMProviderType;
+  currentModel: string;
+  activeProvider: LLMProviderType;
+  activeModel: string;
+  routeReason: LLMRoutingReason;
+  fallbackChain: LLMRoutingFallbackStep[];
+  fallbackOccurred: boolean;
+  manualOverride: boolean;
+  profileHint?: LlmProfile;
+  updatedAt: number;
 }
 
 export interface TaskBestKnownOutcome {
@@ -3590,6 +3738,7 @@ export type ActivityType =
   | "command_executed"
   | "tool_used"
   | "mention"
+  | "supervisor_exchange"
   | "agent_assigned"
   | "error"
   | "info";
@@ -3693,6 +3842,93 @@ export interface MentionListQuery {
   status?: MentionStatus | MentionStatus[];
   limit?: number;
   offset?: number;
+}
+
+// ============ Discord Supervisor Protocol ============
+
+export interface DiscordSupervisorConfig {
+  enabled: boolean;
+  coordinationChannelId?: string;
+  watchedChannelIds?: string[];
+  workerAgentRoleId?: string;
+  supervisorAgentRoleId?: string;
+  humanEscalationChannelId?: string;
+  humanEscalationUserId?: string;
+  peerBotUserIds?: string[];
+  strictMode?: boolean;
+}
+
+export type SupervisorProtocolIntent =
+  | "status_request"
+  | "review_request"
+  | "escalation_notice"
+  | "ack";
+
+export type SupervisorExchangeStatus =
+  | "open"
+  | "acknowledged"
+  | "escalated"
+  | "closed"
+  | "ignored";
+
+export type SupervisorActorKind = "peer" | "worker" | "supervisor" | "human" | "system";
+
+export interface SupervisorEvidenceRef {
+  channelId: string;
+  messageId: string;
+  summary?: string;
+  capturedAt: number;
+}
+
+export interface SupervisorExchange {
+  id: string;
+  workspaceId: string;
+  coordinationChannelId: string;
+  sourceChannelId?: string;
+  sourceMessageId?: string;
+  sourcePeerUserId?: string;
+  workerAgentRoleId?: string;
+  supervisorAgentRoleId?: string;
+  linkedTaskId?: string;
+  escalationTarget?: string;
+  status: SupervisorExchangeStatus;
+  lastIntent?: SupervisorProtocolIntent;
+  turnCount: number;
+  terminalReason?: string;
+  evidenceRefs?: SupervisorEvidenceRef[];
+  humanResolution?: string;
+  createdAt: number;
+  updatedAt: number;
+  closedAt?: number;
+}
+
+export interface SupervisorExchangeMessage {
+  id: string;
+  exchangeId: string;
+  discordMessageId: string;
+  channelId: string;
+  authorUserId?: string;
+  actorKind: SupervisorActorKind;
+  intent: SupervisorProtocolIntent;
+  rawContent: string;
+  createdAt: number;
+}
+
+export interface SupervisorExchangeListQuery {
+  workspaceId: string;
+  status?: SupervisorExchangeStatus | SupervisorExchangeStatus[];
+  limit?: number;
+}
+
+export interface ResolveSupervisorExchangeRequest {
+  id: string;
+  resolution: string;
+  mirrorToDiscord?: boolean;
+}
+
+export interface SupervisorExchangeEvent {
+  type: "created" | "updated" | "resolved";
+  exchange: SupervisorExchange;
 }
 
 // ============ Infrastructure Types ============
@@ -3923,6 +4159,11 @@ export const IPC_CHANNELS = {
   MENTION_DISMISS: "mention:dismiss",
   MENTION_EVENT: "mention:event",
 
+  // Discord Supervisor Protocol
+  SUPERVISOR_EXCHANGE_LIST: "supervisorExchange:list",
+  SUPERVISOR_EXCHANGE_RESOLVE: "supervisorExchange:resolve",
+  SUPERVISOR_EXCHANGE_EVENT: "supervisorExchange:event",
+
   // Mission Control - Heartbeat System
   HEARTBEAT_GET_CONFIG: "heartbeat:getConfig",
   HEARTBEAT_UPDATE_CONFIG: "heartbeat:updateConfig",
@@ -4103,10 +4344,20 @@ export const IPC_CHANNELS = {
   TASK_EVENT: "task:event",
   TASK_EVENTS: "task:events",
   TASK_SEMANTIC_TIMELINE: "task:semanticTimeline",
+  TASK_LEARNING_PROGRESS: "task:learningProgress",
+  TASK_LEARNING_EVENT: "task:learningEvent",
   TASK_SEND_MESSAGE: "task:sendMessage",
   TASK_STEP_FEEDBACK: "task:stepFeedback", // Send feedback on an in-progress step
   TASK_SEND_STDIN: "task:sendStdin", // Send stdin input to running command
   TASK_KILL_COMMAND: "task:killCommand", // Kill running command (Ctrl+C)
+  SHELL_SESSION_EVENT: "shell:sessionEvent",
+  SHELL_SESSION_GET: "shell:sessionGet",
+  SHELL_SESSION_LIST: "shell:sessionList",
+  SHELL_SESSION_RESET: "shell:sessionReset",
+  SHELL_SESSION_CLOSE: "shell:sessionClose",
+  UNIFIED_RECALL_QUERY: "recall:query",
+  LLM_ROUTING_STATUS: "llm:routingStatus",
+  LLM_ROUTING_EVENT: "llm:routingEvent",
 
   // Workspace operations
   WORKSPACE_SELECT: "workspace:select",
@@ -4144,8 +4395,12 @@ export const IPC_CHANNELS = {
 
   // Skill Registry (SkillHub)
   SKILL_REGISTRY_SEARCH: "skillRegistry:search",
+  SKILL_REGISTRY_CLAWHUB_SEARCH: "skillRegistry:clawhubSearch",
   SKILL_REGISTRY_GET_DETAILS: "skillRegistry:getDetails",
   SKILL_REGISTRY_INSTALL: "skillRegistry:install",
+  SKILL_REGISTRY_INSTALL_CLAWHUB: "skillRegistry:installClawHub",
+  SKILL_REGISTRY_INSTALL_URL: "skillRegistry:installUrl",
+  SKILL_REGISTRY_INSTALL_GIT: "skillRegistry:installGit",
   SKILL_REGISTRY_UPDATE: "skillRegistry:update",
   SKILL_REGISTRY_UPDATE_ALL: "skillRegistry:updateAll",
   SKILL_REGISTRY_UNINSTALL: "skillRegistry:uninstall",
@@ -4922,6 +5177,7 @@ export interface LLMConfigStatus {
   currentModel: string;
   providers: LLMProviderInfo[];
   models: LLMModelInfo[];
+  routing?: LLMRoutingRuntimeState;
 }
 
 // Gateway / Channel types
@@ -4992,10 +5248,12 @@ export interface ChannelData {
   enabled: boolean;
   status: ChannelStatus;
   botUsername?: string;
+  configReadError?: string;
   securityMode: SecurityMode;
   createdAt: number;
   config?: {
     selfChatMode?: boolean;
+    supervisor?: DiscordSupervisorConfig;
     groupRoutingMode?: "all" | "mentionsOnly" | "mentionsOrCommands" | "commandsOnly";
     trustedGroupMemoryOptIn?: boolean;
     sendReadReceipts?: boolean;
@@ -5021,6 +5279,7 @@ export interface AddChannelRequest {
   name: string;
   botToken?: string;
   securityMode?: SecurityMode;
+  discordSupervisor?: Partial<DiscordSupervisorConfig>;
   /**
    * Ambient inbox options (stored in channel config).
    * - ambientMode: log messages but only process explicit commands (messages starting with '/')
@@ -5083,6 +5342,15 @@ export interface AddChannelRequest {
   blueBubblesAllowedContacts?: string[];
   // Email-specific fields
   emailProtocol?: "imap-smtp" | "loom";
+  emailAuthMethod?: "password" | "oauth";
+  emailOauthProvider?: "microsoft";
+  emailOauthClientId?: string;
+  emailOauthClientSecret?: string;
+  emailOauthTenant?: string;
+  emailAccessToken?: string;
+  emailRefreshToken?: string;
+  emailTokenExpiresAt?: number;
+  emailScopes?: string[];
   emailAddress?: string;
   emailPassword?: string;
   emailImapHost?: string;
@@ -5120,6 +5388,7 @@ export interface UpdateChannelRequest {
   securityMode?: SecurityMode;
   config?: {
     selfChatMode?: boolean;
+    supervisor?: DiscordSupervisorConfig;
     groupRoutingMode?: "all" | "mentionsOnly" | "mentionsOrCommands" | "commandsOnly";
     trustedGroupMemoryOptIn?: boolean;
     sendReadReceipts?: boolean;
@@ -5831,8 +6100,12 @@ export interface SkillRegistryEntry {
   name: string;
   description: string;
   version: string;
+  source?: "cowork" | "clawhub";
   author?: string;
   downloads?: number;
+  stars?: number;
+  installsCurrent?: number;
+  installsAllTime?: number;
   rating?: number;
   tags?: string[];
   icon?: string;
