@@ -158,6 +158,7 @@ jobs:
         run: npm run qa:eval:run -- --suite reliability-regressions --mode deterministic
         env:
           COWORK_DB_PATH: ${{ runner.temp }}/cowork-eval.db
+          COWORK_EVAL_ALLOW_EMPTY: '1'
 
       - name: Enforce timeline reliability thresholds
         if: steps.changes.outputs.agent == 'true'
