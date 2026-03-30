@@ -792,6 +792,75 @@ export const InfraSettingsSchema = z
 
 export const SecurityModeSchema = z.enum(["pairing", "allowlist", "open"]);
 
+const DISCORD_SUPERVISOR_CONFIG_SHAPE = {
+  enabled: z.boolean(),
+  coordinationChannelId: z.string().trim().min(1).max(100).optional(),
+  watchedChannelIds: z.array(z.string().trim().min(1).max(100)).max(100).optional(),
+  workerAgentRoleId: z.string().uuid().optional(),
+  supervisorAgentRoleId: z.string().uuid().optional(),
+  humanEscalationChannelId: z.string().trim().min(1).max(100).optional(),
+  humanEscalationUserId: z.string().trim().min(1).max(100).optional(),
+  peerBotUserIds: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
+  strictMode: z.boolean().optional(),
+} satisfies z.ZodRawShape;
+
+type DiscordSupervisorConfigRefinementValue = {
+  enabled?: boolean;
+  coordinationChannelId?: string;
+  workerAgentRoleId?: string;
+  supervisorAgentRoleId?: string;
+  peerBotUserIds?: string[];
+};
+
+function addDiscordSupervisorConfigRefinement(
+  schema: z.ZodObject<z.ZodRawShape>,
+): z.ZodObject<z.ZodRawShape> {
+  return schema.superRefine((value, ctx) => {
+    const config = value as DiscordSupervisorConfigRefinementValue;
+    if (!config.enabled) return;
+
+    if (!config.coordinationChannelId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["coordinationChannelId"],
+        message: "Coordination channel ID is required when supervisor mode is enabled",
+      });
+    }
+    if (!config.workerAgentRoleId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["workerAgentRoleId"],
+        message: "Worker agent role is required when supervisor mode is enabled",
+      });
+    }
+    if (!config.supervisorAgentRoleId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["supervisorAgentRoleId"],
+        message: "Supervisor agent role is required when supervisor mode is enabled",
+      });
+    }
+    if (!config.peerBotUserIds || config.peerBotUserIds.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["peerBotUserIds"],
+        message: "At least one peer bot user ID is required when supervisor mode is enabled",
+      });
+    }
+  });
+}
+
+const AddDiscordSupervisorConfigSchema = addDiscordSupervisorConfigRefinement(
+  z.object({
+    ...DISCORD_SUPERVISOR_CONFIG_SHAPE,
+    enabled: z.boolean().optional(),
+  }),
+);
+
+const DiscordSupervisorConfigSchema = addDiscordSupervisorConfigRefinement(
+  z.object(DISCORD_SUPERVISOR_CONFIG_SHAPE),
+);
+
 export const AddTelegramChannelSchema = z.object({
   type: z.literal("telegram"),
   name: z.string().min(1).max(MAX_TITLE_LENGTH),
@@ -805,6 +874,7 @@ export const AddDiscordChannelSchema = z.object({
   botToken: z.string().min(1).max(500),
   applicationId: z.string().min(1).max(100),
   guildIds: z.array(z.string().max(100)).max(100).optional(),
+  discordSupervisor: AddDiscordSupervisorConfigSchema.optional(),
   securityMode: SecurityModeSchema.optional(),
 });
 
@@ -950,6 +1020,11 @@ const isSafeLoomMailboxFolder = (value: unknown): boolean => {
 const EMAIL_FIELD_KEY_MAP = {
   add: {
     protocol: "emailProtocol",
+    authMethod: "emailAuthMethod",
+    oauthProvider: "emailOauthProvider",
+    oauthClientId: "emailOauthClientId",
+    accessToken: "emailAccessToken",
+    refreshToken: "emailRefreshToken",
     email: "emailAddress",
     password: "emailPassword",
     imapHost: "emailImapHost",
@@ -961,6 +1036,11 @@ const EMAIL_FIELD_KEY_MAP = {
   } as const,
   update: {
     protocol: "protocol",
+    authMethod: "authMethod",
+    oauthProvider: "oauthProvider",
+    oauthClientId: "oauthClientId",
+    accessToken: "accessToken",
+    refreshToken: "refreshToken",
     email: "email",
     password: "password",
     imapHost: "imapHost",
@@ -978,6 +1058,11 @@ type _EmailFieldKeys = (typeof EMAIL_FIELD_KEY_MAP)[EmailSchemaMode];
 const EMAIL_TRANSPORT_BASE_SHAPES: Record<EmailSchemaMode, z.ZodRawShape> = {
   add: {
     [EMAIL_FIELD_KEY_MAP.add.protocol]: z.enum(["imap-smtp", "loom"]).optional(),
+    [EMAIL_FIELD_KEY_MAP.add.authMethod]: z.enum(["password", "oauth"]).optional(),
+    [EMAIL_FIELD_KEY_MAP.add.oauthProvider]: z.enum(["microsoft"]).optional(),
+    [EMAIL_FIELD_KEY_MAP.add.oauthClientId]: z.string().min(1).max(500).optional(),
+    [EMAIL_FIELD_KEY_MAP.add.accessToken]: z.string().min(1).max(4000).optional(),
+    [EMAIL_FIELD_KEY_MAP.add.refreshToken]: z.string().min(1).max(4000).optional(),
     [EMAIL_FIELD_KEY_MAP.add.email]: z.string().email().min(1).max(200).optional(),
     [EMAIL_FIELD_KEY_MAP.add.password]: z.string().min(1).max(500).optional(),
     [EMAIL_FIELD_KEY_MAP.add.imapHost]: z.string().min(1).max(200).optional(),
@@ -989,6 +1074,11 @@ const EMAIL_TRANSPORT_BASE_SHAPES: Record<EmailSchemaMode, z.ZodRawShape> = {
   },
   update: {
     [EMAIL_FIELD_KEY_MAP.update.protocol]: z.enum(["imap-smtp", "loom"]).optional(),
+    [EMAIL_FIELD_KEY_MAP.update.authMethod]: z.enum(["password", "oauth"]).optional(),
+    [EMAIL_FIELD_KEY_MAP.update.oauthProvider]: z.enum(["microsoft"]).optional(),
+    [EMAIL_FIELD_KEY_MAP.update.oauthClientId]: z.string().min(1).max(500).optional(),
+    [EMAIL_FIELD_KEY_MAP.update.accessToken]: z.string().min(1).max(4000).optional(),
+    [EMAIL_FIELD_KEY_MAP.update.refreshToken]: z.string().min(1).max(4000).optional(),
     [EMAIL_FIELD_KEY_MAP.update.email]: z.string().email().min(1).max(200).optional(),
     [EMAIL_FIELD_KEY_MAP.update.password]: z.string().min(1).max(500).optional(),
     [EMAIL_FIELD_KEY_MAP.update.imapHost]: z.string().min(1).max(200).optional(),
@@ -1009,6 +1099,10 @@ const createEmailTransportSchema = (mode: EmailSchemaMode): z.ZodObject<z.ZodRaw
 
 const createEmailAddExtras = (): z.ZodRawShape => ({
   emailDisplayName: z.string().max(100).optional(),
+  emailOauthClientSecret: z.string().max(500).optional(),
+  emailOauthTenant: z.string().max(200).optional(),
+  emailTokenExpiresAt: z.number().int().optional(),
+  emailScopes: z.array(z.string().max(200)).max(50).optional(),
   emailAllowedSenders: z.array(z.string().max(200)).max(100).optional(),
   emailSubjectFilter: z.string().max(200).optional(),
   emailLoomIdentity: z.string().max(300).optional(),
@@ -1023,6 +1117,10 @@ const createEmailAddExtras = (): z.ZodRawShape => ({
 const createEmailUpdateExtras = (): z.ZodRawShape => ({
   emailDisplayName: z.string().max(100).optional(),
   displayName: z.string().max(100).optional(),
+  oauthClientSecret: z.string().max(500).optional(),
+  oauthTenant: z.string().max(200).optional(),
+  tokenExpiresAt: z.number().int().optional(),
+  scopes: z.array(z.string().max(200)).max(50).optional(),
   allowedSenders: z.array(z.string().max(200)).max(100).optional(),
   subjectFilter: z.string().max(200).optional(),
   loomIdentity: z.string().max(300).optional(),
@@ -1056,6 +1154,11 @@ const validateEmailChannelConfigByProtocol = (
   ctx: z.RefinementCtx,
   fieldMap: {
     protocol: "protocol" | "emailProtocol";
+    authMethod: string;
+    oauthProvider: string;
+    oauthClientId: string;
+    accessToken: string;
+    refreshToken: string;
     email: string;
     password: string;
     imapHost: string;
@@ -1101,7 +1204,34 @@ const validateEmailChannelConfigByProtocol = (
       message: "Email address is required for IMAP/SMTP mode",
     });
   }
-  if (!getOptionalString(data[fieldMap.password])) {
+
+  const authMethod = getOptionalString(data[fieldMap.authMethod]) || "password";
+  if (authMethod === "oauth") {
+    if (!getOptionalString(data[fieldMap.oauthProvider])) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [fieldMap.oauthProvider],
+        message: "OAuth provider is required for IMAP/SMTP OAuth mode",
+      });
+    }
+    if (!getOptionalString(data[fieldMap.oauthClientId])) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [fieldMap.oauthClientId],
+        message: "OAuth client ID is required for IMAP/SMTP OAuth mode",
+      });
+    }
+    if (
+      !getOptionalString(data[fieldMap.accessToken]) &&
+      !getOptionalString(data[fieldMap.refreshToken])
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [fieldMap.accessToken],
+        message: "OAuth tokens are required for IMAP/SMTP OAuth mode",
+      });
+    }
+  } else if (!getOptionalString(data[fieldMap.password])) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: [fieldMap.password],
@@ -1154,6 +1284,7 @@ export const AddChannelSchema = z.discriminatedUnion("type", [
 export const ChannelConfigSchema = z
   .object({
     selfChatMode: z.boolean().optional(),
+    supervisor: DiscordSupervisorConfigSchema.optional(),
     responsePrefix: z.string().max(20).optional(),
     trustedGroupMemoryOptIn: z.boolean().optional(),
     researchChatIds: z.array(z.string().max(200)).max(50).optional(),
@@ -1408,6 +1539,7 @@ export const MCPConnectorOAuthSchema = z.object({
     "docusign",
     "outreach",
     "slack",
+    "microsoft-email",
   ]),
   clientId: z.string().min(1).max(500),
   clientSecret: z.string().max(500).optional(),
@@ -1415,6 +1547,8 @@ export const MCPConnectorOAuthSchema = z.object({
   loginUrl: z.string().url().max(500).optional(),
   subdomain: z.string().max(200).optional(),
   teamDomain: z.string().max(200).optional(),
+  tenant: z.string().max(200).optional(),
+  loginHint: z.string().max(500).optional(),
 });
 
 // ============ Health Platform Schemas ============
