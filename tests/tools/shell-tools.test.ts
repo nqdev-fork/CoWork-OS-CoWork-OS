@@ -4,10 +4,11 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { GuardrailManager } from '../../src/electron/guardrails/guardrail-manager';
-import { AgentDaemon } from '../../src/electron/agent/daemon';
-import { Workspace } from '../../src/shared/types';
 import { BuiltinToolsSettingsManager } from '../../src/electron/agent/tools/builtin-settings';
+import { ShellSessionManager } from '../../src/electron/agent/tools/shell-session-manager';
 import { ShellTools } from '../../src/electron/agent/tools/shell-tools';
+import type { AgentDaemon } from '../../src/electron/agent/daemon';
+import type { Workspace } from '../../src/shared/types';
 
 const mockDaemon = {
   requestApproval: vi.fn().mockResolvedValue(true),
@@ -32,14 +33,36 @@ const SAFE_CMD_2 = `"${process.execPath}" -v`;
 
 describe('ShellTools auto-approval', () => {
   let shellTools: ShellTools;
+  const mockShellSessionManager = {
+    runCommand: vi.fn(),
+    getSessionInfo: vi.fn().mockReturnValue(null),
+  };
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.restoreAllMocks();
+    (mockDaemon.requestApproval as any).mockReset().mockResolvedValue(true);
+    (mockDaemon.logEvent as any).mockReset();
+    mockShellSessionManager.runCommand.mockReset().mockImplementation(async ({ command }: { command: string }) => ({
+      success: true,
+      stdout: command.includes('apply_patch mention')
+        ? 'apply_patch mention\n'
+        : command.includes(' -v')
+          ? `${process.version}\n`
+          : '',
+      stderr: '',
+      exitCode: 0,
+      truncated: false,
+      terminationReason: 'normal',
+      usedPersistentSession: true,
+    }));
+    mockShellSessionManager.getSessionInfo.mockReset().mockReturnValue(null);
+
     shellTools = new ShellTools(mockWorkspace, mockDaemon, 'task-1');
     vi.spyOn(GuardrailManager, 'isCommandBlocked').mockReturnValue({ blocked: false });
     vi.spyOn(GuardrailManager, 'isCommandTrusted').mockReturnValue({ trusted: false });
     vi.spyOn(BuiltinToolsSettingsManager, 'getToolAutoApprove').mockReturnValue(false);
     vi.spyOn(BuiltinToolsSettingsManager, 'getRunCommandApprovalMode').mockReturnValue('per_command');
+    vi.spyOn(ShellSessionManager, 'getInstance').mockReturnValue(mockShellSessionManager as any);
   });
 
   afterEach(() => {
