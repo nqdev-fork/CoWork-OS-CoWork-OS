@@ -20,6 +20,8 @@ import {
 } from "../../shared/types";
 import { isActiveTaskStatus, normalizeTaskLifecycleState } from "../../shared/task-status";
 import { isTimelineEventType, normalizeTaskEventToTimelineV2 } from "../../shared/timeline-v2";
+import { getSafeStorage } from "../utils/safe-storage";
+import { createLogger } from "../utils/logger";
 
 /**
  * Safely parse JSON with error handling
@@ -1614,12 +1616,78 @@ export class LLMModelRepository {
 // Channel Gateway Repositories
 // ============================================================
 
+const channelRepoLogger = createLogger("ChannelRepository");
+const CHANNEL_CONFIG_ENCRYPTED_PREFIX = "enc:";
+
+interface ChannelConfigReadResult {
+  json: string;
+  encrypted: boolean;
+  readError?: string;
+}
+
+/**
+ * Encrypt a channel config JSON string using OS keychain via safeStorage.
+ * Falls back to storing plain JSON if encryption is unavailable (e.g. in tests).
+ */
+function encryptChannelConfig(json: string): string {
+  try {
+    const safeStorage = getSafeStorage();
+    if (safeStorage?.isEncryptionAvailable()) {
+      return CHANNEL_CONFIG_ENCRYPTED_PREFIX + safeStorage.encryptString(json).toString("base64");
+    }
+  } catch (error) {
+    channelRepoLogger.warn("Failed to encrypt channel config, storing plaintext:", error);
+  }
+  return json;
+}
+
+/**
+ * Decrypt a channel config value that was encrypted with encryptChannelConfig.
+ * Handles both encrypted and legacy plaintext values transparently.
+ */
+function decryptChannelConfig(value: string): ChannelConfigReadResult {
+  if (!value.startsWith(CHANNEL_CONFIG_ENCRYPTED_PREFIX)) {
+    return {
+      json: value,
+      encrypted: false,
+    };
+  }
+  try {
+    const safeStorage = getSafeStorage();
+    if (safeStorage?.isEncryptionAvailable()) {
+      const buf = Buffer.from(value.slice(CHANNEL_CONFIG_ENCRYPTED_PREFIX.length), "base64");
+      return {
+        json: safeStorage.decryptString(buf),
+        encrypted: true,
+      };
+    }
+    const readError =
+      "Channel configuration is encrypted with OS secure storage and cannot be decrypted in this environment.";
+    channelRepoLogger.error(readError);
+    return {
+      json: "{}",
+      encrypted: true,
+      readError,
+    };
+  } catch (error) {
+    channelRepoLogger.error("Failed to decrypt channel config:", error);
+    return {
+      json: "{}",
+      encrypted: true,
+      readError:
+        "Channel configuration is encrypted but could not be decrypted. Refusing to overwrite it until secure storage is available again.",
+    };
+  }
+}
+
 export interface Channel {
   id: string;
   type: string;
   name: string;
   enabled: boolean;
   config: Record<string, unknown>;
+  configEncrypted?: boolean;
+  configReadError?: string;
   securityConfig: {
     mode: "open" | "allowlist" | "pairing";
     allowedUsers?: string[];
@@ -1705,7 +1773,7 @@ export class ChannelRepository {
       newChannel.type,
       newChannel.name,
       newChannel.enabled ? 1 : 0,
-      JSON.stringify(newChannel.config),
+      encryptChannelConfig(JSON.stringify(newChannel.config)),
       JSON.stringify(newChannel.securityConfig),
       newChannel.status,
       newChannel.botUsername || null,
@@ -1717,6 +1785,11 @@ export class ChannelRepository {
   }
 
   update(id: string, updates: Partial<Channel>): void {
+    const existingChannel = updates.config !== undefined ? this.findById(id) : undefined;
+    if (updates.config !== undefined && existingChannel?.configReadError) {
+      throw new Error(existingChannel.configReadError);
+    }
+
     const fields: string[] = [];
     const values: unknown[] = [];
 
@@ -1730,7 +1803,7 @@ export class ChannelRepository {
     }
     if (updates.config !== undefined) {
       fields.push("config = ?");
-      values.push(JSON.stringify(updates.config));
+      values.push(encryptChannelConfig(JSON.stringify(updates.config)));
     }
     if (updates.securityConfig !== undefined) {
       fields.push("security_config = ?");
@@ -1788,12 +1861,15 @@ export class ChannelRepository {
 
   private mapRowToChannel(row: Record<string, unknown>): Channel {
     const defaultSecurityConfig = { mode: "pairing" as const };
+    const configState = decryptChannelConfig(row.config as string);
     return {
       id: row.id as string,
       type: row.type as string,
       name: row.name as string,
       enabled: row.enabled === 1,
-      config: safeJsonParse(row.config as string, {}, "channel.config"),
+      config: safeJsonParse(configState.json, {}, "channel.config"),
+      configEncrypted: configState.encrypted,
+      configReadError: configState.readError,
       securityConfig: safeJsonParse(
         row.security_config as string,
         defaultSecurityConfig,
