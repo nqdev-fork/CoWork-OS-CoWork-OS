@@ -298,6 +298,20 @@ describe("SearchProviderFactory", () => {
 
       expect(order).toEqual(["tavily", "google", "duckduckgo"]);
     });
+
+    it("includes Exa among configured providers while preserving Brave preference", () => {
+      const settings = {
+        primaryProvider: "exa",
+        fallbackProvider: "tavily",
+        tavily: { apiKey: "tavily" },
+        exa: { apiKey: "exa" },
+        brave: { apiKey: "brave" },
+      } as Any;
+
+      const order = (SearchProviderFactory as Any).getProviderExecutionOrder(settings);
+
+      expect(order).toEqual(["brave", "exa", "tavily", "duckduckgo"]);
+    });
   });
 
   describe("searchWithFallback", () => {
