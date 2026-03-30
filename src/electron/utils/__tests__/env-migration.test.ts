@@ -117,6 +117,19 @@ describe("importProcessEnvToSettings", () => {
     expect(saved.tavily.apiKey).toBe("tav-test");
   });
 
+  it("imports Exa key into search settings", async () => {
+    process.env.EXA_API_KEY = "exa-test";
+
+    mocks.llmLoad.mockReturnValue({ providerType: "anthropic", modelKey: "opus-4-5" });
+    mocks.searchLoad.mockReturnValue({ primaryProvider: null, fallbackProvider: null });
+
+    await importProcessEnvToSettings({ mode: "merge" });
+
+    expect(mocks.searchSave).toHaveBeenCalledTimes(1);
+    const saved = mocks.searchSave.mock.calls[0][0];
+    expect(saved.exa.apiKey).toBe("exa-test");
+  });
+
   it("applies provider override when COWORK_LLM_PROVIDER is valid", async () => {
     process.env.COWORK_LLM_PROVIDER = "gemini";
     process.env.GEMINI_API_KEY = "g-test";
