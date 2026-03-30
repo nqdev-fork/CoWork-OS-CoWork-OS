@@ -281,6 +281,20 @@
   color: var(--color-text-primary);
 }
 
+.mc-v2-workspace-tag {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  vertical-align: middle;
+}
+
 .mc-v2-pipeline-bar {
   display: flex;
   gap: 2px;
@@ -395,6 +409,13 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.mc-v2-agent-task-workspace {
+  font-size: 9px;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
 }
 
 .mc-v2-agent-right {
@@ -570,6 +591,12 @@
   line-height: 1.4;
 }
 
+.mc-v2-task-workspace {
+  font-size: 10px;
+  color: var(--color-text-muted);
+  margin-bottom: 8px;
+}
+
 .mc-v2-task-assignee {
   display: flex;
   align-items: center;
@@ -716,7 +743,15 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   margin-bottom: 4px;
+}
+
+.mc-v2-feed-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 
 .mc-v2-feed-agent {
@@ -956,6 +991,13 @@
 
 .mc-v2-agent-detail-task:hover {
   background: var(--color-bg-tertiary);
+}
+
+.mc-v2-agent-detail-task-workspace-inline {
+  display: inline-block;
+  margin-left: 8px;
+  font-size: 10px;
+  color: var(--color-text-muted);
 }
 
 /* ── Ops Tab ── */
