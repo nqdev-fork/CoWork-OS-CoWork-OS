@@ -19,6 +19,7 @@ import * as fs from "fs/promises";
 import * as crypto from "crypto";
 import { EventEmitter } from "events";
 import { LLMProviderFactory } from "../agent/llm";
+import { recordLlmCallError, recordLlmCallSuccess } from "../agent/llm/usage-telemetry";
 import type { LLMProviderType } from "../../shared/types";
 import { InputSanitizer } from "../agent/security";
 import { estimateTokens } from "../agent/context-manager";
@@ -574,6 +575,15 @@ Rules:
           },
         ],
       });
+      recordLlmCallSuccess(
+        {
+          sourceKind: "chatgpt_import_distill",
+          providerType: provider.type,
+          modelKey: modelId,
+          modelId,
+        },
+        response.usage,
+      );
 
       // Extract text from response
       let responseText = "";
@@ -618,6 +628,12 @@ Rules:
         )
         .slice(0, 5); // Hard cap per conversation
     } catch (err) {
+      recordLlmCallError(
+        {
+          sourceKind: "chatgpt_import_distill",
+        },
+        err,
+      );
       console.warn("[ChatGPTImporter] Distillation failed:", err);
       return [];
     }
