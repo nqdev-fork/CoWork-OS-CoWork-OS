@@ -4,11 +4,73 @@
 /* eslint-disable no-undef -- variables from top-level dynamic import */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
+import JSZip from "jszip";
 import type { CustomSkill, SkillRegistryEntry, SkillSearchResult } from "../../../shared/types";
 
 // Track file system operations
 let mockFiles: Map<string, string> = new Map();
-let mockDirExists = true;
+let mockDirs: Set<string> = new Set();
+
+function normalizePath(value: string): string {
+  const normalized = value.replace(/\\/g, "/").replace(/\/+/g, "/");
+  if (normalized === "/") {
+    return normalized;
+  }
+  return normalized.replace(/\/$/, "");
+}
+
+function parentDir(value: string): string {
+  const normalized = normalizePath(value);
+  const index = normalized.lastIndexOf("/");
+  if (index <= 0) {
+    return "/";
+  }
+  return normalized.slice(0, index);
+}
+
+function ensureDir(value: string): void {
+  let current = normalizePath(value);
+  const toCreate: string[] = [];
+  while (current && current !== "/" && !mockDirs.has(current)) {
+    toCreate.push(current);
+    current = parentDir(current);
+  }
+  mockDirs.add("/");
+  for (const dir of toCreate.reverse()) {
+    mockDirs.add(dir);
+  }
+}
+
+function pathExists(value: string): boolean {
+  const normalized = normalizePath(value);
+  return mockDirs.has(normalized) || mockFiles.has(normalized);
+}
+
+function listDirEntries(dir: string): Array<{ name: string; isDirectory: boolean }> {
+  const normalizedDir = normalizePath(dir);
+  const entries = new Map<string, { name: string; isDirectory: boolean }>();
+
+  for (const candidate of mockDirs) {
+    if (candidate === normalizedDir) continue;
+    if (parentDir(candidate) === normalizedDir) {
+      const name = candidate.split("/").pop() || candidate;
+      entries.set(name, { name, isDirectory: true });
+    }
+  }
+
+  for (const candidate of mockFiles.keys()) {
+    if (parentDir(candidate) === normalizedDir) {
+      const name = candidate.split("/").pop() || candidate;
+      entries.set(name, { name, isDirectory: false });
+    }
+  }
+
+  return Array.from(entries.values());
+}
+
+function managedPath(fileName: string): string {
+  return `/mock/skills/${fileName}`;
+}
 
 // Mock electron app
 vi.mock("electron", () => ({
@@ -17,67 +79,183 @@ vi.mock("electron", () => ({
   },
 }));
 
+// Mock child_process for git flows
+vi.mock("child_process", () => ({
+  execFile: vi.fn(
+    (
+      command: string,
+      args: string[],
+      optionsOrCallback: Any,
+      maybeCallback?: (error: Error | null, stdout?: string, stderr?: string) => void,
+    ) => {
+      const callback =
+        typeof optionsOrCallback === "function"
+          ? optionsOrCallback
+          : maybeCallback;
+
+      if (!callback) {
+        return;
+      }
+
+      if (command !== "git") {
+        callback(new Error(`Unsupported command: ${command}`));
+        return;
+      }
+
+      if (args[0] === "--version") {
+        callback(null, "git version 2.39.0", "");
+        return;
+      }
+
+      if (args[0] === "clone") {
+        const targetDir = normalizePath(args[args.length - 1] || "/tmp/clone");
+        ensureDir(targetDir);
+        mockFiles.set(
+          `${targetDir}/SKILL.md`,
+          "---\nname: Git Imported Skill\ndescription: Imported from a git repo\n---\n# Git Imported Skill\n",
+        );
+        callback(null, "", "");
+        return;
+      }
+
+      callback(new Error(`Unsupported git args: ${args.join(" ")}`));
+    },
+  ),
+}));
+
 // Mock fs module
 vi.mock("fs", () => ({
   default: {
-    existsSync: vi.fn().mockImplementation((p: string) => {
-      if (p.endsWith("skills")) return mockDirExists;
-      const filename = p.split("/").pop() || "";
-      for (const [key] of mockFiles) {
-        if (key.endsWith(filename)) return true;
-      }
-      return false;
-    }),
+    existsSync: vi.fn().mockImplementation((p: string) => pathExists(p)),
     readFileSync: vi.fn().mockImplementation((p: string) => {
-      const filename = p.split("/").pop() || "";
-      for (const [key, value] of mockFiles) {
-        if (key.endsWith(filename)) return value;
+      const normalized = normalizePath(p);
+      const value = mockFiles.get(normalized);
+      if (value === undefined) {
+        throw new Error(`File not found: ${p}`);
       }
-      throw new Error(`File not found: ${p}`);
+      return value;
     }),
     writeFileSync: vi.fn().mockImplementation((p: string, content: string) => {
-      const filename = p.split("/").pop() || "";
-      mockFiles.set(filename, content);
+      const normalized = normalizePath(p);
+      ensureDir(parentDir(normalized));
+      mockFiles.set(normalized, content);
     }),
-    readdirSync: vi.fn().mockImplementation(() => {
-      return Array.from(mockFiles.keys())
-        .filter((k) => k.endsWith(".json"))
-        .map((k) => k.split("/").pop());
+    copyFileSync: vi.fn().mockImplementation((src: string, dest: string) => {
+      const normalizedSrc = normalizePath(src);
+      const normalizedDest = normalizePath(dest);
+      const value = mockFiles.get(normalizedSrc);
+      if (value === undefined) {
+        throw new Error(`File not found: ${src}`);
+      }
+      ensureDir(parentDir(normalizedDest));
+      mockFiles.set(normalizedDest, value);
     }),
-    mkdirSync: vi.fn(),
+    readdirSync: vi.fn().mockImplementation((dir: string, options?: { withFileTypes?: boolean }) => {
+      const entries = listDirEntries(dir);
+      if (options?.withFileTypes) {
+        return entries.map((entry) => ({
+          name: entry.name,
+          isDirectory: () => entry.isDirectory,
+          isFile: () => !entry.isDirectory,
+        }));
+      }
+      return entries.map((entry) => entry.name);
+    }),
+    mkdirSync: vi.fn().mockImplementation((dir: string) => {
+      ensureDir(dir);
+    }),
+    statSync: vi.fn().mockImplementation((p: string) => {
+      const normalized = normalizePath(p);
+      if (mockFiles.has(normalized)) {
+        return { size: Buffer.byteLength(mockFiles.get(normalized) || "", "utf8") };
+      }
+      if (mockDirs.has(normalized)) {
+        return { size: 0 };
+      }
+      throw new Error(`Path not found: ${p}`);
+    }),
     unlinkSync: vi.fn().mockImplementation((p: string) => {
-      const filename = p.split("/").pop() || "";
-      mockFiles.delete(filename);
+      mockFiles.delete(normalizePath(p));
+    }),
+    rmSync: vi.fn().mockImplementation((target: string) => {
+      const normalized = normalizePath(target);
+      mockFiles.delete(normalized);
+      for (const filePath of Array.from(mockFiles.keys())) {
+        if (filePath.startsWith(`${normalized}/`)) {
+          mockFiles.delete(filePath);
+        }
+      }
+      for (const dirPath of Array.from(mockDirs)) {
+        if (dirPath === normalized || dirPath.startsWith(`${normalized}/`)) {
+          mockDirs.delete(dirPath);
+        }
+      }
     }),
   },
-  existsSync: vi.fn().mockImplementation((p: string) => {
-    if (p.endsWith("skills")) return mockDirExists;
-    const filename = p.split("/").pop() || "";
-    for (const [key] of mockFiles) {
-      if (key.endsWith(filename)) return true;
-    }
-    return false;
-  }),
+  existsSync: vi.fn().mockImplementation((p: string) => pathExists(p)),
   readFileSync: vi.fn().mockImplementation((p: string) => {
-    const filename = p.split("/").pop() || "";
-    for (const [key, value] of mockFiles) {
-      if (key.endsWith(filename)) return value;
+    const normalized = normalizePath(p);
+    const value = mockFiles.get(normalized);
+    if (value === undefined) {
+      throw new Error(`File not found: ${p}`);
     }
-    throw new Error(`File not found: ${p}`);
+    return value;
   }),
   writeFileSync: vi.fn().mockImplementation((p: string, content: string) => {
-    const filename = p.split("/").pop() || "";
-    mockFiles.set(filename, content);
+    const normalized = normalizePath(p);
+    ensureDir(parentDir(normalized));
+    mockFiles.set(normalized, content);
   }),
-  readdirSync: vi.fn().mockImplementation(() => {
-    return Array.from(mockFiles.keys())
-      .filter((k) => k.endsWith(".json"))
-      .map((k) => k.split("/").pop());
+  copyFileSync: vi.fn().mockImplementation((src: string, dest: string) => {
+    const normalizedSrc = normalizePath(src);
+    const normalizedDest = normalizePath(dest);
+    const value = mockFiles.get(normalizedSrc);
+    if (value === undefined) {
+      throw new Error(`File not found: ${src}`);
+    }
+    ensureDir(parentDir(normalizedDest));
+    mockFiles.set(normalizedDest, value);
   }),
-  mkdirSync: vi.fn(),
+  readdirSync: vi.fn().mockImplementation((dir: string, options?: { withFileTypes?: boolean }) => {
+    const entries = listDirEntries(dir);
+    if (options?.withFileTypes) {
+      return entries.map((entry) => ({
+        name: entry.name,
+        isDirectory: () => entry.isDirectory,
+        isFile: () => !entry.isDirectory,
+      }));
+    }
+    return entries.map((entry) => entry.name);
+  }),
+  mkdirSync: vi.fn().mockImplementation((dir: string) => {
+    ensureDir(dir);
+  }),
+  statSync: vi.fn().mockImplementation((p: string) => {
+    const normalized = normalizePath(p);
+    if (mockFiles.has(normalized)) {
+      return { size: Buffer.byteLength(mockFiles.get(normalized) || "", "utf8") };
+    }
+    if (mockDirs.has(normalized)) {
+      return { size: 0 };
+    }
+    throw new Error(`Path not found: ${p}`);
+  }),
   unlinkSync: vi.fn().mockImplementation((p: string) => {
-    const filename = p.split("/").pop() || "";
-    mockFiles.delete(filename);
+    mockFiles.delete(normalizePath(p));
+  }),
+  rmSync: vi.fn().mockImplementation((target: string) => {
+    const normalized = normalizePath(target);
+    mockFiles.delete(normalized);
+    for (const filePath of Array.from(mockFiles.keys())) {
+      if (filePath.startsWith(`${normalized}/`)) {
+        mockFiles.delete(filePath);
+      }
+    }
+    for (const dirPath of Array.from(mockDirs)) {
+      if (dirPath === normalized || dirPath.startsWith(`${normalized}/`)) {
+        mockDirs.delete(dirPath);
+      }
+    }
   }),
 }));
 
@@ -119,7 +297,7 @@ describe("SkillRegistry", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockFiles.clear();
-    mockDirExists = true;
+    mockDirs = new Set(["/", "/mock", "/mock/skills", "/mock/user", "/mock/user/data"]);
     mockFetch.mockReset();
     resetSkillRegistry();
     registry = new SkillRegistry({
@@ -317,10 +495,291 @@ describe("SkillRegistry", () => {
     });
   });
 
+  describe("external imports", () => {
+    it("installs a skill from a raw JSON URL", async () => {
+      const mockSkillData = createMockSkill({ id: "remote-json" });
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        headers: {
+          get: () => "application/json",
+        },
+        arrayBuffer: () => {
+          const bytes = Buffer.from(JSON.stringify(mockSkillData), "utf8");
+          return Promise.resolve(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+        },
+      });
+
+      const result = await registry.installFromUrl("https://example.com/remote-json.json");
+
+      expect(result.success).toBe(true);
+      expect(result.skill?.id).toBe("remote-json");
+      expect(mockFiles.has(managedPath("remote-json.json"))).toBe(true);
+    });
+
+    it("installs a skill bundle from a raw SKILL.md URL", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        headers: {
+          get: () => "text/markdown",
+        },
+        arrayBuffer: () => {
+          const bytes = Buffer.from(
+            "---\nname: Imported Bundle\ndescription: Imported bundle description\n---\n# Imported Bundle\n",
+            "utf8",
+          );
+          return Promise.resolve(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+        },
+      });
+
+      const result = await registry.installFromUrl("https://example.com/skills/SKILL.md");
+
+      expect(result.success).toBe(true);
+      expect(result.skill?.id).toBe("imported-bundle");
+      expect(result.skill?.invocation?.disableModelInvocation).toBe(true);
+      expect(mockFiles.has(managedPath("imported-bundle.json"))).toBe(true);
+      expect(mockFiles.has(managedPath("imported-bundle/SKILL.md"))).toBe(true);
+    });
+
+    it("installs a skill bundle from a git repository", async () => {
+      const result = await registry.installFromGit("https://github.com/example/skill-repo");
+
+      expect(result.success).toBe(true);
+      expect(result.skill?.id).toBe("git-imported-skill");
+      expect(mockFiles.has(managedPath("git-imported-skill.json"))).toBe(true);
+      expect(mockFiles.has(managedPath("git-imported-skill/SKILL.md"))).toBe(true);
+    });
+
+    it("rejects oversized remote skill instructions before import", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        headers: {
+          get: (name: string) => (name === "content-type" ? "text/markdown" : "600000"),
+        },
+        arrayBuffer: () => Promise.resolve(new ArrayBuffer(0)),
+      });
+
+      const result = await registry.installFromUrl("https://example.com/skills/SKILL.md");
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("exceeds");
+    });
+  });
+
+  describe("clawhub imports", () => {
+    it("returns the top downloaded ClawHub skills when the query is empty", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            status: "success",
+            value: {
+              page: [
+                {
+                  ownerHandle: "pskoett",
+                  latestVersion: { version: "3.0.10" },
+                  skill: {
+                    slug: "self-improving-agent",
+                    displayName: "self-improving-agent",
+                    summary: "Captures learnings and corrections.",
+                    stats: {
+                      downloads: 323357,
+                      stars: 2819,
+                      installsCurrent: 5090,
+                      installsAllTime: 5348,
+                    },
+                    tags: { latest: "3.0.10" },
+                  },
+                },
+              ],
+            },
+          }),
+      });
+
+      const result = await registry.searchClawHub("", { pageSize: 10 });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        "https://wry-manatee-359.convex.cloud/api/query",
+        expect.objectContaining({
+          method: "POST",
+        }),
+      );
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0]?.id).toBe("self-improving-agent");
+      expect(result.results[0]?.downloads).toBe(323357);
+      expect(result.results[0]?.stars).toBe(2819);
+      expect(result.results[0]?.installsCurrent).toBe(5090);
+      expect(result.results[0]?.installsAllTime).toBe(5348);
+    });
+
+    it("searches ClawHub and falls back to exact slug lookup", async () => {
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              status: "success",
+              value: [],
+            }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              skill: {
+                slug: "self-improving-agent",
+                displayName: "self-improving-agent",
+                summary: "Captures learnings and corrections.",
+                tags: { latest: "3.0.10" },
+                stats: { downloads: 12 },
+              },
+              owner: { handle: "pskoett" },
+              latestVersion: { version: "3.0.10" },
+            }),
+        });
+
+      const result = await registry.searchClawHub("self improving");
+
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0]?.id).toBe("self-improving-agent");
+      expect(result.results[0]?.source).toBe("clawhub");
+      expect(result.results[0]?.downloads).toBe(12);
+    });
+
+    it("searches ClawHub and returns stats-rich action results", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            status: "success",
+            value: [
+              {
+                ownerHandle: "pskoett",
+                version: { version: "3.0.10" },
+                skill: {
+                  slug: "self-improving-agent",
+                  displayName: "self-improving-agent",
+                  summary: "Captures learnings and corrections.",
+                  stats: {
+                    downloads: 323357,
+                    stars: 2819,
+                    installsCurrent: 5090,
+                    installsAllTime: 5348,
+                  },
+                  tags: { latest: "3.0.10" },
+                },
+              },
+            ],
+          }),
+      });
+
+      const result = await registry.searchClawHub("self improving agent");
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        "https://wry-manatee-359.convex.cloud/api/action",
+        expect.objectContaining({
+          method: "POST",
+        }),
+      );
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0]?.id).toBe("self-improving-agent");
+      expect(result.results[0]?.stars).toBe(2819);
+      expect(result.results[0]?.downloads).toBe(323357);
+      expect(result.results[0]?.installsCurrent).toBe(5090);
+      expect(result.results[0]?.installsAllTime).toBe(5348);
+    });
+
+    it("downloads and installs a ClawHub zip bundle", async () => {
+      const zip = new JSZip();
+      zip.file(
+        "SKILL.md",
+        "---\nname: Self Improving Agent\ndescription: Learns from failures.\n---\n# Self Improving Agent\n",
+      );
+      zip.file("references/guide.md", "# Guide");
+      const zipBytes = await zip.generateAsync({ type: "uint8array" });
+
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              skill: {
+                slug: "self-improving-agent",
+                displayName: "self-improving-agent",
+                summary: "Captures learnings and corrections.",
+                tags: { latest: "3.0.10" },
+              },
+              owner: { handle: "pskoett" },
+              latestVersion: { version: "3.0.10" },
+            }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          arrayBuffer: () =>
+            Promise.resolve(
+              zipBytes.buffer.slice(
+                zipBytes.byteOffset,
+                zipBytes.byteOffset + zipBytes.byteLength,
+              ),
+            ),
+        });
+
+      const result = await registry.installFromClawHub("https://clawhub.ai/pskoett/self-improving-agent");
+
+      expect(result.success).toBe(true);
+      expect(result.skill?.id).toBe("self-improving-agent");
+      expect(result.skill?.metadata?.homepage).toBe(
+        "https://clawhub.ai/pskoett/self-improving-agent",
+      );
+      expect(mockFiles.has(managedPath("self-improving-agent.json"))).toBe(true);
+      expect(mockFiles.has(managedPath("self-improving-agent/SKILL.md"))).toBe(true);
+      expect(mockFiles.has(managedPath("self-improving-agent/references/guide.md"))).toBe(true);
+    });
+
+    it("preserves the ClawHub slug even when the bundle frontmatter uses a different id", async () => {
+      const zip = new JSZip();
+      zip.file(
+        "SKILL.md",
+        "---\nname: self-improvement\ndescription: Learns from failures.\n---\n# Self Improvement\n",
+      );
+      const zipBytes = await zip.generateAsync({ type: "uint8array" });
+
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              skill: {
+                slug: "self-improving-agent",
+                displayName: "self-improving-agent",
+                summary: "Captures learnings and corrections.",
+                tags: { latest: "3.0.10" },
+              },
+              owner: { handle: "pskoett" },
+              latestVersion: { version: "3.0.10" },
+            }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          arrayBuffer: () =>
+            Promise.resolve(
+              zipBytes.buffer.slice(
+                zipBytes.byteOffset,
+                zipBytes.byteOffset + zipBytes.byteLength,
+              ),
+            ),
+        });
+
+      const result = await registry.installFromClawHub("https://clawhub.ai/pskoett/self-improving-agent");
+
+      expect(result.success).toBe(true);
+      expect(result.skill?.id).toBe("self-improving-agent");
+      expect(mockFiles.has(managedPath("self-improving-agent.json"))).toBe(true);
+    });
+  });
+
   describe("update", () => {
     it("should return error if skill is not installed", async () => {
-      mockDirExists = true;
-
       const result = await registry.update("non-installed");
 
       expect(result.success).toBe(false);
@@ -330,7 +789,7 @@ describe("SkillRegistry", () => {
     it("should re-install skill when updating", async () => {
       // First install a skill
       const skillData = createMockSkill({ id: "update-skill" });
-      mockFiles.set("update-skill.json", JSON.stringify(skillData));
+      mockFiles.set(managedPath("update-skill.json"), JSON.stringify(skillData));
 
       // Mock the fetch for update
       const updatedSkill = { ...skillData, metadata: { version: "2.0.0" } };
@@ -349,7 +808,7 @@ describe("SkillRegistry", () => {
   describe("uninstall", () => {
     it("should remove skill file", () => {
       const skillData = createMockSkill({ id: "to-uninstall" });
-      mockFiles.set("to-uninstall.json", JSON.stringify(skillData));
+      mockFiles.set(managedPath("to-uninstall.json"), JSON.stringify(skillData));
 
       const result = registry.uninstall("to-uninstall");
 
@@ -374,8 +833,8 @@ describe("SkillRegistry", () => {
       const skill1 = createMockSkill({ id: "skill-1" });
       const skill2 = createMockSkill({ id: "skill-2" });
 
-      mockFiles.set("skill-1.json", JSON.stringify(skill1));
-      mockFiles.set("skill-2.json", JSON.stringify(skill2));
+      mockFiles.set(managedPath("skill-1.json"), JSON.stringify(skill1));
+      mockFiles.set(managedPath("skill-2.json"), JSON.stringify(skill2));
 
       const skills = registry.listManagedSkills();
 
@@ -384,8 +843,8 @@ describe("SkillRegistry", () => {
     });
 
     it("should skip non-json files", () => {
-      mockFiles.set("skill-1.json", JSON.stringify(createMockSkill({ id: "skill-1" })));
-      mockFiles.set("readme.txt", "Some text");
+      mockFiles.set(managedPath("skill-1.json"), JSON.stringify(createMockSkill({ id: "skill-1" })));
+      mockFiles.set(managedPath("readme.txt"), "Some text");
 
       const skills = registry.listManagedSkills();
 
@@ -393,8 +852,8 @@ describe("SkillRegistry", () => {
     });
 
     it("should handle malformed JSON gracefully", () => {
-      mockFiles.set("good.json", JSON.stringify(createMockSkill({ id: "good" })));
-      mockFiles.set("bad.json", "not valid json");
+      mockFiles.set(managedPath("good.json"), JSON.stringify(createMockSkill({ id: "good" })));
+      mockFiles.set(managedPath("bad.json"), "not valid json");
 
       // The mock returns both, but parsing will fail for bad.json
       // Since our mock doesn't throw on invalid JSON, we need to adjust
@@ -408,7 +867,7 @@ describe("SkillRegistry", () => {
   describe("isInstalled", () => {
     it("should return true when skill is installed", () => {
       mockFiles.set(
-        "installed-skill.json",
+        managedPath("installed-skill.json"),
         JSON.stringify(createMockSkill({ id: "installed-skill" })),
       );
 
@@ -426,14 +885,14 @@ describe("SkillRegistry", () => {
         id: "versioned",
         metadata: { version: "1.2.3", author: "Test" },
       });
-      mockFiles.set("versioned.json", JSON.stringify(skill));
+      mockFiles.set(managedPath("versioned.json"), JSON.stringify(skill));
 
       expect(registry.getInstalledVersion("versioned")).toBe("1.2.3");
     });
 
     it("should return null when skill has no version", () => {
       const skill = createMockSkill({ id: "no-version" });
-      mockFiles.set("no-version.json", JSON.stringify(skill));
+      mockFiles.set(managedPath("no-version.json"), JSON.stringify(skill));
 
       expect(registry.getInstalledVersion("no-version")).toBeNull();
     });
@@ -449,7 +908,7 @@ describe("SkillRegistry", () => {
         id: "outdated",
         metadata: { version: "1.0.0", author: "Test" },
       });
-      mockFiles.set("outdated.json", JSON.stringify(skill));
+      mockFiles.set(managedPath("outdated.json"), JSON.stringify(skill));
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -468,7 +927,7 @@ describe("SkillRegistry", () => {
         id: "current",
         metadata: { version: "1.0.0", author: "Test" },
       });
-      mockFiles.set("current.json", JSON.stringify(skill));
+      mockFiles.set(managedPath("current.json"), JSON.stringify(skill));
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -482,7 +941,7 @@ describe("SkillRegistry", () => {
 
     it("should handle skill not found in registry", async () => {
       const skill = createMockSkill({ id: "local-only" });
-      mockFiles.set("local-only.json", JSON.stringify(skill));
+      mockFiles.set(managedPath("local-only.json"), JSON.stringify(skill));
 
       mockFetch.mockResolvedValueOnce({
         ok: false,
@@ -514,8 +973,8 @@ describe("SkillRegistry", () => {
     it("should update all installed skills", async () => {
       const skill1 = createMockSkill({ id: "skill-1" });
       const skill2 = createMockSkill({ id: "skill-2" });
-      mockFiles.set("skill-1.json", JSON.stringify(skill1));
-      mockFiles.set("skill-2.json", JSON.stringify(skill2));
+      mockFiles.set(managedPath("skill-1.json"), JSON.stringify(skill1));
+      mockFiles.set(managedPath("skill-2.json"), JSON.stringify(skill2));
 
       // Mock successful updates
       mockFetch
@@ -537,7 +996,7 @@ describe("SkillRegistry", () => {
 
     it("should track failed updates", async () => {
       const skill1 = createMockSkill({ id: "skill-1" });
-      mockFiles.set("skill-1.json", JSON.stringify(skill1));
+      mockFiles.set(managedPath("skill-1.json"), JSON.stringify(skill1));
 
       mockFetch.mockResolvedValueOnce({
         ok: false,
@@ -581,7 +1040,7 @@ describe("Security: Skill ID Validation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockFiles.clear();
-    mockDirExists = true;
+    mockDirs = new Set(["/", "/mock", "/mock/skills", "/mock/user", "/mock/user/data"]);
     mockFetch.mockReset();
     resetSkillRegistry();
     registry = new SkillRegistry({
