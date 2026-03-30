@@ -57,6 +57,7 @@ import {
   AccentColor,
   UiDensity,
   type LLMProviderType,
+  type LLMRoutingRuntimeState,
   type CustomProviderConfig,
   type AzureReasoningEffort,
 } from "../../shared/types";
@@ -634,6 +635,7 @@ export function Settings({
   const [models, setModels] = useState<ModelOption[]>([]);
   const [providerRoutingModels, setProviderRoutingModels] = useState<ModelOption[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [routingRuntime, setRoutingRuntime] = useState<LLMRoutingRuntimeState | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -852,6 +854,14 @@ export function Settings({
 
   useEffect(() => {
     loadConfigStatus();
+  }, []);
+
+  useEffect(() => {
+    if (!window.electronAPI?.onLLMRoutingEvent) return;
+    const unsubscribe = window.electronAPI.onLLMRoutingEvent((event) => {
+      setRoutingRuntime(event);
+    });
+    return unsubscribe;
   }, []);
 
   // Poll hf-agents server status when that provider is active
@@ -1207,6 +1217,14 @@ export function Settings({
       // Load full settings separately for bedrock config
       const loadedSettings = await window.electronAPI.getLLMSettings();
       setSettings(loadedSettings);
+      if (window.electronAPI?.getLLMRoutingStatus) {
+        try {
+          setRoutingRuntime(await window.electronAPI.getLLMRoutingStatus());
+        } catch (error) {
+          console.error("Failed to load LLM routing status:", error);
+          setRoutingRuntime(null);
+        }
+      }
       if (loadedSettings.customProviders) {
         const normalized = { ...loadedSettings.customProviders };
         if (normalized["kimi-coding"] && !normalized["kimi-code"]) {
@@ -4538,6 +4556,71 @@ export function Settings({
                             cost/quality.
                           </p>
                         )}
+
+                        <div className="settings-subsection routing-runtime-panel">
+                          <div className="routing-runtime-header">
+                            <h4>Live routing</h4>
+                            <button
+                              className="button-small button-secondary"
+                              type="button"
+                              onClick={() =>
+                                void window.electronAPI?.getLLMRoutingStatus?.()
+                                  .then((state) => setRoutingRuntime(state))
+                                  .catch((error) => {
+                                    console.error("Failed to refresh routing status:", error);
+                                  })
+                              }
+                            >
+                              Refresh
+                            </button>
+                          </div>
+                          {routingRuntime ? (
+                            <>
+                              <div className="routing-runtime-grid">
+                                <div className="routing-runtime-item">
+                                  <span>Active provider</span>
+                                  <strong>{routingRuntime.activeProvider}</strong>
+                                </div>
+                                <div className="routing-runtime-item">
+                                  <span>Active model</span>
+                                  <strong>{routingRuntime.activeModel}</strong>
+                                </div>
+                                <div className="routing-runtime-item">
+                                  <span>Route reason</span>
+                                  <strong>{routingRuntime.routeReason.replace("_", " ")}</strong>
+                                </div>
+                                <div className="routing-runtime-item">
+                                  <span>Fallback</span>
+                                  <strong>
+                                    {routingRuntime.fallbackOccurred ? "Used" : "Not used"}
+                                  </strong>
+                                </div>
+                              </div>
+                              <p className="settings-hint">
+                                Current provider/model: {routingRuntime.currentProvider} /{" "}
+                                {routingRuntime.currentModel}
+                                {routingRuntime.manualOverride
+                                  ? " Manual override is active."
+                                  : " Automatic routing is active."}
+                              </p>
+                              {routingRuntime.fallbackChain.length > 0 && (
+                                <ul className="routing-runtime-fallbacks">
+                                  {routingRuntime.fallbackChain.map((step, index) => (
+                                    <li key={`${step.providerType}:${step.modelKey}:${index}`}>
+                                      <strong>{step.providerType}</strong> / {step.modelKey} -{" "}
+                                      {step.reason}
+                                      {step.success ? " (success)" : " (failed)"}
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
+                            </>
+                          ) : (
+                            <p className="settings-hint">
+                              No live routing snapshot yet. Open a task or refresh after a route change.
+                            </p>
+                          )}
+                        </div>
                       </div>
                     )}
                   </div>
