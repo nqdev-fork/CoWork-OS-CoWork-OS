@@ -27,6 +27,9 @@ import {
   TaskPathRootPolicy,
   GuardrailSettings,
   WebSearchMode,
+  type LLMRoutingRuntimeState,
+  type LLMRoutingReason,
+  type LLMRoutingFallbackStep,
 } from "../../shared/types";
 import { isVerificationStepDescription } from "../../shared/plan-utils";
 import { formatProviderErrorForDisplay } from "../../shared/provider-error-format";
@@ -71,6 +74,7 @@ import { sanitizeToolCallHistory } from "./llm/openai-compatible";
 import { getCustomSkillLoader } from "./custom-skill-loader";
 import { MemoryService } from "../memory/MemoryService";
 import { PlaybookService } from "../memory/PlaybookService";
+import { HermesParityService } from "./HermesParityService";
 import { UserProfileService } from "../memory/UserProfileService";
 import { KnowledgeGraphService } from "../knowledge-graph/KnowledgeGraphService";
 import { MemorySynthesizer } from "../memory/MemorySynthesizer";
@@ -3959,6 +3963,8 @@ ${transcript}
   private agentPolicyConfig: AgentPolicyConfig | null = null;
   private agentPolicyFilePath: string | null = null;
   private acpxRuntimeRunner: AcpxRuntimeRunner | null = null;
+  private lastRoutingState: LLMRoutingRuntimeState | null = null;
+  private cachedLlmSettings: ReturnType<typeof LLMProviderFactory.loadSettings> | null = null;
 
   /** Expose workspace ID for daemon to refresh executors when permissions change. */
   getWorkspaceId(): string {
@@ -4311,6 +4317,17 @@ ${transcript}
       llmProfileUsed: this.llmProfileUsed,
       resolvedModelKey: this.resolvedModelKey,
       modelSource: llmSelection.modelSource,
+    });
+    this.emitRoutingState({
+      routeReason:
+        llmSelection.modelSource === "explicit_override"
+          ? "manual_override"
+          : llmSelection.modelSource === "profile_model"
+            ? "profile_routing"
+            : "automatic_execution",
+      fallbackChain: [],
+      fallbackOccurred: false,
+      manualOverride: Boolean(task.agentConfig?.modelKey),
     });
   }
 
@@ -4786,11 +4803,34 @@ ${transcript}
           console.log(
             `${this.logTag} Retry attempt ${attempt}/${maxRetries} for ${operation} after ${delay}ms`,
           );
+          const retryReason =
+            typeof lastError?.message === "string"
+              ? lastError.message.toLowerCase().includes("rate limit")
+                ? "quota"
+                : lastError.message.toLowerCase().includes("timeout")
+                  ? "provider_outage"
+                  : "fallback"
+              : "fallback";
           this.emitEvent("llm_retry", {
             operation,
             attempt,
             maxRetries,
             delayMs: delay,
+          });
+          this.emitRoutingState({
+            routeReason: retryReason as LLMRoutingReason,
+            fallbackOccurred: true,
+            fallbackChain: [
+              ...(this.lastRoutingState?.fallbackChain || []),
+              {
+                providerType: this.provider.type,
+                modelKey: this.modelKey,
+                reason: retryReason,
+                attemptedAt: Date.now(),
+                success: false,
+                error: lastError?.message || undefined,
+              },
+            ],
           });
           await sleep(delay);
         }
@@ -9036,11 +9076,14 @@ ${transcript}
   /**
    * Capture a playbook entry recording what approach worked or didn't.
    */
-  private capturePlaybookOutcome(outcome: "success" | "failure", errorMessage?: string): void {
+  private async capturePlaybookOutcome(
+    outcome: "success" | "failure",
+    errorMessage?: string,
+  ): Promise<void> {
     try {
       const planSummary = this.plan?.steps?.map((s) => s.description).join("; ") || "";
       const toolsUsed = [...new Set(this.toolResultMemory.map((t) => t.tool))].slice(0, 10);
-      PlaybookService.captureOutcome(
+      const captureResult = await PlaybookService.captureOutcome(
         this.workspace.id,
         this.task.id,
         this.task.title,
@@ -9049,24 +9092,34 @@ ${transcript}
         planSummary,
         toolsUsed,
         errorMessage,
-      ).catch(() => {
-        /* best-effort */
-      });
+      ).then(
+        () => true,
+        () => false,
+      );
 
       // Reinforce matching playbook entries on success so proven patterns rank higher.
+      let playbookReinforced = false;
+      let skillProposal: {
+        proposed: boolean;
+        proposalId?: string;
+        proposalStatus?: "pending" | "approved" | "rejected";
+        reason: string;
+      } | undefined;
       if (outcome === "success") {
-        PlaybookService.reinforceEntry(this.workspace.id, this.task.prompt, toolsUsed).catch(() => {
-          /* best-effort */
-        });
+        await PlaybookService.reinforceEntry(this.workspace.id, this.task.prompt, toolsUsed)
+          .then(() => {
+            playbookReinforced = true;
+          })
+          .catch(() => {
+            playbookReinforced = false;
+          });
 
         // Auto-propose skills from repeatedly reinforced playbook patterns.
-        import("../memory/PlaybookSkillPromoter")
+        skillProposal = await import("../memory/PlaybookSkillPromoter")
           .then(({ PlaybookSkillPromoter }) =>
             PlaybookSkillPromoter.maybePropose(this.workspace.id, this.workspace.path),
           )
-          .catch(() => {
-            /* best-effort */
-          });
+          .catch(() => ({ proposed: false, reason: "error" }));
 
         // Extract entities/relationships from task results into the knowledge graph.
         try {
@@ -9102,6 +9155,31 @@ ${transcript}
           /* best-effort */
         }
       }
+
+      const learningProgress = HermesParityService.buildLearningProgress({
+        task: this.task,
+        outcome:
+          outcome === "success"
+            ? skillProposal?.proposed
+              ? "pending_review"
+              : "reinforced"
+            : "failure",
+        summary:
+          outcome === "success"
+            ? this.task.resultSummary || this.buildResultSummary() || "Task completed successfully."
+            : errorMessage || this.task.error || this.buildResultSummary() || "Task failed.",
+        memoryCaptured: captureResult,
+        playbookReinforced,
+        skillProposal: skillProposal?.proposed
+          ? {
+              proposalId: skillProposal.proposalId,
+              proposalStatus: skillProposal.proposalStatus,
+              reason: skillProposal.reason,
+            }
+          : undefined,
+        evidenceRefs: [],
+      });
+      this.emitEvent("learning_progress", learningProgress);
     } catch {
       // Non-critical — don't disrupt task flow
     }
@@ -23812,6 +23890,38 @@ TASK / CONVERSATION HISTORY:
     this._suppressNextUserMessageEvent = true;
   }
 
+  private emitRoutingState(overrides?: {
+    routeReason?: LLMRoutingReason;
+    fallbackChain?: LLMRoutingFallbackStep[];
+    fallbackOccurred?: boolean;
+    manualOverride?: boolean;
+  }): void {
+    const settings = this.cachedLlmSettings ?? LLMProviderFactory.loadSettings();
+    const route = HermesParityService.buildRoutingState(settings, {
+      task: {
+        title: this.task.title,
+        prompt: this.task.prompt,
+        agentConfig: this.task.agentConfig,
+        source: this.task.source,
+        status: this.task.status,
+      },
+      isVerificationTask:
+        this.task.agentConfig?.verificationAgent === true ||
+        /^verify\s*:/i.test(this.task.title) ||
+        /^verification\s*:/i.test(this.task.title),
+    });
+    const state: LLMRoutingRuntimeState = {
+      ...route,
+      routeReason: overrides?.routeReason || route.routeReason,
+      fallbackChain: overrides?.fallbackChain || route.fallbackChain,
+      fallbackOccurred: overrides?.fallbackOccurred ?? route.fallbackOccurred,
+      manualOverride: overrides?.manualOverride ?? route.manualOverride,
+      updatedAt: Date.now(),
+    };
+    this.lastRoutingState = state;
+    this.emitEvent("llm_routing_changed", state);
+  }
+
   /**
    * Refreshes the active provider/model route from current settings and the
    * executor's current runtime profile. This lets planning stay on the strong
@@ -23823,6 +23933,7 @@ TASK / CONVERSATION HISTORY:
     if (explicitProviderOverride != null) return;
 
     const currentSettings = LLMProviderFactory.loadSettings();
+    this.cachedLlmSettings = currentSettings;
     const currentSettingsProvider = String(currentSettings.providerType || "").trim();
     const providerChangedInSettings =
       currentSettingsProvider.length > 0 && currentSettingsProvider !== this.provider.type;
@@ -23869,6 +23980,12 @@ TASK / CONVERSATION HISTORY:
             `LLM provider updated mid-session: provider=${newSelection.providerType}, ` +
             `profile=${newSelection.llmProfileUsed}, model=${newSelection.modelId}`,
         });
+        this.emitRoutingState({
+          routeReason: providerChangedInSettings ? "profile_routing" : "manual_override",
+          fallbackChain: [],
+          fallbackOccurred: false,
+          manualOverride: Boolean(this.task.agentConfig?.modelKey),
+        });
       } catch (err: Any) {
         console.warn(
           `${this.logTag} Failed to switch provider mid-session to ${newSelection.providerType}: ${err?.message}. Keeping current provider.`,
@@ -23876,6 +23993,12 @@ TASK / CONVERSATION HISTORY:
       }
     } else if (newSelection.llmProfileUsed !== this.llmProfileUsed) {
       this.llmProfileUsed = newSelection.llmProfileUsed;
+      this.emitRoutingState({
+        routeReason: providerChangedInSettings ? "profile_routing" : "manual_override",
+        fallbackChain: [],
+        fallbackOccurred: false,
+        manualOverride: Boolean(this.task.agentConfig?.modelKey),
+      });
     }
   }
 
