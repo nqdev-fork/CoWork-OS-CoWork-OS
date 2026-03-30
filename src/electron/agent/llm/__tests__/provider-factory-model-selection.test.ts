@@ -273,3 +273,59 @@ describe("LLMProviderFactory profile-based task model routing", () => {
     expect(resolved.modelId).toBe("gpt-4o-mini");
   });
 });
+
+describe("LLMProviderFactory provider failover chain", () => {
+  it("builds an ordered chain from configured fallback providers", () => {
+    const settings: LLMSettings = {
+      providerType: "openai",
+      modelKey: "sonnet-4-5",
+      openai: {
+        apiKey: "openai-key",
+        model: "gpt-4o-mini",
+      },
+      anthropic: {
+        apiKey: "anthropic-key",
+      },
+      fallbackProviders: [
+        { providerType: "anthropic", modelKey: "sonnet-4-5" },
+        { providerType: "gemini", modelKey: "gemini-2.5-flash" },
+        { providerType: "openai", modelKey: "gpt-4o-mini" },
+      ],
+    };
+    vi.spyOn(LLMProviderFactory, "loadSettings").mockReturnValue(settings);
+
+    const primary = LLMProviderFactory.resolveTaskModelSelection();
+    const chain = LLMProviderFactory.resolveProviderFailoverChain(primary);
+
+    expect(chain.map((entry) => entry.providerType)).toEqual(["openai", "anthropic"]);
+    expect(chain.map((entry) => entry.modelKey)).toEqual(["gpt-4o-mini", "sonnet-4-5"]);
+  });
+
+  it("disables automatic failover when a task explicitly overrides provider or model", () => {
+    const settings: LLMSettings = {
+      providerType: "openai",
+      modelKey: "sonnet-4-5",
+      openai: {
+        apiKey: "openai-key",
+        model: "gpt-4o-mini",
+      },
+      anthropic: {
+        apiKey: "anthropic-key",
+      },
+      fallbackProviders: [{ providerType: "anthropic", modelKey: "sonnet-4-5" }],
+    };
+    vi.spyOn(LLMProviderFactory, "loadSettings").mockReturnValue(settings);
+
+    const primary = LLMProviderFactory.resolveTaskModelSelection({
+      providerType: "openai",
+      modelKey: "gpt-4.1-mini",
+    });
+    const chain = LLMProviderFactory.resolveProviderFailoverChain(primary, {
+      providerType: "openai",
+      modelKey: "gpt-4.1-mini",
+    });
+
+    expect(chain).toHaveLength(1);
+    expect(chain[0]?.modelKey).toBe("gpt-4.1-mini");
+  });
+});
