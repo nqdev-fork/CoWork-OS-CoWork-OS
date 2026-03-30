@@ -24,6 +24,8 @@ import {
   SignalConfig,
   TeamsConfig,
   GoogleChatConfig,
+  FeishuConfig,
+  WeComConfig,
   MattermostConfig,
   MatrixConfig,
   TwitchConfig,
@@ -40,6 +42,8 @@ import { createImessageAdapter } from "./channels/imessage";
 import { createSignalAdapter } from "./channels/signal";
 import { createTeamsAdapter } from "./channels/teams";
 import { createGoogleChatAdapter } from "./channels/google-chat";
+import { createFeishuAdapter } from "./channels/feishu";
+import { createWeComAdapter } from "./channels/wecom";
 import { createMattermostAdapter } from "./channels/mattermost";
 import { createMatrixAdapter } from "./channels/matrix";
 import { createTwitchAdapter } from "./channels/twitch";
@@ -705,6 +709,150 @@ export class ChannelRegistry extends EventEmitter {
         },
       },
       factory: (config) => createGoogleChatAdapter(config as GoogleChatConfig),
+    });
+
+    // Feishu / Lark
+    this.register({
+      metadata: {
+        type: "feishu",
+        displayName: "Feishu / Lark",
+        description: "Feishu / Lark custom app integration using events and IM APIs",
+        icon: "🪽",
+        builtin: true,
+        capabilities: {
+          sendMessage: true,
+          receiveMessage: true,
+          attachments: false,
+          reactions: false,
+          inlineKeyboards: false,
+          replyKeyboards: false,
+          polls: false,
+          voice: false,
+          video: false,
+          location: false,
+          editMessage: false,
+          deleteMessage: false,
+          typing: false,
+          readReceipts: false,
+          groups: true,
+          threads: false,
+          webhooks: true,
+          e2eEncryption: false,
+        },
+        configSchema: {
+          type: "object",
+          properties: {
+            appId: {
+              type: "string",
+              description: "Feishu / Lark custom app ID",
+              required: true,
+            },
+            appSecret: {
+              type: "string",
+              description: "Feishu / Lark custom app secret",
+              required: true,
+              secret: true,
+            },
+            verificationToken: {
+              type: "string",
+              description: "Callback verification token",
+              secret: true,
+            },
+            encryptKey: {
+              type: "string",
+              description: "Callback encrypt key",
+              secret: true,
+            },
+            webhookPort: {
+              type: "number",
+              description: "Webhook endpoint port (default: 3980)",
+              default: 3980,
+            },
+            webhookPath: {
+              type: "string",
+              description: "Webhook path (default: /feishu/webhook)",
+              default: "/feishu/webhook",
+            },
+          },
+          required: ["appId", "appSecret"],
+        },
+      },
+      factory: (config) => createFeishuAdapter(config as FeishuConfig),
+    });
+
+    // WeCom
+    this.register({
+      metadata: {
+        type: "wecom",
+        displayName: "WeCom",
+        description: "WeCom enterprise app integration using callback webhooks and app messaging",
+        icon: "🏢",
+        builtin: true,
+        capabilities: {
+          sendMessage: true,
+          receiveMessage: true,
+          attachments: false,
+          reactions: false,
+          inlineKeyboards: false,
+          replyKeyboards: false,
+          polls: false,
+          voice: false,
+          video: false,
+          location: false,
+          editMessage: false,
+          deleteMessage: false,
+          typing: false,
+          readReceipts: false,
+          groups: true,
+          threads: false,
+          webhooks: true,
+          e2eEncryption: false,
+        },
+        configSchema: {
+          type: "object",
+          properties: {
+            corpId: {
+              type: "string",
+              description: "Enterprise corp ID",
+              required: true,
+            },
+            agentId: {
+              type: "number",
+              description: "Application agent ID",
+              required: true,
+            },
+            secret: {
+              type: "string",
+              description: "Application secret",
+              required: true,
+              secret: true,
+            },
+            token: {
+              type: "string",
+              description: "Callback token",
+              required: true,
+              secret: true,
+            },
+            encodingAESKey: {
+              type: "string",
+              description: "Optional callback encoding AES key",
+              secret: true,
+            },
+            webhookPort: {
+              type: "number",
+              description: "Webhook endpoint port (default: 3981)",
+              default: 3981,
+            },
+            webhookPath: {
+              type: "string",
+              description: "Webhook path (default: /wecom/webhook)",
+              default: "/wecom/webhook",
+            },
+          },
+          required: ["corpId", "agentId", "secret", "token"],
+        },
+      },
+      factory: (config) => createWeComAdapter(config as WeComConfig),
     });
 
     // Mattermost
