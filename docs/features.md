@@ -2,14 +2,16 @@
 
 ## Multi-Channel AI Gateway
 
-15 messaging channels with unified operations. See [Channel Integrations](channels.md) for setup details.
+17 messaging channels with unified operations. See [Channel Integrations](channels.md) for setup details.
 
 - **WhatsApp**: QR code pairing, self-chat mode, markdown support
-- **Telegram**: Bot commands, streaming responses, workspace selection
-- **Discord**: Slash commands, DM support, guild integration, embeds/polls/select menus, live message fetch and attachment download
-- **Slack**: Socket Mode, channel mentions, file uploads
+- **Telegram**: Bot commands, streaming responses, workspace selection, group routing modes, and allowed-group allowlists
+- **Discord**: Slash commands, DM support, guild integration, guild allowlists, embeds/polls/select menus, live message fetch and attachment download
+- **Slack**: Socket Mode, channel mentions, file uploads, and multiple workspace installations in one app profile
 - **Microsoft Teams**: Bot Framework SDK, DM/channel mentions, adaptive cards
 - **Google Chat**: Service account auth, spaces/DMs, threaded conversations
+- **Feishu / Lark**: Webhook + app credential gateway support for Lark/Feishu tenants
+- **WeCom**: Enterprise WeCom webhook and encrypted event routing support
 - **iMessage**: macOS native integration, pairing codes
 - **Signal**: End-to-end encrypted messaging via signal-cli
 - **Mattermost**: WebSocket real-time, REST API
@@ -25,6 +27,8 @@
 
 ## Agent Capabilities
 
+- **Profiles & Portability**: Separate app profiles isolate their own database, credentials, channels, skills, and sessions. Profiles can be exported/imported as bundles for migration or cloning.
+
 - **Ideas Panel**: Curated launch panel accessible from the sidebar above Sessions. Pre-written prompts organized by category let you start common workflows in one click. See [Ideas Panel: Supported Capabilities](ideas-capabilities.md) for the full list of tools each prompt uses and their graceful fallbacks.
 - **Task-Based Workflow**: Multi-step execution with plan-execute-observe loops
 - **Live Terminal**: Shell commands run in a real-time terminal view — see output as it happens, stop execution, or provide interactive input (e.g. `y`/`n` prompts)
@@ -39,7 +43,10 @@
 - **Agent Teams**: Multi-agent collaboration with shared checklists, coordinated runs, and team management UI
 - **Collaborative Mode**: Auto-create ephemeral teams where multiple agents work on the same task, sharing thoughts in real-time
 - **Multi-LLM Mode**: Send the same task to multiple LLM providers/models simultaneously, with a judge agent synthesizing the best result
+- **Workflow Pipeline**: Optional phase-based execution path where decomposed steps run as child tasks with per-phase LLM overrides or capability-based auto-selection
 - **Agent Comparison Mode**: Compare agent or model outputs side by side
+- **External Agent Orchestration**: Discover ACP agents, target local or remote assignees from orchestration tools, and invoke A2A-compatible remote endpoints behind the normal approval/policy layer
+- **ACP Lifecycle Hardening**: ACP task state is persisted locally, survives restarts, supports remote cancel, and enforces scoped task/inbox access for non-operator clients
 - **Sub-Task Navigation**: Open a delegated sub-task, inspect its timeline, then jump back to the parent task from the main content view
 - **Git Worktree Isolation**: Tasks run in isolated git worktrees with automatic branch creation, auto-commit, merge, conflict detection, and cleanup
 - **Task Pinning**: Pin important tasks in the sidebar for quick access
@@ -66,8 +73,19 @@
 - **Problem Framing Pre-flight**: Complex tasks show a structured problem restatement, assumptions, risks, and approach before execution begins
 - **Graceful Uncertainty**: Agent expresses uncertainty honestly and rates confidence on recommendations. Low-confidence messages display with an amber indicator.
 - **AI Playbook**: Auto-captures successful patterns (approach, outcome, tools) and lessons from failures with error classification (7 categories: tool failure, wrong approach, missing context, permission denied, timeout, rate limit, user correction). Time-based decay scoring deprioritises stale entries. Proven patterns reinforced on repeated success. Mid-task user corrections automatically detected and captured. Relevant entries injected into system prompts. View in Settings > AI Playbook.
-- **Message-Level Feedback**: Every completed assistant message shows 👍 / 👎 buttons. Thumbs-down opens a structured reason picker (Incorrect, Too verbose, Ignored instructions, Wrong tone, Unsafe / unwanted). Feedback is routed to the User Profile and Adaptive Style Engine for continuous style learning.
+- **Task Result Feedback**: Completed task banners show 👍 / 👎 controls, with task-level rejections logged as quality signals for Usage Insights. The shared feedback IPC still supports structured message-level feedback for adaptation and future UI surfaces.
 - **Evolving Agent Intelligence**: The agent visibly improves over time through a connected set of subsystems — unified memory synthesis, adaptive style learning, playbook-to-skill promotion, channel persona adaptation, evolution metrics, and daily operational journaling. See [Evolving Agent Intelligence](evolving-agent-intelligence.md).
+
+### Computer use (macOS)
+
+Desktop automation for **native apps** when MCP, browser automation, and shell are not enough. **Full guide:** [Computer use (macOS)](computer-use.md).
+
+- **Session lifecycle**: One active computer-use session at a time; orange safety overlay; global **Esc** abort; optional main-window hide during control; cleanup when the task finishes or the session ends.
+- **Per-app consent**: Each app is approved once **for that session** with tiers (`view_only`, `click_only`, `full_control`) and classifier-driven warnings (e.g. browsers, terminals/IDEs, Finder, System Settings).
+- **Permissions**: Accessibility and Screen Recording are surfaced in **Settings → Tools** with links into System Settings; restarting the app may be needed after Screen Recording changes.
+- **Built-in tools category**: Enable/disable and priority for the `computer_use` tool family alongside other built-in categories.
+- **Policy & planning**: Tool availability defers `computer_*` unless the task signals native/desktop GUI intent; executor guidance treats computer use as last resort after integrations, `browser_*`, and shell. For native GUI tasks, routing prefers **`computer_*`** (and **`open_application`** when launching the app) over **`run_applescript`** / fragile shell GUI hacks.
+- **Tools**: `computer_screenshot`, `computer_move_mouse`, `computer_click`, `computer_type`, `computer_key` (with blocklisted dangerous key chords).
 
 ### Inbox Agent
 
@@ -278,6 +296,8 @@ CoWork OS supports external skill installation through the desktop GUI, not just
 - **Popular ClawHub list**: Opening the ClawHub tab with no query shows the top downloaded public ClawHub skills
 - **External import field**: Install skills from Git repositories, ClawHub page URLs, raw JSON manifests, or raw `SKILL.md` URLs
 - **Managed install path**: Imported skills are copied into CoWork’s managed skills directory and treated as managed skills afterward
+- **Optional external directories**: Add one or more absolute read-only skill folders in Settings so shared team skills can load without being copied into CoWork
+- **Clear precedence**: Workspace skills override managed installs, managed installs override external directories, and external directories override bundled defaults
 - **Cross-ecosystem support**: Other external skill stores are supported when they expose Git repos, raw manifests, or raw `SKILL.md` bundle entry points
 
 Access from **Settings** > **Skills** > **Skill Store**. See [Skill Store & External Skills](skill-store-and-external-skills.md) for detailed documentation.
@@ -676,6 +696,8 @@ The workspace dropdown at the top lets you filter insights to a single workspace
 | **Activity by Hour** | Hourly task histogram with peak hour indicator |
 | **Top Skills** | Most-used skills ranked by usage count |
 | **Skill Usage by Pack** | Skills grouped by their parent plugin pack with aggregated usage counts and mini bar charts |
+| **Persona Performance** | Per-persona totals, success/failure mix, retry behavior, and cost attribution |
+| **Feedback & Quality** | Task-result satisfaction rate, top rejection reasons, retried-task count, and average attempts |
 
 ### Agentic Work Units (AWU)
 
@@ -785,10 +807,11 @@ Condition-based automation engine that fires actions in response to events.
 
 | Feature | Description |
 |---------|-------------|
-| **Trigger sources** | Channel gateway messages, cron service, webhooks |
+| **Trigger sources** | Channel gateway messages, cron service, webhooks, and MCP connector/resource events |
 | **Action types** | `create_task`, `send_message`, `wake_agent` |
 | **Condition logic** | "all" (AND) evaluation of multiple conditions |
 | **Cooldown** | Configurable cooldown period (default 1 min) to prevent rapid re-firing |
+| **Connector content filters** | Optional `serverId`, `connectorId`, and `resourceUri` filters let a trigger subscribe to specific MCP-backed content changes |
 | **Variable substitution** | Event data can be injected into action prompts/titles |
 | **History** | Last 50 fires per trigger stored for audit |
 
@@ -841,7 +864,7 @@ Multi-provider image and PDF analysis with caching and optimization.
 |---------|-------------|
 | **Result caching** | SHA1-keyed cache (128 entries) prevents redundant vision API calls |
 | **Auto-downscaling** | Images >2MB automatically downscaled to 1600×1200 at 80% quality |
-| **Multi-provider fallback** | OpenAI → Anthropic → Gemini → Bedrock fallback chain |
+| **Multi-provider fallback** | Ordered provider chain with retry/failover across OpenAI, Anthropic, Gemini, Bedrock, and other configured providers |
 | **Retry logic** | Transient errors (429, 5xx, timeouts) trigger single retry |
 | **PDF conversion** | Uses `pdftoppm` to convert PDF pages to PNG at 72 DPI (5-page max) |
 
@@ -912,7 +935,7 @@ See [Live Canvas](live-canvas.md) for the full guide.
 
 Three-tier web interaction stack — from lightweight HTTP fetching to full browser automation to anti-bot scraping — all as native agent tools with no external CLI dependencies.
 
-### Web Search (5 providers, always available)
+### Web Search (6 providers, always available)
 
 Multi-provider web search with automatic fallback. DuckDuckGo is built-in and requires no API key, so `web_search` works out of the box for every user.
 
@@ -920,11 +943,12 @@ Multi-provider web search with automatic fallback. DuckDuckGo is built-in and re
 |----------|-------|---------|-------|
 | **DuckDuckGo** | Web | Not required | Built-in free fallback, always last in chain |
 | **Tavily** | Web, News | Required | AI-optimized results (recommended) |
+| **Exa** | Web, News | Required | Semantic search and research-heavy retrieval |
 | **Brave Search** | Web, News, Images | Required | Privacy-focused |
 | **SerpAPI** | Web, News, Images | Required | Google results |
 | **Google Custom Search** | Web, Images | Required | Direct Google integration |
 
-Paid providers are tried first in configured order. DuckDuckGo is automatically appended as the last-resort fallback. Includes retry with exponential backoff for transient errors.
+Paid providers are tried first in configured order. DuckDuckGo is automatically appended as the last-resort fallback. Includes retry with exponential backoff, provider cooldowns, and explicit primary/fallback ordering in Settings.
 
 ### Architecture
 
@@ -1308,7 +1332,7 @@ Configure in **Settings** > **Appearance**.
 Schedule recurring tasks with cron expressions and optional channel delivery.
 
 - Standard cron syntax with workspace binding
-- Channel delivery to any of the 15 channels
+- Channel delivery to any of the 17 channels
 - Conditional delivery (`deliverOnlyIfResult`)
 - Template variables: `{{today}}`, `{{tomorrow}}`, `{{week_end}}`, `{{now}}`
 - Chat context variables: `{{chat_messages}}`, `{{chat_since}}`, etc.
