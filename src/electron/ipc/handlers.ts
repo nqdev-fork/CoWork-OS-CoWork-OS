@@ -83,7 +83,7 @@ import {
 import type { MailboxCommitmentState } from "../../shared/mailbox";
 import * as os from "os";
 import { AgentDaemon } from "../agent/daemon";
-import { HermesParityService } from "../agent/HermesParityService";
+import { RuntimeVisibilityService } from "../agent/RuntimeVisibilityService";
 import { LLMProviderFactory, LLMProviderConfig, ModelKey, OpenAIOAuth } from "../agent/llm";
 import { SearchProviderFactory, SearchSettings, SearchProviderType } from "../agent/search";
 import { ShellSessionManager } from "../agent/tools/shell-session-manager";
@@ -94,6 +94,7 @@ import { updateManager } from "../updater";
 import { rateLimiter, RATE_LIMIT_CONFIGS } from "../utils/rate-limiter";
 import { toPublicChannel } from "./channel-config-sanitizer";
 import { buildTaskExportJson } from "../reports/task-export";
+import { ProfileManager } from "../profiles/ProfileManager";
 import {
   validateInput,
   WorkspaceCreateSchema,
@@ -174,7 +175,8 @@ import { testXConnection, checkBirdInstalled } from "../utils/x-cli";
 import { getCustomSkillLoader } from "../agent/custom-skill-loader";
 import { getAwarenessService } from "../awareness/AwarenessService";
 import { getAutonomyEngine } from "../awareness/AutonomyEngine";
-import { CustomSkill } from "../../shared/types";
+import { CustomSkill, SkillsConfig } from "../../shared/types";
+import { SecureSettingsRepository } from "../database/SecureSettingsRepository";
 import {
   parseSpawnAgentCount,
 } from "../../shared/spawn-intent-detection";
@@ -184,7 +186,13 @@ import { MCPRegistryManager } from "../mcp/registry/MCPRegistryManager";
 import { getChannelRegistry as _getChannelRegistry } from "../gateway/channel-registry";
 import type { MCPSettings, MCPServerConfig } from "../mcp/types";
 import { MCPHostServer } from "../mcp/host/MCPHostServer";
+import { CoWorkHostProvider } from "../mcp/host/CoWorkHostProvider";
 import { BuiltinToolsSettingsManager } from "../agent/tools/builtin-settings";
+import { ComputerUseSessionManager } from "../computer-use/session-manager";
+import {
+  checkAccessibilityTrusted,
+  getMacScreenCaptureAccessStatus,
+} from "../computer-use/computer-use-permissions";
 import {
   MCPServerConfigSchema,
   MCPServerUpdateSchema,
@@ -236,6 +244,7 @@ import type { CronJobCreate } from "../cron/types";
 import { getXMentionBridgeService, getXMentionTriggerStatus } from "../x-mentions";
 import { getCouncilService } from "../council";
 import { pruneTempWorkspaces } from "../utils/temp-workspace";
+import type { TriggerEvent } from "../triggers/types";
 import {
   createScopedTempWorkspaceIdentity,
   isTempWorkspaceInScope,
@@ -258,6 +267,7 @@ type MacSystemSettingsTarget = "microphone" | "dictation";
 
 const execFileAsync = promisify(execFile);
 const logger = createLogger("IPC");
+const ProfileNameSchema = z.string().trim().min(1).max(80);
 const VIDEO_PREVIEW_CACHE_DIR = path.join(os.tmpdir(), "cowork-video-preview-cache");
 const VIDEO_PREVIEW_FFMPEG_TIMEOUT_MS = 60_000;
 const MAX_TRANSCODED_VIDEO_PREVIEW_SIZE = 64 * 1024 * 1024;
@@ -694,6 +704,17 @@ export async function setupIpcHandlers(
   options?: { getMainWindow?: () => BrowserWindow | null },
 ) {
   if (options?.getMainWindow) mainWindowGetter = options.getMainWindow;
+
+  const computerUseMainWindow = (): BrowserWindow | null =>
+    options?.getMainWindow?.() ?? getMainWindow();
+  ComputerUseSessionManager.getInstance().setMainWindowGetter(computerUseMainWindow);
+  ComputerUseSessionManager.getInstance().setNotifyHandler((event) => {
+    const win = computerUseMainWindow();
+    if (win && !win.isDestroyed()) {
+      win.webContents.send(IPC_CHANNELS.COMPUTER_USE_EVENT, event);
+    }
+  });
+
   const db = dbManager.getDatabase();
   const workspaceRepo = new WorkspaceRepository(db);
   const taskRepo = new TaskRepository(db);
@@ -1135,6 +1156,41 @@ export async function setupIpcHandlers(
       return { success: false, error: error?.message || "Failed to open System Settings." };
     }
   });
+
+  ipcMain.handle(IPC_CHANNELS.PROFILE_LIST, async () => {
+    return ProfileManager.listProfiles();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.PROFILE_CREATE, async (_, rawProfileName: unknown) => {
+    const profileName = validateInput(ProfileNameSchema, rawProfileName, "profile name");
+    return ProfileManager.ensureProfile(profileName);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.PROFILE_SWITCH, async (_, rawProfileId: unknown) => {
+    const profileId = validateInput(ProfileNameSchema, rawProfileId, "profile id");
+    return ProfileManager.switchProfile(profileId);
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.PROFILE_EXPORT,
+    async (_, payload: { profileId: unknown; destinationRoot: unknown }) => {
+      const profileId = validateInput(ProfileNameSchema, payload?.profileId, "profile id");
+      const destinationRoot = validateInput(z.string().trim().min(1), payload?.destinationRoot, "destination folder");
+      return ProfileManager.exportProfile(profileId, destinationRoot);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.PROFILE_IMPORT,
+    async (_, payload: { sourcePath: unknown; profileName?: unknown }) => {
+      const sourcePath = validateInput(z.string().trim().min(1), payload?.sourcePath, "source folder");
+      const profileName =
+        payload && typeof payload.profileName === "string" && payload.profileName.trim().length > 0
+          ? validateInput(ProfileNameSchema, payload.profileName, "profile name")
+          : undefined;
+      return ProfileManager.importProfile(sourcePath, profileName);
+    },
+  );
 
   // File viewer handler - read file content for in-app preview
   // Note: This handler allows viewing any file on the system for convenience.
@@ -1959,6 +2015,7 @@ export async function setupIpcHandlers(
       }
 
       await gateway.sendMessage(target.channelType as Any, target.chatId, data.message, {
+        channelDbId: target.channelId,
         parseMode: data.parseMode || "text",
       });
       return { ok: true, target };
@@ -2646,7 +2703,7 @@ export async function setupIpcHandlers(
         ? query.workspaceId.trim()
         : undefined;
     const workspacePath = workspaceId ? workspaceRepo.findById(workspaceId)?.path : undefined;
-    return HermesParityService.collectUnifiedRecall(
+    return RuntimeVisibilityService.collectUnifiedRecall(
       {
         taskRepo,
         eventRepo: taskEventRepo,
@@ -2808,6 +2865,31 @@ export async function setupIpcHandlers(
 
   // Custom User Skills handlers
   const customSkillLoader = getCustomSkillLoader();
+  const secureSettingsRepo = SecureSettingsRepository.isInitialized()
+    ? SecureSettingsRepository.getInstance()
+    : new SecureSettingsRepository(dbManager.getDatabase());
+  const loadSkillsConfig = (): SkillsConfig => {
+    const stored = secureSettingsRepo.load<Partial<SkillsConfig>>("skills") || {};
+    return {
+      skillsDirectory: customSkillLoader.getManagedSkillsDir(),
+      externalSkillDirectories: Array.isArray(stored.externalSkillDirectories)
+        ? stored.externalSkillDirectories.filter((value): value is string => typeof value === "string")
+        : [],
+      enabledSkillIds: Array.isArray(stored.enabledSkillIds)
+        ? stored.enabledSkillIds.filter((value): value is string => typeof value === "string")
+        : [],
+      registryUrl: typeof stored.registryUrl === "string" ? stored.registryUrl : undefined,
+      autoUpdate: stored.autoUpdate === true,
+      allowlist: Array.isArray(stored.allowlist)
+        ? stored.allowlist.filter((value): value is string => typeof value === "string")
+        : undefined,
+      denylist: Array.isArray(stored.denylist)
+        ? stored.denylist.filter((value): value is string => typeof value === "string")
+        : undefined,
+    };
+  };
+  let skillsConfig = loadSkillsConfig();
+  customSkillLoader.updateConfig(skillsConfig);
 
   // Initialize custom skill loader
   customSkillLoader.initialize().catch((error) => {
@@ -2854,6 +2936,28 @@ export async function setupIpcHandlers(
 
   ipcMain.handle(IPC_CHANNELS.CUSTOM_SKILL_OPEN_FOLDER, async () => {
     return customSkillLoader.openSkillsFolder();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.CUSTOM_SKILL_GET_SETTINGS, async () => {
+    return skillsConfig;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.CUSTOM_SKILL_SET_EXTERNAL_DIRS, async (_, dirs: string[]) => {
+    const normalized = customSkillLoader.setExternalSkillDirs(dirs);
+    skillsConfig = {
+      ...skillsConfig,
+      skillsDirectory: customSkillLoader.getManagedSkillsDir(),
+      externalSkillDirectories: normalized,
+    };
+    secureSettingsRepo.save("skills", skillsConfig);
+    customSkillLoader.updateConfig(skillsConfig);
+    customSkillLoader.clearEligibilityCache();
+    await customSkillLoader.reloadSkills();
+    return skillsConfig;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.CUSTOM_SKILL_OPEN_EXTERNAL_FOLDER, async (_, dir: string) => {
+    return customSkillLoader.openExternalSkillsFolder(dir);
   });
 
   // Skill Registry (SkillHub) handlers
@@ -3249,7 +3353,7 @@ export async function setupIpcHandlers(
   });
 
   ipcMain.handle(IPC_CHANNELS.LLM_ROUTING_STATUS, async (): Promise<LLMRoutingRuntimeState> => {
-    return HermesParityService.buildRoutingState(LLMProviderFactory.loadSettings());
+    return RuntimeVisibilityService.buildRoutingState(LLMProviderFactory.loadSettings());
   });
 
   // Get models available for a specific provider type (for multi-LLM selection)
@@ -3846,6 +3950,10 @@ export async function setupIpcHandlers(
       const channel = await gateway.addTelegramChannel(
         validated.name,
         validated.botToken!,
+        {
+          groupRoutingMode: validated.groupRoutingMode,
+          allowedGroupChatIds: validated.telegramAllowedGroupChatIds,
+        },
         validated.securityMode || "pairing",
       );
       return toPublicChannel(channel);
@@ -3947,6 +4055,7 @@ export async function setupIpcHandlers(
         (validated.trustMode || "tofu") as "tofu" | "always" | "manual",
         validated.dmPolicy || "pairing",
         validated.groupPolicy || "allowlist",
+        validated.allowedNumbers,
         validated.sendReadReceipts ?? true,
         validated.sendTypingIndicators ?? true,
       );
@@ -4048,6 +4157,45 @@ export async function setupIpcHandlers(
       // Automatically enable and connect BlueBubbles
       gateway.enableChannel(channel.id).catch((err) => {
         console.error("Failed to enable BlueBubbles channel:", err);
+      });
+
+      return toPublicChannel(channel, "connecting");
+    }
+
+    if (validated.type === "feishu") {
+      const channel = await gateway.addFeishuChannel(
+        validated.name,
+        validated.feishuAppId!,
+        validated.feishuAppSecret!,
+        validated.feishuVerificationToken,
+        validated.feishuEncryptKey,
+        validated.webhookPort ?? 3980,
+        validated.webhookPath || "/feishu/webhook",
+        validated.securityMode || "pairing",
+      );
+
+      gateway.enableChannel(channel.id).catch((err) => {
+        console.error("Failed to enable Feishu channel:", err);
+      });
+
+      return toPublicChannel(channel, "connecting");
+    }
+
+    if (validated.type === "wecom") {
+      const channel = await gateway.addWeComChannel(
+        validated.name,
+        validated.wecomCorpId!,
+        validated.wecomAgentId!,
+        validated.wecomSecret!,
+        validated.wecomToken!,
+        validated.wecomEncodingAESKey,
+        validated.webhookPort ?? 3981,
+        validated.webhookPath || "/wecom/webhook",
+        validated.securityMode || "pairing",
+      );
+
+      gateway.enableChannel(channel.id).catch((err) => {
+        console.error("Failed to enable WeCom channel:", err);
       });
 
       return toPublicChannel(channel, "connecting");
@@ -4211,6 +4359,7 @@ export async function setupIpcHandlers(
         if (ch) resolvedType = ch.type;
       }
       await gateway.sendMessage(resolvedType as Any, data.chatId, "Test delivery from CoWork OS", {
+        channelDbId: data.channelDbId,
         parseMode: "text",
       });
       return { ok: true };
@@ -5099,6 +5248,15 @@ export async function setupIpcHandlers(
     },
   );
 
+  ipcMain.handle(IPC_CHANNELS.USAGE_INSIGHTS_EARLIEST, async (_, workspaceId: string) => {
+    checkRateLimit(IPC_CHANNELS.USAGE_INSIGHTS_EARLIEST);
+    const validatedWorkspaceId =
+      workspaceId === "__all__" ? null : validateInput(UUIDSchema, workspaceId, "workspace ID");
+    const { UsageInsightsService } = await import("../reports/UsageInsightsService");
+    const service = new UsageInsightsService(db);
+    return service.getEarliestActivityMs(validatedWorkspaceId);
+  });
+
   // Daily Briefing
   ipcMain.handle(IPC_CHANNELS.DAILY_BRIEFING_GENERATE, async (_, workspaceId: string) => {
     checkRateLimit(IPC_CHANNELS.DAILY_BRIEFING_GENERATE);
@@ -5960,27 +6118,43 @@ function setupMCPHandlers(): void {
   });
 
   // MCP Host handlers
-  ipcMain.handle(IPC_CHANNELS.MCP_HOST_START, async () => {
+  ipcMain.handle(IPC_CHANNELS.MCP_HOST_START, async (_, requestedPort?: number) => {
     const hostServer = MCPHostServer.getInstance();
 
     // If no tool provider is set, create a minimal one that exposes MCP tools
     // from connected servers (useful for tool aggregation/forwarding)
     if (!hostServer.hasToolProvider()) {
+      const hostDb = DatabaseManager.getInstance().getDatabase();
+      const hostWorkspaceRepo = new WorkspaceRepository(hostDb);
+      const hostTaskRepo = new TaskRepository(hostDb);
+      const hostTaskEventRepo = new TaskEventRepository(hostDb);
+      const hostArtifactRepo = new ArtifactRepository(hostDb);
       const mcpClientManager = MCPClientManager.getInstance();
+      hostServer.setToolProvider(
+        new CoWorkHostProvider({
+          workspaceRepo: hostWorkspaceRepo,
+          taskRepo: hostTaskRepo,
+          taskEventRepo: hostTaskEventRepo,
+          artifactRepo: hostArtifactRepo,
+          toolDelegate: {
+            getTools() {
+              return mcpClientManager.getAllTools();
+            },
+            async executeTool(name: string, args: Record<string, Any>) {
+              return mcpClientManager.callTool(name, args);
+            },
+          },
+        }),
+      );
+    }
 
-      // Create a minimal tool provider that exposes MCP tools
-      hostServer.setToolProvider({
-        getTools() {
-          return mcpClientManager.getAllTools();
-        },
-        async executeTool(name: string, args: Record<string, Any>) {
-          return mcpClientManager.callTool(name, args);
-        },
-      });
+    if (typeof requestedPort === "number" && Number.isFinite(requestedPort) && requestedPort >= 1024) {
+      await hostServer.startHttp(Math.floor(requestedPort));
+      return { success: true, transport: "http", port: hostServer.getHttpPort() };
     }
 
     await hostServer.startStdio();
-    return { success: true };
+    return { success: true, transport: "stdio" };
   });
 
   ipcMain.handle(IPC_CHANNELS.MCP_HOST_STOP, async () => {
@@ -5993,6 +6167,8 @@ function setupMCPHandlers(): void {
     const hostServer = MCPHostServer.getInstance();
     return {
       running: hostServer.isRunning(),
+      transport: hostServer.getTransportMode(),
+      port: hostServer.getHttpPort(),
       toolCount: hostServer.hasToolProvider()
         ? MCPClientManager.getInstance().getAllTools().length
         : 0,
@@ -6015,6 +6191,49 @@ function setupMCPHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.BUILTIN_TOOLS_GET_CATEGORIES, async () => {
     return BuiltinToolsSettingsManager.getToolsByCategory();
+  });
+
+  // =====================
+  // Computer use (desktop automation)
+  // =====================
+
+  ipcMain.handle(IPC_CHANNELS.COMPUTER_USE_GET_STATUS, async () => {
+    const sm = ComputerUseSessionManager.getInstance();
+    const pm = sm.getAppPermissionManagerOrNull();
+    return {
+      activeTaskId: sm.getActiveTaskId(),
+      accessibilityTrusted: checkAccessibilityTrusted(false),
+      screenCaptureStatus: getMacScreenCaptureAccessStatus(),
+      approvedApps:
+        pm?.getActivePermissions().map((p) => ({
+          appName: p.appName,
+          bundleId: p.bundleId,
+          accessLevel: p.accessLevel,
+        })) ?? [],
+    };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPUTER_USE_END_SESSION, async () => {
+    await ComputerUseSessionManager.getInstance().endSessionManual();
+    return { success: true };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPUTER_USE_OPEN_ACCESSIBILITY, async () => {
+    if (process.platform === "darwin") {
+      await shell.openExternal(
+        "x-apple.systempreferences:com.apple.preference.universalaccess?Privacy_Accessibility",
+      );
+    }
+    return { success: true };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMPUTER_USE_OPEN_SCREEN_RECORDING, async () => {
+    if (process.platform === "darwin") {
+      await shell.openExternal(
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+      );
+    }
+    return { success: true };
   });
 
   // =====================
@@ -6609,12 +6828,17 @@ function setupNotificationHandlers(): void {
 // Global hooks server instance
 let hooksServer: HooksServer | null = null;
 let hooksServerStarting = false; // Lock to prevent concurrent server creation
+let hookTriggerEmitter: ((event: TriggerEvent) => void) | null = null;
 
 /**
  * Get the hooks server instance
  */
 export function getHooksServer(): HooksServer | null {
   return hooksServer;
+}
+
+export function setHookTriggerEmitter(emitter: ((event: TriggerEvent) => void) | null): void {
+  hookTriggerEmitter = emitter;
 }
 
 /**
@@ -6716,6 +6940,16 @@ async function setupHooksHandlers(agentDaemon: AgentDaemon): Promise<void> {
       },
       onEvent: (event) => {
         logger.debug("[Hooks] Server event:", event.action);
+        if (event.action === "request" && hookTriggerEmitter) {
+          hookTriggerEmitter({
+            source: "webhook",
+            timestamp: event.timestamp,
+            fields: {
+              path: event.path || "",
+              method: event.method || "",
+            },
+          });
+        }
         // Forward events to renderer (with error handling for destroyed windows)
         const windows = BrowserWindow.getAllWindows();
         for (const win of windows) {
@@ -7950,16 +8184,23 @@ function setupKitHandlers(
       _event,
       payload: {
         taskId: string;
-        messageId: string;
+        messageId?: string;
         decision: "accepted" | "rejected";
         reason?: string;
         note?: string;
+        kind?: "message" | "task";
       },
     ) => {
       checkRateLimit(IPC_CHANNELS.KIT_SUBMIT_MESSAGE_FEEDBACK, RATE_LIMIT_CONFIGS.limited);
-      const { taskId, decision, reason, note } = payload;
+      const { taskId, decision, reason, note, kind, messageId } = payload;
       const feedback = [reason, note].filter(Boolean).join(": ") || undefined;
-      agentDaemon.logEvent(taskId, "user_feedback", { decision, reason: feedback });
+      agentDaemon.logEvent(taskId, "user_feedback", {
+        decision,
+        reason: feedback,
+        kind: kind || "message",
+        messageId,
+        rating: kind === "task" ? (decision === "accepted" ? "positive" : "negative") : undefined,
+      });
     },
   );
 }
