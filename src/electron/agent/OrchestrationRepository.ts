@@ -22,6 +22,8 @@ export interface OrchestrationTask {
   output?: string;
   error?: string;
   capabilityHint?: ModelCapability;
+  acpAgentId?: string;
+  remoteTaskId?: string;
   startedAt?: number;
   completedAt?: number;
 }
