@@ -15,7 +15,7 @@ CoWork OS is the production alternative to OpenClaw for users who need:
 
 - Guardrails and approval workflows by default
 - Local-first data ownership (BYOK, no telemetry)
-- A multi-channel operating layer (15 messaging channels)
+- A multi-channel operating layer (17 messaging channels)
 - A desktop + headless runtime that can be governed in daily operations
 
 Short form:
@@ -43,7 +43,7 @@ dangerous command blocking, configurable limits, encrypted local settings, and c
 
 ### 3) Multi-Channel AI Operating Layer
 
-CoWork OS is not just a local runner. It is a messaging-native runtime across 15 channels with shared security modes and governance.
+CoWork OS is not just a local runner. It is a messaging-native runtime across 17 channels with shared security modes and governance.
 
 ### 4) Local-First + BYOK
 
@@ -52,9 +52,9 @@ Users keep control of data and provider keys with optional offline model executi
 ## Proof Points to Reuse in Messaging
 
 - 30+ LLM providers
-- 15 messaging channels
+- 17 messaging channels
 - 100+ built-in skills
-- 4000+ tests
+- 4,500+ automated tests (4,583 passing in `npm run test`)
 - ZeroLeaks report published in-repo
 
 ## Narrative Guardrails
