@@ -2147,6 +2147,7 @@ function DeviceDetailsDrawer({
           <div className="dp-code-list">
             <code>{summary.runtime?.cwd || "No runtime snapshot yet"}</code>
             <code>{summary.runtime?.userDataDir || "No user data path reported"}</code>
+            <code>{`profile:${summary.runtime?.activeProfileId || "default"}`}</code>
             <code>{device.config?.url || "Local device"}</code>
           </div>
         </div>
