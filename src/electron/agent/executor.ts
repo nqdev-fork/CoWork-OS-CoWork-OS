@@ -12,6 +12,8 @@ import {
   ExecutionModeSource,
   LlmProfile,
   ExternalStepVerification,
+  VerificationEvidenceEntry,
+  TaskVerificationEvidenceBundle,
   SuccessCriteria as _SuccessCriteria,
   isTempWorkspaceId,
   ImageAttachment,
@@ -82,6 +84,7 @@ import { IntentRouter } from "./strategy/IntentRouter";
 import { TaskStrategyService } from "./strategy/TaskStrategyService";
 import { CitationTracker } from "./citation/CitationTracker";
 import { WorkflowDecomposer } from "./strategy/WorkflowDecomposer";
+import { scorePlanStepIntentAlignment, scoreStepIntentOverlap } from "./step-intent-alignment";
 import { buildWorkspaceKitContext } from "../memory/WorkspaceKitContext";
 import { MemoryFeaturesManager } from "../settings/memory-features-manager";
 import { InputSanitizer, OutputFilter } from "./security";
@@ -3889,6 +3892,8 @@ ${transcript}
   private softDeadlineTriggered: boolean = false;
   private wrapUpRequested: boolean = false;
   private completionVerificationMetadata: VerificationCompletionMetadata | null = null;
+  /** Deterministic verification outcomes (verified mode) for completion review */
+  private verificationEvidenceEntries: VerificationEvidenceEntry[] = [];
   private nonBlockingVerificationFailedStepIds: Set<string> = new Set();
   private blockingVerificationFailedStepIds: Set<string> = new Set();
   private stepStopReasons: Set<
@@ -8845,6 +8850,13 @@ ${transcript}
         ? { nonBlockingFailedStepIds }
         : {}),
       ...verificationMetadata,
+      ...(this.getEffectiveExecutionMode() === "verified"
+        ? {
+            verificationEvidenceBundle: {
+              entries: [...this.verificationEvidenceEntries],
+            } satisfies TaskVerificationEvidenceBundle,
+          }
+        : {}),
     });
     this.emitRunSummary("completed", terminalStatus);
     if (terminalStatus === "ok") {
@@ -8954,6 +8966,13 @@ ${transcript}
         ? { nonBlockingFailedStepIds }
         : {}),
       ...verificationMetadata,
+      ...(this.getEffectiveExecutionMode() === "verified"
+        ? {
+            verificationEvidenceBundle: {
+              entries: [...this.verificationEvidenceEntries],
+            } satisfies TaskVerificationEvidenceBundle,
+          }
+        : {}),
     });
     this.emitRunSummary(reason || "best_effort_finalized", this.task.terminalStatus || "ok");
     // Best-effort finalization — don't record as "success" in the playbook
@@ -10766,9 +10785,13 @@ You are continuing a previous conversation. The context from the previous conver
     return this.getEffectiveExecutionMode() === "verified";
   }
 
+  private pushVerificationEvidence(entry: VerificationEvidenceEntry): void {
+    this.verificationEvidenceEntries.push(entry);
+  }
+
   /**
    * Run external verification for a step in verified mode.
-   * Supports shell_command (exit code), file_exists, and grep_absent checks.
+   * Supports shell_command (exit code), file_exists, grep_absent, and http_head checks.
    */
   private async runStepExternalVerification(
     verification: ExternalStepVerification,
@@ -10777,6 +10800,7 @@ You are continuing a previous conversation. The context from the previous conver
       message: `[verified-mode] Running external verification: ${verification.type}`,
       taskId: this.task.id,
     });
+    const now = Date.now();
 
     if (verification.type === "shell_command" && verification.command) {
       try {
@@ -10784,18 +10808,27 @@ You are continuing a previous conversation. The context from the previous conver
           command: verification.command,
         })) as { success: boolean; exitCode: number | null; stdout: string; stderr: string };
 
-        return {
-          success: result.exitCode === 0,
-          message:
-            result.exitCode === 0
-              ? `Verification passed: ${verification.command}`
-              : `Verification failed (exit ${result.exitCode}): ${(result.stderr || result.stdout || "").slice(0, 500)}`,
-        };
+        const ok = result.exitCode === 0;
+        const msg =
+          result.exitCode === 0
+            ? `Verification passed: ${verification.command}`
+            : `Verification failed (exit ${result.exitCode}): ${(result.stderr || result.stdout || "").slice(0, 500)}`;
+        this.pushVerificationEvidence({
+          kind: "shell_command",
+          ok,
+          detail: msg.slice(0, 1200),
+          capturedAt: now,
+        });
+        return { success: ok, message: msg };
       } catch (error: Any) {
-        return {
-          success: false,
-          message: `Verification command error: ${error.message}`,
-        };
+        const msg = `Verification command error: ${error.message}`;
+        this.pushVerificationEvidence({
+          kind: "shell_command",
+          ok: false,
+          detail: msg,
+          capturedAt: now,
+        });
+        return { success: false, message: msg };
       }
     }
 
@@ -10804,13 +10837,18 @@ You are continuing a previous conversation. The context from the previous conver
         const fullPath = path.resolve(this.workspace.path, p);
         return !fs.existsSync(fullPath);
       });
-      return {
-        success: missing.length === 0,
-        message:
-          missing.length === 0
-            ? "All required files exist"
-            : `Missing files: ${missing.join(", ")}`,
-      };
+      const ok = missing.length === 0;
+      const msg =
+        missing.length === 0
+          ? "All required files exist"
+          : `Missing files: ${missing.join(", ")}`;
+      this.pushVerificationEvidence({
+        kind: "file_exists",
+        ok,
+        detail: msg,
+        capturedAt: now,
+      });
+      return { success: ok, message: msg };
     }
 
     if (verification.type === "grep_absent" && verification.grepPattern && verification.grepTarget) {
@@ -10821,21 +10859,77 @@ You are continuing a previous conversation. The context from the previous conver
 
         // grep exit code 0 means pattern was FOUND → verification FAILS (pattern should be absent)
         // grep exit code 1 means pattern NOT found → verification PASSES
-        return {
-          success: result.exitCode !== 0,
-          message:
-            result.exitCode !== 0
-              ? `Pattern "${verification.grepPattern}" not found (good)`
-              : `Pattern "${verification.grepPattern}" still present in ${verification.grepTarget}: ${(result.stdout || "").slice(0, 300)}`,
-        };
+        const ok = result.exitCode !== 0;
+        const msg =
+          result.exitCode !== 0
+            ? `Pattern "${verification.grepPattern}" not found (good)`
+            : `Pattern "${verification.grepPattern}" still present in ${verification.grepTarget}: ${(result.stdout || "").slice(0, 300)}`;
+        this.pushVerificationEvidence({
+          kind: "grep_absent",
+          ok,
+          detail: msg,
+          capturedAt: now,
+        });
+        return { success: ok, message: msg };
       } catch (error: Any) {
-        return {
-          success: false,
-          message: `Grep verification error: ${error.message}`,
-        };
+        const msg = `Grep verification error: ${error.message}`;
+        this.pushVerificationEvidence({
+          kind: "grep_absent",
+          ok: false,
+          detail: msg,
+          capturedAt: now,
+        });
+        return { success: false, message: msg };
       }
     }
 
+    if (verification.type === "http_head" && verification.httpUrl) {
+      const raw = verification.httpUrl.trim();
+      if (!/^https?:\/\//i.test(raw)) {
+        const msg = `http_head verification requires http(s) URL, got: ${raw.slice(0, 120)}`;
+        this.pushVerificationEvidence({
+          kind: "http_head",
+          ok: false,
+          detail: msg,
+          capturedAt: now,
+        });
+        return { success: false, message: msg };
+      }
+      const expected = verification.expectedHttpStatus ?? 200;
+      try {
+        const result = (await this.toolRegistry.executeTool("run_command", {
+          command: `curl -sS -o /dev/null -w "%{http_code}" ${JSON.stringify(raw)}`,
+        })) as { success: boolean; exitCode: number | null; stdout: string; stderr: string };
+        const code = parseInt(String(result.stdout || "").trim(), 10);
+        const ok = Number.isFinite(code) && code === expected;
+        const msg = ok
+          ? `HTTP ${code} for ${raw.slice(0, 200)}`
+          : `Expected HTTP ${expected}, got ${Number.isFinite(code) ? code : "invalid"} for ${raw.slice(0, 200)}`;
+        this.pushVerificationEvidence({
+          kind: "http_head",
+          ok,
+          detail: msg,
+          capturedAt: now,
+        });
+        return { success: ok, message: msg };
+      } catch (error: Any) {
+        const msg = `HTTP verification error: ${error.message}`;
+        this.pushVerificationEvidence({
+          kind: "http_head",
+          ok: false,
+          detail: msg,
+          capturedAt: now,
+        });
+        return { success: false, message: msg };
+      }
+    }
+
+    this.pushVerificationEvidence({
+      kind: "none",
+      ok: true,
+      detail: "No verification criteria matched",
+      capturedAt: now,
+    });
     return { success: true, message: "No verification criteria matched" };
   }
 
@@ -16996,6 +17090,7 @@ You are continuing a previous conversation. The context from the previous conver
   private async executeUnlocked(): Promise<void> {
     try {
       this.completionVerificationMetadata = null;
+      this.verificationEvidenceEntries = [];
       this.ensureVerificationOutcomeSets();
       this.nonBlockingVerificationFailedStepIds.clear();
       this.blockingVerificationFailedStepIds.clear();
@@ -17832,6 +17927,179 @@ Return ONLY a JSON object:
       });
       this.emitEvent("plan_created", { plan: this.plan });
     }
+
+    this.emitStepIntentAlignmentIfEnabled();
+  }
+
+  private getStepIntentAlignmentPolicy(): "off" | "balanced" | "strict" {
+    const c = this.task.agentConfig?.stepIntentAlignmentPolicy;
+    if (c === "off" || c === "balanced" || c === "strict") return c;
+    return this.task.agentConfig?.deepWorkMode ? "balanced" : "off";
+  }
+
+  private getStepDecompositionPolicy(): "off" | "balanced" | "strict" {
+    const c = this.task.agentConfig?.stepDecompositionPolicy;
+    if (c === "off" || c === "balanced" || c === "strict") return c;
+    return this.task.agentConfig?.deepWorkMode ? "balanced" : "off";
+  }
+
+  private emitStepIntentAlignmentIfEnabled(): void {
+    const policy = this.getStepIntentAlignmentPolicy();
+    if (policy === "off" || !this.plan) return;
+    const taskText = `${this.task.title || ""}\n${this.getContractPrompt()}`;
+    const { rows, lowAlignmentStepIds, minScore } = scorePlanStepIntentAlignment(this.plan, taskText);
+    this.emitEvent("step_intent_scored", { policy, rows, lowAlignmentStepIds, minScore });
+  }
+
+  private emitStepIntentScore(
+    step: PlanStep,
+    phase: "pre_execution" | "post_execution",
+    observedText?: string,
+  ): { lowAlignment: boolean; taskScore: number; observedScore?: number } {
+    const policy = this.getStepIntentAlignmentPolicy();
+    const taskText = `${this.task.title || ""}\n${this.getContractPrompt()}`;
+    const taskScore = scoreStepIntentOverlap(step.description, taskText);
+    const observedScore =
+      typeof observedText === "string" && observedText.trim().length > 0
+        ? scoreStepIntentOverlap(step.description, observedText)
+        : undefined;
+    const threshold = policy === "strict" ? 0.1 : 0.08;
+    const lowAlignment =
+      phase === "pre_execution"
+        ? taskScore < threshold
+        : typeof observedScore === "number" && observedScore < threshold && taskScore < 0.2;
+    this.emitEvent("step_intent_scored", {
+      policy,
+      phase,
+      stepId: step.id,
+      stepKind: step.kind,
+      taskScore,
+      observedScore,
+      lowAlignment,
+      description: step.description.slice(0, 240),
+    });
+    return { lowAlignment, taskScore, observedScore };
+  }
+
+  private buildObservedStepAlignmentText(stepId: string): string {
+    const toolSummary = this.getRecentToolResultSummary();
+    const touchedPaths = Array.from(this.filesReadTracker.entries())
+      .filter(([, info]) => info.step === stepId)
+      .map(([filePath]) => filePath)
+      .slice(-8);
+    const recentAssistantOutput = String(this.lastNonVerificationOutput || this.lastAssistantOutput || "").trim();
+    return [
+      toolSummary ? `Recent tool results:\n${toolSummary}` : "",
+      touchedPaths.length > 0 ? `Touched paths:\n${touchedPaths.join("\n")}` : "",
+      recentAssistantOutput ? `Recent assistant output:\n${recentAssistantOutput.slice(0, 600)}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  }
+
+  private replaceCurrentStepWithRevision(
+    step: PlanStep,
+    newSteps: Array<{ description: string; kind?: PlanStep["kind"] }>,
+    reason: string,
+  ): boolean {
+    const priorStatus = step.status;
+    const priorCompletedAt = step.completedAt;
+    const priorError = step.error;
+    step.status = "in_progress";
+    const revised = this.requestPlanRevision(newSteps, reason, false);
+    if (!revised) {
+      step.status = priorStatus;
+      step.completedAt = priorCompletedAt;
+      step.error = priorError;
+      return false;
+    }
+    step.status = "skipped";
+    step.completedAt = Date.now();
+    step.error = reason;
+    this.emitEvent("step_skipped", {
+      step,
+      reason,
+    });
+    return true;
+  }
+
+  private async suggestAlignedReplacementSteps(
+    step: PlanStep,
+  ): Promise<Array<{ description: string; kind?: PlanStep["kind"] }> | null> {
+    try {
+      const response = await this.provider.createMessage({
+        model: this.modelId,
+        maxTokens: 1024,
+        system:
+          "You repair a misaligned execution step for a coding agent. " +
+          'Output ONLY a JSON array of 1-3 objects with key "description" (string). ' +
+          "Each replacement step must be concrete, aligned to the original task, and executable.",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text:
+                  `Original task:\n${this.task.title || ""}\n${this.getContractPrompt()}\n\n` +
+                  `Misaligned step:\n${step.description}\n\n` +
+                  "Return replacement steps only.",
+              },
+            ],
+          },
+        ],
+      });
+      const text = (response.content || [])
+        .filter((b): b is { type: "text"; text: string } => b.type === "text" && typeof b.text === "string")
+        .map((b) => b.text)
+        .join("");
+      const jsonMatch = text.match(/\[[\s\S]*\]/);
+      if (!jsonMatch) return null;
+      const parsed = JSON.parse(jsonMatch[0]) as Array<{ description?: string }>;
+      const out = parsed
+        .slice(0, 3)
+        .map((item) => ({ description: String(item.description || "").trim(), kind: "primary" as const }))
+        .filter((item) => item.description.length > 8);
+      return out.length > 0 ? out : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async maybeRealignLowAlignmentStep(step: PlanStep): Promise<boolean> {
+    const policy = this.getStepIntentAlignmentPolicy();
+    if (policy === "off" || step.kind === "verification" || step.kind === "recovery") return false;
+    const assessment = this.emitStepIntentScore(step, "pre_execution");
+    if (!assessment.lowAlignment) return false;
+    if (policy === "balanced" && !this.task.agentConfig?.deepWorkMode) return false;
+    const replacements = await this.suggestAlignedReplacementSteps(step);
+    if (!replacements || replacements.length === 0) return false;
+    return this.replaceCurrentStepWithRevision(step, replacements, "step_intent_realignment");
+  }
+
+  /**
+   * Replace an oversized step with LLM-decomposed sub-steps (bounded by MAX_TOTAL_STEPS).
+   * Returns true when the plan was mutated and execution should re-evaluate the same index.
+   */
+  private async maybeDecomposeComplexStep(_stepIndex: number, step: PlanStep): Promise<boolean> {
+    if (this.getStepDecompositionPolicy() === "off" || !this.plan) return false;
+    if (step.kind === "verification" || step.kind === "recovery") return false;
+    const policy = this.getStepDecompositionPolicy();
+    const wc = step.description.split(/\s+/).filter(Boolean).length;
+    const complex = wc >= 90 || (wc >= 55 && step.description.includes(";"));
+    if (!complex) return false;
+    if (policy === "balanced" && !this.task.agentConfig?.deepWorkMode) {
+      const route = IntentRouter.route(this.task.title || "", this.task.prompt || "");
+      if (route.intent !== "workflow" && route.intent !== "deep_work") return false;
+    }
+
+    const sub = await WorkflowDecomposer.decomposeStepWithLLM(step.description, this.provider, this.modelId);
+    if (!sub || sub.length < 2) return false;
+    return this.replaceCurrentStepWithRevision(
+      step,
+      sub.map((s) => ({ description: s.description, kind: "primary" as const })),
+      "step_complexity_decomposition",
+    );
   }
 
   private extractPlanStepsFromText(text: string): Array<{ id: string; description: string }> {
@@ -18038,6 +18306,9 @@ Return ONLY a JSON object:
         progress: Math.round((completedSteps / totalSteps) * 100),
         message: `Executing step ${completedSteps + 1}/${totalSteps}: ${step.description}`,
       });
+      if (await this.maybeRealignLowAlignmentStep(step)) {
+        continue;
+      }
 
       // Execute step with timeout enforcement
       // Create a step-specific timeout that will abort ongoing LLM requests
@@ -18069,6 +18340,12 @@ Return ONLY a JSON object:
       }, stepTimeout);
 
       try {
+        const decomposed = await this.maybeDecomposeComplexStep(index, step);
+        if (decomposed) {
+          clearTimeout(stepSoftTimeoutId);
+          clearTimeout(stepTimeoutId);
+          continue;
+        }
         await this.executeStep(step);
         clearTimeout(stepSoftTimeoutId);
         clearTimeout(stepTimeoutId);
@@ -18127,7 +18404,6 @@ Return ONLY a JSON object:
       }
 
       const stepStatusAfterExecution = step.status as PlanStep["status"];
-
       // Verified mode: run external verification after step completion
       if (
         this.isVerifiedMode() &&
@@ -18174,6 +18450,33 @@ Return ONLY a JSON object:
               taskId: this.task.id,
             });
           }
+        }
+      }
+
+      const postVerificationStatus = step.status as PlanStep["status"];
+      if (postVerificationStatus === "completed" || postVerificationStatus === "failed") {
+        const observedText = this.buildObservedStepAlignmentText(step.id);
+        const postAssessment = this.emitStepIntentScore(step, "post_execution", observedText);
+        if (
+          postAssessment.lowAlignment &&
+          this.getStepIntentAlignmentPolicy() === "strict" &&
+          step.kind !== "verification" &&
+          step.kind !== "recovery"
+        ) {
+          const priorStatus = postVerificationStatus;
+          step.status = "in_progress";
+          this.requestPlanRevision(
+            [
+              {
+                description:
+                  `Review and correct any drift from "${step.description}" so the implementation matches the original task before continuing.`,
+                kind: "recovery",
+              },
+            ],
+            "post_execution_step_intent_drift",
+            false,
+          );
+          step.status = priorStatus;
         }
       }
 
