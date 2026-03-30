@@ -50,7 +50,7 @@ export function MCAgentDetail({ data, agentId }: MCAgentDetailProps) {
 
       {statusInfo && (
         <div className="mc-v2-detail-section">
-          <h4>Heartbeat</h4>
+          <h4>Automation</h4>
           <div className="mc-v2-card-items">
             <div className="mc-v2-card-item">
               <span className="mc-v2-card-item-label">Status</span>
@@ -58,13 +58,13 @@ export function MCAgentDetail({ data, agentId }: MCAgentDetailProps) {
             </div>
             {statusInfo.lastHeartbeatAt && (
               <div className="mc-v2-card-item">
-                <span className="mc-v2-card-item-label">Last heartbeat</span>
+                <span className="mc-v2-card-item-label">Last review</span>
                 <span className="mc-v2-card-item-value">{formatRelativeTime(statusInfo.lastHeartbeatAt)}</span>
               </div>
             )}
             {statusInfo.nextHeartbeatAt && (
               <div className="mc-v2-card-item">
-                <span className="mc-v2-card-item-label">Next heartbeat</span>
+                <span className="mc-v2-card-item-label">Next review</span>
                 <span className="mc-v2-card-item-value">{formatRelativeTime(statusInfo.nextHeartbeatAt)}</span>
               </div>
             )}
