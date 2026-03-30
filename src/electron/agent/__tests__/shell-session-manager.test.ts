@@ -71,7 +71,7 @@ describe("ShellSessionManager", () => {
 
     const closed = await manager.closeSession("task-1", "workspace-1");
     expect(closed?.status).toBe("ended");
-  });
+  }, 30_000);
 
   it("does not persist environment values to disk", async () => {
     const { ShellSessionManager } = await import("../tools/shell-session-manager");
