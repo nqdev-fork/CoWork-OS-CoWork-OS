@@ -39,6 +39,8 @@ describe("AgentDaemon.handleTransientTaskFailure recovery", () => {
       },
       logEvent: vi.fn(),
       startTask: vi.fn(async () => {}),
+      finishQueueSlot: vi.fn(),
+      releaseComputerUseSession: vi.fn(),
       isTransientRetryErrorMessage: (message: unknown) =>
         typeof message === "string" &&
         /^Transient provider error\.\s*Retry\s+\d+\/\d+\s+in\s+\d+s\./i.test(message.trim()),
@@ -96,6 +98,8 @@ describe("AgentDaemon.handleTransientTaskFailure recovery", () => {
       },
       logEvent: vi.fn(),
       startTask: vi.fn(async () => {}),
+      finishQueueSlot: vi.fn(),
+      releaseComputerUseSession: vi.fn(),
       isTransientRetryErrorMessage: (message: unknown) =>
         typeof message === "string" &&
         /^Transient provider error\.\s*Retry\s+\d+\/\d+\s+in\s+\d+s\./i.test(message.trim()),
