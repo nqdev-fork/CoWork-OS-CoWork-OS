@@ -3728,6 +3728,45 @@ export class AgentDaemon extends EventEmitter {
           title: "Task completed",
           description: task.title,
         };
+      case "learning_progress":
+        return {
+          workspaceId: task.workspaceId,
+          taskId: task.id,
+          agentRoleId,
+          actorType,
+          activityType: "info",
+          title: "What Cowork learned",
+          description: payload?.summary || task.title,
+          metadata: {
+            ...(payload || {}),
+            activityKind: "learning_progress",
+          },
+        };
+      case "shell_session_created":
+      case "shell_session_updated":
+      case "shell_session_reset":
+      case "shell_session_closed":
+      case "llm_routing_changed":
+        return {
+          workspaceId: task.workspaceId,
+          taskId: task.id,
+          agentRoleId,
+          actorType,
+          activityType: "info",
+          title:
+            type === "llm_routing_changed"
+              ? "Model routing updated"
+              : type === "shell_session_reset"
+                ? "Shell session reset"
+                : type === "shell_session_closed"
+                  ? "Shell session closed"
+                  : "Shell session updated",
+          description: payload?.message || payload?.summary || task.title,
+          metadata: {
+            ...(payload || {}),
+            activityKind: type,
+          },
+        };
       case "executing":
         return {
           workspaceId: task.workspaceId,
@@ -3974,6 +4013,12 @@ export class AgentDaemon extends EventEmitter {
         try {
           if (!window.isDestroyed() && window.webContents && !window.webContents.isDestroyed()) {
             window.webContents.send(IPC_CHANNELS.TASK_EVENT, timelineEnvelope);
+            if (effectiveType === "learning_progress") {
+              window.webContents.send(IPC_CHANNELS.TASK_LEARNING_EVENT, event.payload);
+            }
+            if (effectiveType === "llm_routing_changed") {
+              window.webContents.send(IPC_CHANNELS.LLM_ROUTING_EVENT, event.payload);
+            }
           }
         } catch (error) {
           // Window might have been destroyed between check and send
