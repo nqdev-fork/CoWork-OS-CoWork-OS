@@ -117,8 +117,8 @@ export class WorkflowDecomposer {
 
       // Extract text from response
       const text = (response.content || [])
-        .filter((b: Any) => b.type === "text")
-        .map((b: Any) => b.text)
+        .filter((b): b is { type: "text"; text: string } => b.type === "text" && typeof (b as { text?: string }).text === "string")
+        .map((b) => b.text)
         .join("");
 
       // Parse JSON — try to extract array from response
@@ -146,6 +146,56 @@ export class WorkflowDecomposer {
         dependsOn: i > 0 ? [`phase-${i}`] : [],
         status: "pending" as const,
       }));
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Decompose a single large step into 2–6 smaller executable sub-steps (LLM).
+   * Used when a step description is too complex for reliable one-shot execution.
+   */
+  static async decomposeStepWithLLM(
+    stepDescription: string,
+    provider: LLMProvider,
+    modelId: string,
+  ): Promise<Array<{ description: string }> | null> {
+    if (!stepDescription || stepDescription.trim().length < 40) return null;
+    try {
+      const systemPrompt =
+        "You split one complex implementation step into ordered sub-steps for a coding agent. " +
+        'Output ONLY a JSON array of objects with key "description" (string). ' +
+        "Each sub-step must be concrete and under ~120 words. Output 2-6 items. No explanation.";
+
+      const response = await provider.createMessage({
+        model: modelId,
+        maxTokens: 1024,
+        system: systemPrompt,
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "text", text: `Split this step into ordered sub-steps:\n\n${stepDescription}` }],
+          },
+        ],
+      });
+
+      const text = (response.content || [])
+        .filter((b): b is { type: "text"; text: string } => b.type === "text" && typeof (b as { text?: string }).text === "string")
+        .map((b) => b.text)
+        .join("");
+
+      const jsonMatch = text.match(/\[[\s\S]*\]/);
+      if (!jsonMatch) return null;
+
+      const parsed = JSON.parse(jsonMatch[0]) as Array<{ description?: string }>;
+      if (!Array.isArray(parsed) || parsed.length < 2) return null;
+
+      const out = parsed
+        .slice(0, 6)
+        .map((p) => ({ description: String(p.description || "").trim() }))
+        .filter((p) => p.description.length > 8);
+
+      return out.length >= 2 ? out : null;
     } catch {
       return null;
     }
