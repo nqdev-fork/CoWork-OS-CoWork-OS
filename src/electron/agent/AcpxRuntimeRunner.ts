@@ -39,6 +39,16 @@ export function getAcpxPermissionArgs(
   }
 }
 
+export function getAcpxAgentDisplayName(agent: ExternalRuntimeConfig["agent"]): string {
+  switch (agent) {
+    case "claude":
+      return "Claude Code";
+    case "codex":
+    default:
+      return "Codex";
+  }
+}
+
 export function buildAcpxBaseArgs(input: {
   cwd: string;
   runtimeConfig: ExternalRuntimeConfig;
@@ -69,6 +79,25 @@ export function buildAcpxCommandArgs(input: {
   commandArgs: string[];
 }): string[] {
   return [...buildAcpxBaseArgs(input), input.runtimeConfig.agent, ...input.commandArgs];
+}
+
+type AcpxLauncherSpec = {
+  command: string;
+  prefixArgs: string[];
+  label: string;
+};
+
+let preferredAcpxLauncherLabel: string | null = null;
+
+function getAcpxLaunchCandidates(): AcpxLauncherSpec[] {
+  const candidates: AcpxLauncherSpec[] = [
+    { command: "acpx", prefixArgs: [], label: "acpx" },
+    { command: "npx", prefixArgs: ["-y", "acpx@latest"], label: "npx acpx@latest" },
+  ];
+  if (!preferredAcpxLauncherLabel) return candidates;
+  const preferred = candidates.find((candidate) => candidate.label === preferredAcpxLauncherLabel);
+  const remaining = candidates.filter((candidate) => candidate.label !== preferredAcpxLauncherLabel);
+  return preferred ? [preferred, ...remaining] : candidates;
 }
 
 export function parseAcpxJsonLine(line: string): Record<string, unknown> | null {
@@ -115,9 +144,13 @@ function normalizeToolName(update: Record<string, unknown>): string {
   return "tool";
 }
 
-export function mapAcpxSessionUpdate(update: Record<string, unknown>): AcpxRuntimeEvent[] {
+export function mapAcpxSessionUpdate(
+  update: Record<string, unknown>,
+  agent: ExternalRuntimeConfig["agent"] = "codex",
+): AcpxRuntimeEvent[] {
   const sessionUpdate = String(update.sessionUpdate || "");
   const events: AcpxRuntimeEvent[] = [];
+  const agentName = getAcpxAgentDisplayName(agent);
 
   if (sessionUpdate === "tool_call") {
     const rawInput =
@@ -201,7 +234,7 @@ export function mapAcpxSessionUpdate(update: Record<string, unknown>): AcpxRunti
       type: "progress_update",
       payload: {
         phase: "acpx_runtime",
-        message: used ? `Codex via ACP running (${used} tokens used)` : "Codex via ACP running",
+        message: used ? `${agentName} via ACP running (${used} tokens used)` : `${agentName} via ACP running`,
         state: "active",
         heartbeat: true,
       },
@@ -214,11 +247,19 @@ export function mapAcpxSessionUpdate(update: Record<string, unknown>): AcpxRunti
     sessionUpdate.includes("progress") ||
     sessionUpdate.includes("status")
   ) {
+    const friendlyMessage =
+      sessionUpdate === "agent_thought_chunk"
+        ? "Thinking"
+        : sessionUpdate.includes("thought")
+          ? `${agentName} is thinking`
+          : sessionUpdate.includes("progress")
+            ? `${agentName} is working`
+            : `${agentName} updated its status`;
     events.push({
       type: "progress_update",
       payload: {
         phase: "acpx_runtime",
-        message: `Codex runtime update: ${sessionUpdate}`,
+        message: friendlyMessage,
         state: "active",
       },
     });
@@ -256,9 +297,10 @@ export class AcpxRuntimeRunner {
   }
 
   async prompt(prompt: string): Promise<AcpxPromptResult> {
+    const agentName = getAcpxAgentDisplayName(this.input.runtimeConfig.agent);
     this.input.emitEvent("progress_update", {
       phase: "acpx_runtime",
-      message: "Delegating to Codex via ACP",
+      message: `Delegating to ${agentName} via ACP`,
       state: "active",
     });
     return this.runCommand(["prompt", "--session", this.sessionName, "--file", "-"], {
@@ -293,7 +335,7 @@ export class AcpxRuntimeRunner {
       await this.runCommand(["sessions", "close", this.sessionName]);
     } catch (error) {
       this.input.emitEvent("log", {
-        message: "Failed to close acpx session cleanly.",
+        message: `Failed to close ${getAcpxAgentDisplayName(this.input.runtimeConfig.agent)} acpx session cleanly.`,
         error: String((error as Any)?.message || error),
       });
     }
@@ -311,6 +353,7 @@ export class AcpxRuntimeRunner {
       runtimeConfig: this.input.runtimeConfig,
       commandArgs,
     });
+    const launchCandidates = getAcpxLaunchCandidates();
 
     return new Promise<AcpxPromptResult>((resolve, reject) => {
       let lineBuffer = "";
@@ -319,15 +362,8 @@ export class AcpxRuntimeRunner {
       let stopReason: string | undefined;
       let sessionId: string | undefined;
       let lastProtocolError: string | undefined;
-
-      const proc = spawn("acpx", args, {
-        cwd: this.input.cwd,
-        env: process.env,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-      if (options?.trackAsActivePrompt) {
-        this.activePromptProcess = proc;
-      }
+      let settled = false;
+      let activeAttemptIndex = -1;
 
       const finishLine = (line: string) => {
         const parsed = parseAcpxJsonLine(line);
@@ -378,69 +414,101 @@ export class AcpxRuntimeRunner {
             }
             return;
           }
-          const mapped = mapAcpxSessionUpdate(update);
+          const mapped = mapAcpxSessionUpdate(update, this.input.runtimeConfig.agent);
           for (const event of mapped) {
             this.input.emitEvent(event.type, event.payload);
           }
         }
       };
 
-      proc.stdout.on("data", (chunk) => {
-        lineBuffer += chunk.toString();
-        let newlineIndex = lineBuffer.indexOf("\n");
-        while (newlineIndex >= 0) {
-          const line = lineBuffer.slice(0, newlineIndex);
-          lineBuffer = lineBuffer.slice(newlineIndex + 1);
-          finishLine(line);
-          newlineIndex = lineBuffer.indexOf("\n");
-        }
-      });
-
-      proc.stderr.on("data", (chunk) => {
-        stderr += chunk.toString();
-      });
-
-      proc.once("error", (error: NodeJS.ErrnoException) => {
-        if (options?.trackAsActivePrompt) {
-          this.activePromptProcess = null;
-        }
-        if (error.code === "ENOENT") {
-          reject(new AcpxRuntimeUnavailableError());
-          return;
-        }
-        reject(error);
-      });
-
-      proc.once("close", (code) => {
-        if (options?.trackAsActivePrompt) {
-          this.activePromptProcess = null;
-        }
-        if (lineBuffer.trim()) {
-          finishLine(lineBuffer);
-        }
-        if (lastProtocolError) {
-          reject(new Error(lastProtocolError));
-          return;
-        }
-        if (code !== 0) {
-          reject(new Error(stderr.trim() || `acpx exited with code ${code}`));
-          return;
-        }
-        const trimmedAssistantText = finalAssistantText.trim();
-        if (trimmedAssistantText) {
-          this.input.emitEvent("assistant_message", { message: trimmedAssistantText });
-        }
-        resolve({
-          assistantText: trimmedAssistantText,
-          stopReason,
-          sessionId,
+      const startAttempt = (attemptIndex: number) => {
+        activeAttemptIndex = attemptIndex;
+        const launcher = launchCandidates[attemptIndex];
+        const launchArgs = [...launcher.prefixArgs, ...args];
+        const proc = spawn(launcher.command, launchArgs, {
+          cwd: this.input.cwd,
+          env: process.env,
+          stdio: ["pipe", "pipe", "pipe"],
         });
-      });
+        if (options?.trackAsActivePrompt) {
+          this.activePromptProcess = proc;
+        }
 
-      if (options?.stdin !== undefined) {
-        proc.stdin.write(options.stdin);
-      }
-      proc.stdin.end();
+        proc.stdout.on("data", (chunk) => {
+          lineBuffer += chunk.toString();
+          let newlineIndex = lineBuffer.indexOf("\n");
+          while (newlineIndex >= 0) {
+            const line = lineBuffer.slice(0, newlineIndex);
+            lineBuffer = lineBuffer.slice(newlineIndex + 1);
+            finishLine(line);
+            newlineIndex = lineBuffer.indexOf("\n");
+          }
+        });
+
+        proc.stderr.on("data", (chunk) => {
+          stderr += chunk.toString();
+        });
+
+        proc.once("error", (error: NodeJS.ErrnoException) => {
+          if (settled || attemptIndex !== activeAttemptIndex) return;
+          if (options?.trackAsActivePrompt) {
+            this.activePromptProcess = null;
+          }
+          if (error.code === "ENOENT") {
+            if (attemptIndex + 1 < launchCandidates.length) {
+              startAttempt(attemptIndex + 1);
+              return;
+            }
+            settled = true;
+            reject(
+              new AcpxRuntimeUnavailableError(
+                "acpx is not installed and CoWork could not launch it via npx acpx@latest",
+              ),
+            );
+            return;
+          }
+          settled = true;
+          reject(error);
+        });
+
+        proc.once("close", (code) => {
+          if (settled || attemptIndex !== activeAttemptIndex) return;
+          if (options?.trackAsActivePrompt) {
+            this.activePromptProcess = null;
+          }
+          if (lineBuffer.trim()) {
+            finishLine(lineBuffer);
+          }
+          if (lastProtocolError) {
+            settled = true;
+            reject(new Error(lastProtocolError));
+            return;
+          }
+          if (code !== 0) {
+            settled = true;
+            reject(new Error(stderr.trim() || `acpx exited with code ${code}`));
+            return;
+          }
+          preferredAcpxLauncherLabel = launcher.label;
+          const trimmedAssistantText = finalAssistantText.trim();
+          if (trimmedAssistantText) {
+            this.input.emitEvent("assistant_message", { message: trimmedAssistantText });
+          }
+          settled = true;
+          resolve({
+            assistantText: trimmedAssistantText,
+            stopReason,
+            sessionId,
+          });
+        });
+
+        if (options?.stdin !== undefined) {
+          proc.stdin.write(options.stdin);
+        }
+        proc.stdin.end();
+      };
+
+      startAttempt(0);
     });
   }
 }

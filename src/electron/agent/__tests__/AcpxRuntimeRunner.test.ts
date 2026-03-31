@@ -3,6 +3,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
   AcpxRuntimeRunner,
   AcpxRuntimeUnavailableError,
+  getAcpxAgentDisplayName,
   buildAcpxBaseArgs,
   buildAcpxCommandArgs,
   getAcpxPermissionArgs,
@@ -119,6 +120,42 @@ describe("AcpxRuntimeRunner helpers", () => {
     ]);
   });
 
+  it("builds Claude acpx command args for prompt execution", () => {
+    expect(
+      buildAcpxCommandArgs({
+        cwd: "/repo",
+        runtimeConfig: {
+          kind: "acpx",
+          agent: "claude",
+          sessionMode: "persistent",
+          outputMode: "json",
+          permissionMode: "deny-all",
+        },
+        commandArgs: ["prompt", "--session", "cowork-task-1", "--file", "-"],
+      }),
+    ).toEqual([
+      "--format",
+      "json",
+      "--json-strict",
+      "--cwd",
+      "/repo",
+      "--deny-all",
+      "--non-interactive-permissions",
+      "fail",
+      "claude",
+      "prompt",
+      "--session",
+      "cowork-task-1",
+      "--file",
+      "-",
+    ]);
+  });
+
+  it("returns a display label for supported runtime agents", () => {
+    expect(getAcpxAgentDisplayName("codex")).toBe("Codex");
+    expect(getAcpxAgentDisplayName("claude")).toBe("Claude Code");
+  });
+
   it("maps tool call updates into command and tool events", () => {
     expect(
       mapAcpxSessionUpdate({
@@ -203,6 +240,48 @@ describe("AcpxRuntimeRunner helpers", () => {
             exit_code: 0,
           },
           exitCode: 0,
+        },
+      },
+    ]);
+  });
+
+  it("uses Claude-specific labels in progress updates when requested", () => {
+    expect(
+      mapAcpxSessionUpdate(
+        {
+          sessionUpdate: "usage_update",
+          used: 42,
+        },
+        "claude",
+      ),
+    ).toEqual([
+      {
+        type: "progress_update",
+        payload: {
+          phase: "acpx_runtime",
+          message: "Claude Code via ACP running (42 tokens used)",
+          state: "active",
+          heartbeat: true,
+        },
+      },
+    ]);
+  });
+
+  it("maps Claude thought chunks to a friendly thinking label", () => {
+    expect(
+      mapAcpxSessionUpdate(
+        {
+          sessionUpdate: "agent_thought_chunk",
+        },
+        "claude",
+      ),
+    ).toEqual([
+      {
+        type: "progress_update",
+        payload: {
+          phase: "acpx_runtime",
+          message: "Thinking",
+          state: "active",
         },
       },
     ]);
@@ -372,6 +451,78 @@ describe("AcpxRuntimeRunner", () => {
     });
 
     await expect(runner.createSession()).rejects.toBeInstanceOf(AcpxRuntimeUnavailableError);
+  });
+
+  it("falls back to npx acpx@latest when acpx is missing", async () => {
+    const missingProc = createFakeProcess();
+    const fallbackProc = createFakeProcess();
+    childProcessMocks.spawn
+      .mockReturnValueOnce(missingProc)
+      .mockReturnValueOnce(fallbackProc);
+    const runner = new AcpxRuntimeRunner({
+      taskId: "task-1",
+      cwd: "/repo",
+      runtimeConfig: {
+        kind: "acpx",
+        agent: "claude",
+        sessionMode: "persistent",
+        outputMode: "json",
+        permissionMode: "approve-reads",
+      },
+      emitEvent: () => undefined,
+    });
+
+    const promise = runner.createSession();
+    missingProc.emit("error", Object.assign(new Error("spawn acpx ENOENT"), { code: "ENOENT" }));
+    fallbackProc.emit("close", 0);
+
+    await expect(promise).resolves.toEqual({
+      assistantText: "",
+      stopReason: undefined,
+      sessionId: undefined,
+    });
+    expect(childProcessMocks.spawn).toHaveBeenNthCalledWith(
+      1,
+      "acpx",
+      [
+        "--format",
+        "json",
+        "--json-strict",
+        "--cwd",
+        "/repo",
+        "--approve-reads",
+        "--non-interactive-permissions",
+        "fail",
+        "claude",
+        "sessions",
+        "new",
+        "--name",
+        "cowork-task-1",
+      ],
+      expect.any(Object),
+    );
+    expect(childProcessMocks.spawn).toHaveBeenNthCalledWith(
+      2,
+      "npx",
+      [
+        "-y",
+        "acpx@latest",
+        "--format",
+        "json",
+        "--json-strict",
+        "--cwd",
+        "/repo",
+        "--approve-reads",
+        "--non-interactive-permissions",
+        "fail",
+        "claude",
+        "sessions",
+        "new",
+        "--name",
+        "cowork-task-1",
+      ],
+      expect.any(Object),
+    );
   });
 
   it("rejects when acpx exits non-zero", async () => {
