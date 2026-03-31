@@ -127,7 +127,9 @@ function getShellArgs(shell: string): string[] {
     }
     return [];
   }
-  return ["-i"];
+  // Keep persistent sessions non-interactive so they do not attach to or read
+  // from the user's controlling TTY (which can suspend an active dev terminal).
+  return [];
 }
 
 function parseAliasLine(line: string): [string, string] | null {
@@ -813,3 +815,7 @@ export class ShellSessionManager {
     return { ...session.info };
   }
 }
+
+export const _testUtils = {
+  getShellArgs,
+};
