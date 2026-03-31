@@ -25,7 +25,7 @@ describe("tool-policy-engine request_user_input gating", () => {
       taskDomain: "auto",
     });
     expect(decision.decision).toBe("deny");
-    expect(decision.reason).toContain("only available in plan mode");
+    expect(decision.reason).toContain("only available in plan or debug mode");
   });
 
   it("denies request_user_input in analyze mode", () => {
@@ -34,7 +34,15 @@ describe("tool-policy-engine request_user_input gating", () => {
       taskDomain: "auto",
     });
     expect(decision.decision).toBe("deny");
-    expect(decision.reason).toContain("only available in plan mode");
+    expect(decision.reason).toContain("only available in plan or debug mode");
+  });
+
+  it("allows request_user_input in debug mode", () => {
+    const decision = evaluateToolPolicy("request_user_input", {
+      executionMode: "debug",
+      taskDomain: "auto",
+    });
+    expect(decision.decision).toBe("allow");
   });
 
   it("allows run_command in general domain when shell is enabled", () => {
