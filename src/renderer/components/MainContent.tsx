@@ -53,8 +53,10 @@ import {
 } from "../utils/task-outputs";
 import {
   ALWAYS_VISIBLE_TECHNICAL_EVENT_TYPES,
+  filterVerboseTimelineNoise,
   shouldShowTaskEventInSummaryMode,
 } from "../utils/task-event-visibility";
+import { friendlyToolCallTitle, friendlyToolResultTitle } from "../utils/timeline-tool-labels";
 import { normalizeEventsForTimelineUi } from "../utils/timeline-projection";
 import { getEffectiveTaskEventType } from "../utils/task-event-compat";
 import {
@@ -77,6 +79,7 @@ import {
   ListTodo,
   Search,
   ShieldCheck,
+  Bug,
   Sparkles,
   Code,
   BookOpen,
@@ -88,6 +91,7 @@ import {
 import type { LucideIcon } from "lucide-react";
 import { InlineVideoPreview } from "./InlineVideoPreview";
 import { ReplayControlsBar } from "./ReplayControls";
+import { DebugSessionPanel } from "./DebugSessionPanel";
 import type { ReplayControls } from "../hooks/useReplayMode";
 
 const CODE_PREVIEWS_EXPANDED_KEY = "cowork:codePreviewsExpanded";
@@ -2165,7 +2169,7 @@ interface CreateTaskOptions {
   videoGenerationMode?: boolean;
 }
 
-const EXECUTION_MODE_ORDER: ExecutionMode[] = ["chat", "execute", "plan", "analyze", "verified"];
+const EXECUTION_MODE_ORDER: ExecutionMode[] = ["chat", "execute", "plan", "analyze", "debug", "verified"];
 const TASK_DOMAIN_ORDER: TaskDomain[] = [
   "auto",
   "code",
@@ -2180,6 +2184,7 @@ const EXECUTION_MODE_LABEL: Record<ExecutionMode, string> = {
   execute: "Execute",
   plan: "Plan",
   analyze: "Analyze",
+  debug: "Debug",
   verified: "Verified",
 };
 const EXECUTION_MODE_HINT: Record<ExecutionMode, string> = {
@@ -2187,6 +2192,7 @@ const EXECUTION_MODE_HINT: Record<ExecutionMode, string> = {
   execute: "Full task execution with tools",
   plan: "Planning mode, no mutating tools",
   analyze: "Read-only analysis mode",
+  debug: "Evidence-first debugging: instrument, reproduce, fix, clean up",
   verified: "Execute with verification after each step",
 };
 const TASK_DOMAIN_LABEL: Record<TaskDomain, string> = {
@@ -2212,6 +2218,7 @@ const EXECUTION_MODE_ICON: Record<ExecutionMode, LucideIcon> = {
   execute: Play,
   plan: ListTodo,
   analyze: Search,
+  debug: Bug,
   verified: ShieldCheck,
 };
 const TASK_DOMAIN_ICON: Record<TaskDomain, LucideIcon> = {
@@ -2891,6 +2898,7 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                   const { summary, toolCallCount, durationMs, outputTokens } = buildActionBlockSummary(
                     item.events,
                     events,
+                    { isActive },
                   );
                   const expanded =
                     isActive || expandedActionBlocks.has(item.blockId);
@@ -3660,6 +3668,7 @@ export function MainContent({
 }: MainContentProps) {
   const events = useMemo(() => normalizeEventsForTimelineUi(rawEvents), [rawEvents]);
   const childEvents = useMemo(() => normalizeEventsForTimelineUi(rawChildEvents), [rawChildEvents]);
+  const researchWorkflowEnabled = Boolean(task?.agentConfig?.researchWorkflow?.enabled);
   // Agent personality context for personalized messages
   const agentContext = useAgentContext();
   const [inputValue, setInputValue] = useState("");
@@ -3966,9 +3975,12 @@ export function MainContent({
   const [viewerFilePath, setViewerFilePath] = useState<string | null>(null);
   // Extract citations from task events for inline badge rendering
   const citations = useMemo(() => {
-    const evidenceEvent = [...events]
-      .reverse()
-      .find((event) => event.type === "timeline_evidence_attached");
+    const reversed = [...events].reverse();
+    const evidenceEvent =
+      reversed.find((event) => getEffectiveTaskEventType(event) === "timeline_evidence_attached") ||
+      (researchWorkflowEnabled
+        ? reversed.find((event) => getEffectiveTaskEventType(event) === "citations_collected")
+        : undefined);
     if (!evidenceEvent) return [];
     const refs = Array.isArray(evidenceEvent.payload?.evidenceRefs)
       ? (evidenceEvent.payload.evidenceRefs as Array<Record<string, unknown>>)
@@ -4057,7 +4069,7 @@ export function MainContent({
           sourceTool: string;
         } => entry !== null,
       );
-  }, [events]);
+  }, [events, researchWorkflowEnabled]);
 
   const markdownComponents = useMemo(
     () =>
@@ -4107,7 +4119,7 @@ export function MainContent({
   // Filter events based on verbose mode
   const filteredEvents = useMemo(() => {
     const baseEvents = verboseSteps
-      ? events
+      ? filterVerboseTimelineNoise(events)
       : events.filter((event) => shouldShowTaskEventInSummaryMode(event, task?.status));
     // Command output is rendered separately via CommandOutput component
     const visibleEvents = baseEvents.filter(
@@ -4172,9 +4184,12 @@ export function MainContent({
     return dedupedEvents.filter((event) => !isVerificationNoiseEvent(event));
   }, [events, verboseSteps, task?.status]);
 
+  // Build projection from raw events so tool_call/tool_result data embedded
+  // in timeline_step_updated (which is filtered for display) still populates
+  // lane titles with URLs/results.
   const parallelGroupProjection = useMemo(
-    () => buildParallelGroupProjection(filteredEvents),
-    [filteredEvents],
+    () => buildParallelGroupProjection(events),
+    [events],
   );
   const parallelGroupsByAnchorEventId = parallelGroupProjection.groupsByAnchorEventId;
   const suppressedParallelEventIds = parallelGroupProjection.suppressedEventIds;
@@ -4194,16 +4209,30 @@ export function MainContent({
       const effectiveType = getEffectiveTaskEventType(event);
       if (effectiveType === "tool_call") {
         const p = event.payload as Record<string, unknown> | undefined;
-        const id = typeof p?.id === "string" ? p.id : typeof p?.callId === "string" ? p.callId : "";
-        if (id) callIdToEvent.set(id, event);
+        const ids = [
+          typeof p?.id === "string" ? p.id : "",
+          typeof p?.callId === "string" ? p.callId : "",
+          typeof p?.toolUseId === "string" ? p.toolUseId : "",
+        ]
+          .map((value) => value.trim())
+          .filter((value) => value.length > 0);
+        for (const id of ids) {
+          callIdToEvent.set(id, event);
+        }
       } else if (effectiveType === "tool_result") {
         const p = event.payload as Record<string, unknown> | undefined;
-        const callId = typeof p?.callId === "string" ? p.callId : "";
-        if (callId) {
-          const callEvent = callIdToEvent.get(callId);
+        const ids = [
+          typeof p?.callId === "string" ? p.callId : "",
+          typeof p?.toolUseId === "string" ? p.toolUseId : "",
+        ]
+          .map((value) => value.trim())
+          .filter((value) => value.length > 0);
+        for (const id of ids) {
+          const callEvent = callIdToEvent.get(id);
           if (callEvent) {
             completions.set(callEvent.id, event);
             claimedResultIds.add(event.id);
+            break;
           }
         }
       }
@@ -4222,7 +4251,27 @@ export function MainContent({
 
   const isTaskWorking = useMemo(() => {
     if (!task) return false;
-    if (task.status === "executing" || task.status === "interrupted") return true;
+    // `onTaskEvent` may apply `task_completed` to the event list before `setTasks` flips status
+    // away from `executing`. Without this scan, the header spinner stays up until a later reconcile.
+    if (task.status === "executing") {
+      for (let i = events.length - 1; i >= 0; i--) {
+        const event = events[i];
+        if (event.taskId !== task.id) continue;
+        const effectiveType = getEffectiveTaskEventType(event);
+        if (
+          effectiveType === "task_paused" ||
+          effectiveType === "approval_requested" ||
+          effectiveType === "task_completed" ||
+          effectiveType === "task_cancelled" ||
+          effectiveType === "follow_up_completed" ||
+          effectiveType === "error"
+        ) {
+          return false;
+        }
+      }
+      return true;
+    }
+    if (task.status === "interrupted") return true;
     if (
       task.status === "completed" ||
       task.status === "paused" ||
@@ -4326,6 +4375,7 @@ export function MainContent({
   const [taskFeedbackDecision, setTaskFeedbackDecision] = useState<"accepted" | "rejected" | null>(
     null,
   );
+  const [taskFeedbackBannerDismissed, setTaskFeedbackBannerDismissed] = useState(false);
   const [rejectMenuOpenFor, setRejectMenuOpenFor] = useState<string | null>(null);
   const rejectMenuRef = useRef<HTMLDivElement | null>(null);
 
@@ -4388,6 +4438,7 @@ export function MainContent({
 
   useEffect(() => {
     setTaskFeedbackDecision(null);
+    setTaskFeedbackBannerDismissed(false);
   }, [task?.id]);
 
   const handleStepFeedback = useCallback(
@@ -8079,6 +8130,32 @@ export function MainContent({
           {/* Always anchor the initial user prompt above the timeline. */}
           {initialPromptBubble}
 
+          {task?.agentConfig?.executionMode === "debug" && (
+            <DebugSessionPanel events={events} />
+          )}
+
+          {researchWorkflowEnabled && (
+            <div
+              className="research-mode-badge"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                marginBottom: 8,
+                padding: "3px 10px",
+                borderRadius: 12,
+                fontSize: "0.72rem",
+                fontWeight: 500,
+                color: "var(--color-text-muted, #6b7280)",
+                background: "var(--color-bg-elevated, #f4f3ff)",
+                letterSpacing: "0.02em",
+              }}
+            >
+              <span style={{ fontSize: "0.65rem" }}>&#9679;</span>
+              Research mode
+            </div>
+          )}
+
           {/* View steps toggle - show right after original prompt */}
           {hasNonConversationEvents && (
             <div className="timeline-controls">
@@ -8334,6 +8411,7 @@ export function MainContent({
             </div>
           )}
           {task.status === "completed" &&
+            !taskFeedbackBannerDismissed &&
             !childTasks.some((t) =>
               ["executing", "planning", "queued", "pending"].includes(t.status),
             ) && (
@@ -8360,6 +8438,14 @@ export function MainContent({
                   title="This task result needs improvement"
                 >
                   Down
+                </button>
+                <button
+                  type="button"
+                  className="message-feedback-btn task-feedback-banner-dismiss"
+                  onClick={() => setTaskFeedbackBannerDismissed(true)}
+                  title="Close without rating"
+                >
+                  Dismiss
                 </button>
               </div>
             </div>
@@ -8977,6 +9063,41 @@ function humanizeTimelineMessage(message: string): string {
   if (!message || typeof message !== "string") return message;
   const m = message.trim();
 
+  if (m === "Analyzing task requirements...") return "Understanding the request";
+  if (/^\[planning\]/i.test(m)) return "Choosing the best planning approach";
+  if (/^\[skill-routing\]/i.test(m)) return "Selecting relevant skills";
+  if (/^Creating execution plan \(model:[^)]+\)\.\.\.$/i.test(m)) return "Creating execution plan";
+  if (/^Starting execution of \d+ steps$/i.test(m)) return "Starting the work";
+  const executingStepMatch = /^Executing step \d+\/\d+:\s*(.+)$/i.exec(m);
+  if (executingStepMatch?.[1]) {
+    return `Working on: ${executingStepMatch[1].trim()}`;
+  }
+  const completedStepMatch = /^Completed step [^:]+:\s*(.+)$/i.exec(m);
+  if (completedStepMatch?.[1]) {
+    return `Finished: ${completedStepMatch[1].trim()}`;
+  }
+  if (m === "All steps completed") return "Completed all planned steps";
+  if (m === "timeline_step_finished") return "Step finished";
+
+  // Raw JSON progress payloads (web search / fetch metadata)
+  if (m.startsWith("{") && m.endsWith("}")) {
+    try {
+      const parsed = JSON.parse(m) as Record<string, unknown>;
+      if (typeof parsed.query === "string" && parsed.query.trim()) {
+        const q = parsed.query.trim();
+        const prov = typeof parsed.provider === "string" ? ` (${parsed.provider})` : "";
+        return `Web search: ${q.length > 90 ? `${q.slice(0, 89)}…` : q}${prov}`;
+      }
+      if (typeof parsed.url === "string" && parsed.url.trim()) {
+        const title = typeof parsed.title === "string" ? parsed.title.trim() : "";
+        const head = title || parsed.url;
+        return `Fetched page: ${head.length > 90 ? `${head.slice(0, 89)}…` : head}`;
+      }
+    } catch {
+      /* keep message */
+    }
+  }
+
   // Prompt budget / context optimization
   if (/prompt budget applied$/i.test(m)) return "Optimized context to fit limits";
 
@@ -9153,11 +9274,18 @@ function renderEventTitle(
       (typeof event.payload?.groupLabel === "string" && event.payload.groupLabel.trim()) || "";
     const label = groupLabel || stage || "Group";
     const summaryStageLabel = stage ? getSummaryStageLabel(stage) : null;
+    const isSubStage = Boolean(groupLabel && groupLabel.toUpperCase() !== stage);
     if (summaryMode) {
       // Prefer sub-stage label (e.g. "Preparing workspace") over generic stage label (e.g. "Applying fixes")
-      const isSubStage = groupLabel && groupLabel.toUpperCase() !== stage;
       if (isSubStage) return groupLabel;
       if (summaryStageLabel) return summaryStageLabel;
+    }
+
+    if (isSubStage) {
+      return event.type === "timeline_group_finished" ? `${groupLabel} complete` : groupLabel;
+    }
+    if (summaryStageLabel) {
+      return event.type === "timeline_group_finished" ? `${summaryStageLabel} complete` : summaryStageLabel;
     }
 
     const maxParallel =
@@ -9261,32 +9389,18 @@ function renderEventTitle(
     case "tool_call": {
       const tcTool = event.payload.tool;
       const tcInput = event.payload.input;
-      let tcDetail = "";
-      if (tcTool === "write_file" && tcInput?.path) {
-        const tcLines = tcInput.content ? tcInput.content.split("\n").length : 0;
-        tcDetail = ` → ${tcInput.path} (${tcLines} lines)`;
-      } else if (tcTool === "edit_file" && tcInput?.file_path) {
-        tcDetail = ` → ${tcInput.file_path}`;
-      } else if (tcTool === "read_file" && tcInput?.path) {
-        tcDetail = ` → ${tcInput.path}`;
-      } else if (tcTool === "run_command" && tcInput?.command) {
-        const cmd =
-          tcInput.command.length > 40 ? tcInput.command.slice(0, 40) + "..." : tcInput.command;
-        tcDetail = ` → ${cmd}`;
-      } else if (tcTool === "glob" && tcInput?.pattern) {
-        tcDetail = ` → ${tcInput.pattern}`;
-      } else if ((tcTool === "grep" || tcTool === "search_files") && tcInput?.pattern) {
-        tcDetail = ` → /${tcInput.pattern}/`;
-      }
-      return `Using: ${tcTool}${tcDetail}`;
+      return friendlyToolCallTitle(
+        typeof tcTool === "string" ? tcTool : undefined,
+        tcInput && typeof tcInput === "object" ? (tcInput as Record<string, unknown>) : undefined,
+      );
     }
     case "tool_result": {
       const result = event.payload.result;
       const success = result?.success !== false && !result?.error;
-      const status = success ? "done" : "issue";
 
       // schedule_task is user-facing; surface a compact summary in the title.
       if (event.payload.tool === "schedule_task") {
+        const status = success ? "done" : "issue";
         const describeEvery = (ms: number): string => {
           if (!Number.isFinite(ms) || ms <= 0) return `${ms}ms`;
           const day = 24 * 60 * 60 * 1000;
@@ -9353,29 +9467,11 @@ function renderEventTitle(
         }
       }
 
-      // Extract useful info from result to show inline
-      let detail = "";
-      if (result) {
-        if (!success && result.error) {
-          // Show error message for failed tools
-          const errorMsg = typeof result.error === "string" ? result.error : "Unknown error";
-          detail = `: ${errorMsg.slice(0, 60)}${errorMsg.length > 60 ? "..." : ""}`;
-        } else if (result.path) {
-          detail = ` → ${result.path}`;
-        } else if (result.content && typeof result.content === "string") {
-          const lines = result.content.split("\n").length;
-          detail = ` → ${lines} lines`;
-        } else if (result.size !== undefined) {
-          detail = ` → ${result.size} bytes`;
-        } else if (result.files) {
-          detail = ` → ${result.files.length} items`;
-        } else if (result.matches) {
-          detail = ` → ${result.matches.length} matches`;
-        } else if (result.exitCode !== undefined) {
-          detail = result.exitCode === 0 ? "" : ` → exit ${result.exitCode}`;
-        }
-      }
-      return `${event.payload.tool} ${status}${detail}`;
+      return friendlyToolResultTitle(
+        typeof event.payload.tool === "string" ? event.payload.tool : undefined,
+        result && typeof result === "object" ? (result as Record<string, unknown>) : undefined,
+        success,
+      );
     }
     case "assistant_message":
       return msgCtx.agentName;
