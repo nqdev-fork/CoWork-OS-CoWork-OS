@@ -12,7 +12,7 @@ import {
 
 /**
  * Strip ANSI/VT control sequences and normalize line endings produced by the
- * `script` PTY wrapper used for CLI agent commands (e.g. codex).
+ * `script` PTY wrapper used for CLI agent commands (e.g. codex, claude).
  * `script` converts LF→CRLF and may inject escape sequences; both would render
  * as garbled characters in the CommandOutput terminal UI if not cleaned.
  */
@@ -118,6 +118,21 @@ function getLeadingShellTokens(command: string, maxTokens = 16): string[] {
     tokens.push(token);
   }
   return tokens;
+}
+
+function shouldUsePersistentShell(command: string): boolean {
+  const text = String(command || "");
+  return (
+    process.platform !== "win32" &&
+    !isLikelyInteractiveCommand(text) &&
+    !/^(?:\s*)(?:script|apply_patch)\b/i.test(text) &&
+    !/[\r\n]/.test(text) &&
+    // Exclude commands containing shell operators. Note: this is a best-effort
+    // textual scan — operators inside quoted strings (e.g. "foo | bar") will
+    // also trigger this exclusion. That is intentional: we err on the side of
+    // the safe, stateless subprocess path when operator chars appear anywhere.
+    !/(?:&&|\|\||[|;])/.test(text)
+  );
 }
 
 function getExecutableTokenIndex(tokens: string[]): number {
@@ -731,8 +746,8 @@ export class ShellTools {
           this.taskId,
           "run_command",
           bundleEligible
-            ? `Running command (single approval bundle for this task): ${command}`
-            : `Running command: ${command}`,
+            ? "Single approval bundle for this task: subsequent safe commands may run without another prompt until you deny or the task ends."
+            : "Review the shell command below before approving.",
           {
             command,
             cwd: options?.cwd || this.workspace.path,
@@ -766,11 +781,20 @@ export class ShellTools {
       cwd: options?.cwd || this.workspace.path,
     });
 
-    const persistentShellAllowed =
-      process.platform !== "win32" &&
-      !isLikelyInteractiveCommand(command) &&
-      !/^(?:\s*)(?:script|apply_patch)\b/i.test(command);
+    const persistentShellAllowed = shouldUsePersistentShell(command);
+    const cwd = resolveCommandCwd(this.workspace.path, options?.cwd);
+    const dirName = (() => {
+      const parts = cwd.replace(/\\/g, "/").split("/").filter(Boolean);
+      return parts[parts.length - 1] ?? "";
+    })();
+    const promptPrefix = dirName ? `$ ${dirName} % ` : `$ `;
     if (persistentShellAllowed) {
+      this.daemon.logEvent(this.taskId, "command_output", {
+        command,
+        cwd,
+        type: "start",
+        output: `${promptPrefix}${command}\n`,
+      });
       try {
         const persistentResult = await ShellSessionManager.getInstance().runCommand({
           taskId: this.taskId,
@@ -795,6 +819,30 @@ export class ShellTools {
             persistentResult.sessionEvent,
           );
         }
+        if (persistentResult.stdout) {
+          this.daemon.logEvent(this.taskId, "command_output", {
+            command,
+            cwd,
+            type: "stdout",
+            output: this.sanitizeCommandOutput(persistentResult.stdout),
+          });
+        }
+        if (persistentResult.stderr) {
+          this.daemon.logEvent(this.taskId, "command_output", {
+            command,
+            cwd,
+            type: "stderr",
+            output: this.sanitizeCommandOutput(persistentResult.stderr),
+          });
+        }
+        this.daemon.logEvent(this.taskId, "command_output", {
+          command,
+          cwd,
+          type: "end",
+          exitCode: persistentResult.exitCode,
+          success: persistentResult.success,
+          terminationReason: persistentResult.terminationReason,
+        });
         if (persistentResult.usedPersistentSession) {
           return {
             success: persistentResult.success,
@@ -806,6 +854,22 @@ export class ShellTools {
           };
         }
       } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        this.daemon.logEvent(this.taskId, "command_output", {
+          command,
+          cwd,
+          type: "error",
+          output: `\n[Error: ${errorMessage}]\n`,
+          terminationReason: "error",
+        });
+        this.daemon.logEvent(this.taskId, "command_output", {
+          command,
+          cwd,
+          type: "end",
+          exitCode: null,
+          success: false,
+          terminationReason: "error",
+        });
         // Log a fallback event using real session info if available, otherwise skip.
         const realSession = ShellSessionManager.getInstance().getSessionInfo(
           this.taskId,
@@ -834,12 +898,12 @@ export class ShellTools {
     // Create a minimal, safe environment (don't leak sensitive process.env vars like API keys)
     const resolvedShell = resolveShellForCommandExecution();
 
-    // Detect if this command invokes a CLI agent (codex) that needs
+    // Detect if this command invokes a CLI agent (codex / claude) that needs
     // special environment (API keys) and PTY allocation.
-    // Match only when `codex` appears as the first command token or after a
+    // Match only when the agent command appears as the first command token or after a
     // shell separator (;, |, &) to avoid false-positives on paths like
     // /usr/local/codex-backup or variables that contain the word.
-    const isCliAgentCommand = /(?:^|[;&|])\s*codex\b/.test(command);
+    const isCliAgentCommand = /(?:^|[;&|])\s*(?:codex|claude)\b/.test(command);
 
     const safeEnv: Record<string, string> =
       process.platform === "win32"
@@ -871,6 +935,7 @@ export class ShellTools {
     if (isCliAgentCommand && process.platform !== "win32") {
       const CLI_AGENT_ENV_PASSTHROUGH = [
         // Auth credentials
+        "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
         "CODEX_API_KEY",
         "AWS_REGION",
@@ -880,7 +945,7 @@ export class ShellTools {
         "CLOUD_ML_REGION",
         "GOOGLE_APPLICATION_CREDENTIALS",
         // Runtime config (not secret keys, but required for correct operation)
-        "ANTHROPIC_MODEL", // selects which Anthropic model codex uses
+        "ANTHROPIC_MODEL", // selects which Anthropic model the CLI agent uses
         "XDG_CONFIG_HOME",
         "NPM_CONFIG_PREFIX",
         "NVM_DIR",
@@ -892,12 +957,6 @@ export class ShellTools {
         }
       }
     }
-
-    const cwd = resolveCommandCwd(this.workspace.path, options?.cwd);
-    const dirName = (() => {
-      const parts = cwd.replace(/\\/g, "/").split("/").filter(Boolean);
-      return parts[parts.length - 1] ?? "";
-    })();
 
     // Wrap CLI agent commands with `script` to allocate a PTY (prevents hang bug)
     let effectiveCommand = command;
@@ -912,7 +971,6 @@ export class ShellTools {
     }
 
     // Emit the command being executed (show original command, not wrapped)
-    const promptPrefix = dirName ? `$ ${dirName} % ` : `$ `;
     this.daemon.logEvent(this.taskId, "command_output", {
       command,
       cwd,
@@ -1153,4 +1211,5 @@ export const _testUtils = {
   getDescendantPids,
   killProcessTree,
   resolveCommandCwd,
+  shouldUsePersistentShell,
 };

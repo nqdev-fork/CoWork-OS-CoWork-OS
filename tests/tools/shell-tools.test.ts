@@ -119,7 +119,7 @@ describe('ShellTools auto-approval', () => {
     expect(first.success).toBe(true);
     expect(second.success).toBe(true);
     expect(mockDaemon.requestApproval).toHaveBeenCalledTimes(1);
-    expect((mockDaemon.requestApproval as any).mock.calls[0][2]).toContain('single approval bundle');
+    expect((mockDaemon.requestApproval as any).mock.calls[0][2]).toMatch(/single approval bundle/i);
   });
 
   it('still requires explicit approval for unsafe commands even with bundle mode', async () => {
@@ -134,7 +134,7 @@ describe('ShellTools auto-approval', () => {
     await expect(shellTools.runCommand('sudo -n true')).rejects.toThrow('User denied command execution');
     expect(mockDaemon.requestApproval).toHaveBeenCalledTimes(2);
     expect((mockDaemon.requestApproval as any).mock.calls[1][2]).toBe(
-      'Running command: sudo -n true'
+      "Review the shell command below before approving."
     );
   });
 

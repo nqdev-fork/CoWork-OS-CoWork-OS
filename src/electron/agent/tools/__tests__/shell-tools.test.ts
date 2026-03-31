@@ -7,7 +7,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { _testUtils } from "../shell-tools";
 
-const { isValidPid, isValidUsername, isProcessOwnedByCurrentUser, resolveCommandCwd } =
+const {
+  isValidPid,
+  isValidUsername,
+  isProcessOwnedByCurrentUser,
+  resolveCommandCwd,
+  shouldUsePersistentShell,
+} =
   _testUtils;
 
 describe("ShellTools Security Functions", () => {
@@ -291,6 +297,24 @@ describe("ShellTools Integration", () => {
 
     it("maps dot cwd to the workspace path", () => {
       expect(resolveCommandCwd("/tmp/workspace", ".")).toBe("/tmp/workspace");
+    });
+  });
+
+  describe("persistent shell routing", () => {
+    it("keeps single-line commands on the persistent shell path", () => {
+      expect(shouldUsePersistentShell("pwd")).toBe(process.platform !== "win32");
+    });
+
+    it("routes multiline scripts to the direct shell path", () => {
+      expect(shouldUsePersistentShell("echo one\necho two")).toBe(false);
+    });
+
+    it("routes chained commands to the direct shell path", () => {
+      expect(shouldUsePersistentShell("command -v acpx && acpx --help")).toBe(false);
+    });
+
+    it("routes interactive commands to the direct shell path", () => {
+      expect(shouldUsePersistentShell("vim README.md")).toBe(false);
     });
   });
 
