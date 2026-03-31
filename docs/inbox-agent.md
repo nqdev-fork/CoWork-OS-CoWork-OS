@@ -110,3 +110,7 @@ Mailbox events currently drive:
 - The inbox can re-sync in the background while still showing cached mail immediately.
 
 For a higher-level overview of the product surface, see [Features](features.md). For copy-paste prompts that exercise inbox workflows, see [Use Cases](use-cases.md).
+
+### Product plan (saved views, quick replies, snippets, MC links)
+
+Implementation notes for the inbox roadmap (saved views / label-similar preview, quick-reply suggestions, snippets, triage feedback, Mission Control deep links, and weekly review schedules) live in [inbox-agent-product-plan-implementation.md](inbox-agent-product-plan-implementation.md).
