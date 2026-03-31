@@ -3239,7 +3239,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   // Tray (Menu Bar) APIs
   getTraySettings: () => ipcRenderer.invoke(IPC_CHANNELS.TRAY_GET_SETTINGS),
-  saveTraySettings: (settings: TraySettings) =>
+  saveTraySettings: (settings: Partial<TraySettings>) =>
     ipcRenderer.invoke(IPC_CHANNELS.TRAY_SAVE_SETTINGS, settings),
 
   // Tray event listeners (for renderer to respond to tray actions)
@@ -5420,7 +5420,9 @@ export interface ElectronAPI {
   onComputerUseEvent: (callback: (event: Any) => void) => () => void;
   // Tray (Menu Bar)
   getTraySettings: () => Promise<TraySettings>;
-  saveTraySettings: (settings: Partial<TraySettings>) => Promise<{ success: boolean }>;
+  saveTraySettings: (
+    settings: Partial<TraySettings>,
+  ) => Promise<{ success: boolean; settings: TraySettings }>;
   onTrayNewTask: (callback: () => void) => () => void;
   onTraySelectWorkspace: (callback: (event: Any, workspaceId: string) => void) => () => void;
   onTrayOpenSettings: (callback: () => void) => () => void;

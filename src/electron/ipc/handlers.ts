@@ -6249,7 +6249,7 @@ function setupMCPHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.TRAY_SAVE_SETTINGS, async (_, settings) => {
     const { trayManager } = await import("../tray");
     trayManager.saveSettings(settings);
-    return { success: true };
+    return { success: true, settings: trayManager.getSettings() };
   });
 
   // =====================
