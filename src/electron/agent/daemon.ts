@@ -1873,7 +1873,6 @@ export class AgentDaemon extends EventEmitter {
       budgetTokens: params.budgetTokens,
       budgetCost: params.budgetCost,
     });
-
     // Apply agent squad metadata before starting so role context is available immediately.
     const initialUpdates: Partial<Task> = {};
     if (

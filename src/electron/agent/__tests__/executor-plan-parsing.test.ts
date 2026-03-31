@@ -60,6 +60,8 @@ function createPlanExecutor(response: Any): Any {
   executor.resolveLLMMaxTokens = vi.fn().mockReturnValue(8192);
   executor.callLLMWithRetry = vi.fn().mockResolvedValue(response);
   executor.requiresVisualQARun = false;
+  executor.refreshProviderIfSettingsChanged = vi.fn();
+  executor.llmProfileUsed = "cheap";
 
   return executor;
 }
@@ -67,6 +69,29 @@ function createPlanExecutor(response: Any): Any {
 describe("TaskExecutor plan parsing", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("routes execution plan creation through the strong model profile when using profile routing", async () => {
+    const response = {
+      usage: { inputTokens: 1, outputTokens: 2 },
+      content: [
+        { type: "text", text: '{"description":"P","steps":[{"id":"1","description":"Do the thing"}]}' },
+      ],
+    };
+    const executor = createPlanExecutor(response);
+    await executor.createPlan();
+    expect(executor.refreshProviderIfSettingsChanged).toHaveBeenCalledWith("strong");
+  });
+
+  it("does not force strong profile for execution plan when a task model override is set", async () => {
+    const response = {
+      usage: { inputTokens: 1, outputTokens: 2 },
+      content: [{ type: "text", text: '{"description":"P","steps":[{"id":"1","description":"Do"}]}' }],
+    };
+    const executor = createPlanExecutor(response);
+    executor.task.agentConfig = { modelKey: "gpt-5.4-mini" };
+    await executor.createPlan();
+    expect(executor.refreshProviderIfSettingsChanged).not.toHaveBeenCalled();
   });
 
   it("parses step-header plans spread across multiple text blocks", async () => {

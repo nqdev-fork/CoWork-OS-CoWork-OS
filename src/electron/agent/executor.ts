@@ -96,7 +96,11 @@ import { describeSchedule, parseIntervalToMs } from "../cron/types";
 import { InfraManager } from "../infra/infra-manager";
 import { InfraSettingsManager } from "../infra/infra-settings";
 import { buildBestKnownOutcome, mergeBestKnownOutcome } from "./outcome-policy";
-import { AcpxRuntimeRunner, AcpxRuntimeUnavailableError } from "./AcpxRuntimeRunner";
+import {
+  AcpxRuntimeRunner,
+  AcpxRuntimeUnavailableError,
+  getAcpxAgentDisplayName,
+} from "./AcpxRuntimeRunner";
 
 import {
   AwaitingUserInputError,
@@ -1954,9 +1958,18 @@ export class TaskExecutor {
     };
   }
 
-  private isAcpxExternalRuntimeTask(): boolean {
+  private getAcpxExternalRuntimeConfig(): AgentConfig["externalRuntime"] | null {
     const runtime = this.task?.agentConfig?.externalRuntime;
-    return runtime?.kind === "acpx" && runtime.agent === "codex";
+    return runtime?.kind === "acpx" ? runtime : null;
+  }
+
+  private isAcpxExternalRuntimeTask(): boolean {
+    return this.getAcpxExternalRuntimeConfig() !== null;
+  }
+
+  private getAcpxRuntimeAgentDisplayName(): string {
+    const runtime = this.getAcpxExternalRuntimeConfig();
+    return getAcpxAgentDisplayName(runtime?.agent || "codex");
   }
 
   private getAcpxRuntimeRunner(): AcpxRuntimeRunner {
@@ -1974,6 +1987,20 @@ export class TaskExecutor {
   private disableExternalRuntimeForFallback(reason: string): void {
     const existingConfig = this.task.agentConfig || {};
     if (!existingConfig.externalRuntime) return;
+    const runtimeMetadata = {
+      runtime: existingConfig.externalRuntime.kind,
+      runtimeAgent: existingConfig.externalRuntime.agent,
+    };
+    this.emitEvent("progress_update", {
+      ...runtimeMetadata,
+      phase: "acpx_runtime",
+      message: reason,
+      state: "fallback",
+    });
+    this.emitEvent("log", {
+      ...runtimeMetadata,
+      message: reason,
+    });
     const nextConfig: AgentConfig = {
       ...existingConfig,
     };
@@ -1982,15 +2009,13 @@ export class TaskExecutor {
       ...this.task,
       agentConfig: nextConfig,
     };
-    this.emitEvent("log", {
-      message: reason,
-    });
   }
 
   private async executeWithAcpxRuntime(initialPrompt: string): Promise<void> {
     const runner = this.getAcpxRuntimeRunner();
+    const runtimeAgentName = this.getAcpxRuntimeAgentDisplayName();
     this.daemon.updateTaskStatus(this.task.id, "executing");
-    this.emitEvent("executing", { message: "Delegating task to Codex via ACP" });
+    this.emitEvent("executing", { message: `Delegating task to ${runtimeAgentName} via ACP` });
 
     try {
       await runner.createSession();
@@ -2016,7 +2041,7 @@ export class TaskExecutor {
       });
     }
     this.finalizeTaskBestEffort(
-      assistantText || "Codex via ACP completed without a final assistant message.",
+      assistantText || `${runtimeAgentName} via ACP completed without a final assistant message.`,
       "acpx runtime completed",
     );
   }
@@ -2026,8 +2051,9 @@ export class TaskExecutor {
     _images?: ImageAttachment[],
   ): Promise<void> {
     const runner = this.getAcpxRuntimeRunner();
+    const runtimeAgentName = this.getAcpxRuntimeAgentDisplayName();
     this.daemon.updateTaskStatus(this.task.id, "executing");
-    this.emitEvent("executing", { message: "Processing follow-up via Codex ACP runtime" });
+    this.emitEvent("executing", { message: `Processing follow-up via ${runtimeAgentName} ACP runtime` });
     this.emitEvent("user_message", { message });
     await runner.ensureSession();
     const result = await runner.prompt(message);
@@ -2038,7 +2064,7 @@ export class TaskExecutor {
       this.lastNonVerificationOutput = assistantText;
     }
     this.finalizeTaskBestEffort(
-      assistantText || "Codex via ACP follow-up completed without a final assistant message.",
+      assistantText || `${runtimeAgentName} via ACP follow-up completed without a final assistant message.`,
       "acpx follow-up completed",
     );
   }
@@ -15879,6 +15905,155 @@ You are continuing a previous conversation. The context from the previous conver
     return true;
   }
 
+  private extractCurrentTaskText(value: unknown): string {
+    return typeof value === "string" ? value.trim() : "";
+  }
+
+  private isExplicitClaudeChildTaskRequest(raw: string): boolean {
+    const text = String(raw || "").trim().toLowerCase();
+    if (!text) return false;
+    const mentionsClaude = /\bclaude(?:\s+code)?\b/.test(text);
+    const requestsDelegation =
+      /\b(child task|child agent|delegate|delegation|spawn agent|spawn a child|sub-?agent)\b/.test(text) ||
+      /\bacpx\b/.test(text);
+    return mentionsClaude && requestsDelegation;
+  }
+
+  private deriveClaudeChildTaskTitle(taskTitle: string, taskPrompt: string): string {
+    const combined = `${taskTitle}\n${taskPrompt}`;
+    if (/\breview|audit|inspect|critique\b/i.test(combined)) return "Claude review";
+    if (/\bfix|debug|repair\b/i.test(combined)) return "Claude fix";
+    if (/\bplan|analy[sz]e|investigate|research|summari[sz]e\b/i.test(combined)) {
+      return "Claude analysis";
+    }
+    return "Claude task";
+  }
+
+  private deriveClaudeChildTaskPrompt(taskPrompt: string, fallbackTitle: string): string {
+    const rawSource =
+      this.extractCurrentTaskText(taskPrompt) || this.extractCurrentTaskText(fallbackTitle);
+    const strategyIdx = rawSource.indexOf("[AGENT_STRATEGY_CONTEXT_V1]");
+    const preStrategySource = strategyIdx >= 0 ? rawSource.slice(0, strategyIdx) : rawSource;
+    const source = normalizePromptForContractsUtil(preStrategySource);
+    if (!source) {
+      return "Handle the assigned task and report concrete results.";
+    }
+
+    let normalized = source;
+    normalized = normalized.replace(
+      /\buse\s+claude(?:\s+code)?\s+for\s+this\s+task\b[:,]?\s*/gi,
+      "",
+    );
+    normalized = normalized.replace(
+      /\bcreate\s+a\s+child\s+task(?:\s+via\s+acpx)?\b[:,]?\s*/gi,
+      "",
+    );
+    normalized = normalized.replace(
+      /\b(?:with|via|using)\s+claude(?:\s+code)?\b/gi,
+      "",
+    );
+    normalized = normalized.replace(/\bhave\s+it\b/gi, "");
+    normalized = normalized.replace(/\s+/g, " ").trim();
+    normalized = normalized.replace(/^[,.;:\-)\]]+\s*/g, "");
+    normalized = normalized.replace(/^that\s+/i, "");
+    normalized = normalized.replace(
+      /^that\s+(returns?|checks?|inspects?|reviews?|summari[sz]es?|analy[sz]es?|explains?|finds?|fixes?|writes?|creates?|builds?|tells?)\b/i,
+      "$1",
+    );
+    normalized = normalized.replace(
+      /^(returns?|checks?|inspects?|reviews?|summari[sz]es?|analy[sz]es?|explains?|finds?|fixes?|writes?|creates?|builds?|tells?)\b/i,
+      (match) => {
+        const lower = match.toLowerCase();
+        const imperativeMap: Record<string, string> = {
+          return: "Return",
+          returns: "Return",
+          check: "Check",
+          checks: "Check",
+          inspect: "Inspect",
+          inspects: "Inspect",
+          review: "Review",
+          reviews: "Review",
+          summarize: "Summarize",
+          summarises: "Summarize",
+          summarizes: "Summarize",
+          analyse: "Analyze",
+          analyses: "Analyze",
+          analyze: "Analyze",
+          analyzes: "Analyze",
+          explain: "Explain",
+          explains: "Explain",
+          find: "Find",
+          finds: "Find",
+          fix: "Fix",
+          fixes: "Fix",
+          write: "Write",
+          writes: "Write",
+          create: "Create",
+          creates: "Create",
+          build: "Build",
+          builds: "Build",
+          tell: "Tell",
+          tells: "Tell",
+        };
+        return imperativeMap[lower] || `${match.charAt(0).toUpperCase()}${match.slice(1)}`;
+      },
+    );
+
+    if (!/[.!?]$/.test(normalized)) {
+      normalized += ".";
+    }
+
+    return normalized;
+  }
+
+  private async maybeHandleExplicitClaudeCodeDelegation(): Promise<boolean> {
+    if (this.isAcpxExternalRuntimeTask()) return false;
+    if (this.task.parentTaskId || this.task.agentType === "sub" || this.task.agentType === "parallel") {
+      return false;
+    }
+
+    const sourceTitle = this.extractCurrentTaskText(this.task.title);
+    const sourcePrompt =
+      this.extractCurrentTaskText(this.task.rawPrompt) ||
+      this.extractCurrentTaskText(this.task.userPrompt) ||
+      this.extractCurrentTaskText(this.task.prompt) ||
+      sourceTitle;
+    if (!this.isExplicitClaudeChildTaskRequest(`${sourceTitle}\n${sourcePrompt}`)) {
+      return false;
+    }
+
+    const childTitle = this.deriveClaudeChildTaskTitle(sourceTitle, sourcePrompt);
+    const childPrompt = this.deriveClaudeChildTaskPrompt(sourcePrompt, sourceTitle);
+    const input = {
+      title: childTitle,
+      prompt: childPrompt,
+      capability_hint: "code",
+      runtime: "acpx",
+      runtime_agent: "claude",
+      wait: true,
+    } as const;
+
+    this.emitEvent("tool_call", { tool: "spawn_agent", input });
+    const result = await this.toolRegistry.executeTool("spawn_agent", input);
+    this.emitEvent("tool_result", { tool: "spawn_agent", result });
+
+    if (result?.success !== true) {
+      throw new Error(String(result?.error || result?.message || "Failed to delegate task to Claude Code"));
+    }
+
+    const summary =
+      typeof result?.result === "string" && result.result.trim()
+        ? result.result.trim()
+        : typeof result?.message === "string" && result.message.trim()
+          ? result.message.trim()
+          : "Claude Code child task completed.";
+    this.emitEvent("assistant_message", { message: summary });
+    this.lastAssistantOutput = summary;
+    this.lastNonVerificationOutput = summary;
+    this.finalizeTaskBestEffort(summary, "Explicit Claude child-task delegation completed.");
+    return true;
+  }
+
   private async expandSkillPrompt(
     skillId: string,
     parameters: Record<string, Any>,
@@ -17166,13 +17341,25 @@ You are continuing a previous conversation. The context from the previous conver
           return;
         } catch (error) {
           if (error instanceof AcpxRuntimeUnavailableError) {
+            const runtimeAgentName = this.getAcpxRuntimeAgentDisplayName();
+            if (this.getAcpxExternalRuntimeConfig()?.agent === "claude") {
+              throw new Error(
+                `${runtimeAgentName} acpx runtime unavailable. This task explicitly requires ACP, so CoWork did not fall back. Ensure \`acpx\` is installed or that \`npx acpx@latest\` can run in this environment.`,
+              );
+            }
             this.disableExternalRuntimeForFallback(
-              "acpx runtime unavailable. Falling back to CoWork native execution path.",
+              `${runtimeAgentName} acpx runtime unavailable. Falling back to CoWork native execution path.`,
             );
           } else {
             throw error;
           }
         }
+      }
+
+      // Handle local slash-commands (e.g. /schedule ...) deterministically without relying on the LLM.
+      // This prevents "plan-only" runs that never create the underlying cron job.
+      if (await this.maybeHandleExplicitClaudeCodeDelegation()) {
+        return;
       }
 
       // Handle local slash-commands (e.g. /schedule ...) deterministically without relying on the LLM.
@@ -17693,11 +17880,23 @@ You are continuing a previous conversation. The context from the previous conver
    * Create execution plan using LLM
    */
   private async createPlan(): Promise<void> {
+    const planStrongRouting =
+      !this.hasExplicitTaskRouteOverride() &&
+      !(this.task.agentConfig?.llmProfileForced === true && this.task.agentConfig?.llmProfile === "cheap");
+
     // Verified mode: use strong model for planning phase
     if (this.isVerifiedMode() && this.llmProfileUsed !== "strong") {
       this.llmProfileUsed = "strong";
       this.emitEvent("log", {
         message: `[verified-mode] Using strong model profile for planning phase`,
+        taskId: this.task.id,
+      });
+    } else if (planStrongRouting) {
+      // Execution plan creation must use the strong ("planning") profile when settings use
+      // profile routing — not the cheap/fast execution model (e.g. *-mini).
+      this.refreshProviderIfSettingsChanged("strong");
+      this.emitEvent("log", {
+        message: `[planning] Using strong model profile for execution plan creation`,
         taskId: this.task.id,
       });
     }
@@ -24518,8 +24717,14 @@ TASK / CONVERSATION HISTORY:
         return;
       } catch (error) {
         if (error instanceof AcpxRuntimeUnavailableError) {
+          const runtimeAgentName = this.getAcpxRuntimeAgentDisplayName();
+          if (this.getAcpxExternalRuntimeConfig()?.agent === "claude") {
+            throw new Error(
+              `${runtimeAgentName} acpx runtime unavailable for follow-up. This task explicitly requires ACP, so CoWork did not fall back. Ensure \`acpx\` is installed or that \`npx acpx@latest\` can run in this environment.`,
+            );
+          }
           this.disableExternalRuntimeForFallback(
-            "acpx runtime unavailable for follow-up. Falling back to CoWork native execution path.",
+            `${runtimeAgentName} acpx runtime unavailable for follow-up. Falling back to CoWork native execution path.`,
           );
         } else {
           throw error;
