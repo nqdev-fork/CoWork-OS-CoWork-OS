@@ -250,4 +250,40 @@ describe("TaskStrategyService applyToAgentConfig", () => {
 
     expect(strategy.llmProfileHint).toBe("strong");
   });
+
+  it("applies research workflow defaults when researchWorkflow.enabled", () => {
+    const route = makeRoute({ intent: "chat" });
+    const strategy = TaskStrategyService.derive(route);
+    const config = TaskStrategyService.applyToAgentConfig(
+      {
+        researchWorkflow: { enabled: true, emitSemanticProgress: true },
+      },
+      strategy,
+    );
+    expect(config.qualityPasses).toBe(3);
+    expect(config.deepWorkMode).toBe(true);
+    expect(config.autoReportEnabled).toBe(true);
+    expect(config.progressJournalEnabled).toBe(true);
+    expect(config.taskDomain).toBe("research");
+    expect(config.capabilityHint).toBe("research");
+    expect(config.researchWorkflow?.emitSemanticProgress).toBe(true);
+    expect(config.verificationAgent).toBe(true);
+  });
+
+  it("uses strong profile for debug execution mode", () => {
+    const profile = TaskStrategyService.deriveLlmProfile(
+      { executionMode: "debug", preflightRequired: false },
+      { intent: "execution" },
+    );
+    expect(profile).toBe("strong");
+  });
+
+  it("includes debug_contract when strategy execution mode is debug", () => {
+    const route = makeRoute({ intent: "execution" });
+    const strategy = TaskStrategyService.derive(route, { executionMode: "debug" });
+    expect(strategy.executionMode).toBe("debug");
+    const decorated = TaskStrategyService.decoratePrompt("Find the race", route, strategy, "");
+    expect(decorated).toContain("debug_contract:");
+    expect(decorated).toContain("cowork-debug");
+  });
 });
