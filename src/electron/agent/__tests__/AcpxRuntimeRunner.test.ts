@@ -9,6 +9,7 @@ import {
   getAcpxPermissionArgs,
   getAcpxSessionName,
   mapAcpxSessionUpdate,
+  resetAcpxLauncherPreferenceForTests,
 } from "../AcpxRuntimeRunner";
 
 const childProcessMocks = vi.hoisted(() => ({
@@ -32,6 +33,12 @@ function createFakeProcess() {
       proc.killed = true;
       return true;
     }),
+    on: vi.fn((event: string, cb: (...args: Any[]) => void) => {
+      const existing = listeners.get(event) || [];
+      existing.push(cb);
+      listeners.set(event, existing);
+      return proc;
+    }),
     once: vi.fn((event: string, cb: (...args: Any[]) => void) => {
       const existing = listeners.get(event) || [];
       existing.push(cb);
@@ -50,6 +57,7 @@ function createFakeProcess() {
 describe("AcpxRuntimeRunner helpers", () => {
   beforeEach(() => {
     childProcessMocks.spawn.mockReset();
+    resetAcpxLauncherPreferenceForTests();
   });
 
   it("builds deterministic session names", () => {
@@ -521,6 +529,55 @@ describe("AcpxRuntimeRunner", () => {
         "--name",
         "cowork-task-1",
       ],
+      expect.any(Object),
+    );
+  });
+
+  it("falls back to npx acpx@latest for cancel when acpx is missing", async () => {
+    const missingCreateProc = createFakeProcess();
+    const fallbackCreateProc = createFakeProcess();
+    const missingCancelProc = createFakeProcess();
+    const fallbackCancelProc = createFakeProcess();
+    childProcessMocks.spawn
+      .mockReturnValueOnce(missingCreateProc)
+      .mockReturnValueOnce(fallbackCreateProc)
+      .mockReturnValueOnce(missingCancelProc)
+      .mockReturnValueOnce(fallbackCancelProc);
+
+    const runner = new AcpxRuntimeRunner({
+      taskId: "task-1",
+      cwd: "/repo",
+      runtimeConfig: {
+        kind: "acpx",
+        agent: "claude",
+        sessionMode: "persistent",
+        outputMode: "json",
+        permissionMode: "approve-reads",
+      },
+      emitEvent: () => undefined,
+    });
+
+    const createPromise = runner.createSession();
+    missingCreateProc.emit("error", Object.assign(new Error("spawn acpx ENOENT"), { code: "ENOENT" }));
+    fallbackCreateProc.emit("close", 0);
+    await createPromise;
+
+    const cancelPromise = runner.cancel();
+    missingCancelProc.emit("error", Object.assign(new Error("spawn acpx ENOENT"), { code: "ENOENT" }));
+    missingCancelProc.emit("close", -2);
+    fallbackCancelProc.emit("close", 0);
+    await cancelPromise;
+
+    expect(childProcessMocks.spawn).toHaveBeenNthCalledWith(
+      3,
+      "acpx",
+      ["claude", "cancel", "--session", "cowork-task-1"],
+      expect.any(Object),
+    );
+    expect(childProcessMocks.spawn).toHaveBeenNthCalledWith(
+      4,
+      "npx",
+      ["-y", "acpx@latest", "claude", "cancel", "--session", "cowork-task-1"],
       expect.any(Object),
     );
   });
