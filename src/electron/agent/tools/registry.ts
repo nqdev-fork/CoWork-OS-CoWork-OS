@@ -183,7 +183,7 @@ const READ_MOSTLY_CODEX_PROMPT_PATTERN =
   /\b(review|analy[sz]e|analysis|plan|audit|inspect|investigate|research|summari[sz]e|critique)\b/i;
 
 export type SpawnAgentRuntimeMode = "native" | "acpx";
-export type SpawnAgentRuntimeAgent = "codex";
+export type SpawnAgentRuntimeAgent = "codex" | "claude";
 
 export function isExplicitCodexSpawnRequest(input: {
   runtime_agent?: string;
@@ -233,21 +233,25 @@ export function resolveSpawnAgentExternalRuntime(input: {
   }
 
   const codexRequested = isExplicitCodexSpawnRequest(input);
+  const explicitRuntimeAgent =
+    typeof input.runtime_agent === "string" ? input.runtime_agent : undefined;
   const shouldUseAcpx =
-    explicitRuntime === "acpx" ||
+    (explicitRuntime === "acpx" && Boolean(explicitRuntimeAgent)) ||
     (input.defaultCodexRuntimeMode === "acpx" && codexRequested);
 
   if (!shouldUseAcpx) {
     return undefined;
   }
 
-  if (input.runtime_agent && input.runtime_agent !== "codex") {
+  if (explicitRuntime === "acpx" && !explicitRuntimeAgent) {
     return undefined;
   }
 
+  const runtimeAgent = explicitRuntimeAgent ?? "codex";
+
   return {
     kind: "acpx",
-    agent: "codex",
+    agent: runtimeAgent,
     sessionMode: "persistent",
     outputMode: "json",
     permissionMode: resolveExternalRuntimePermissionMode(input),
@@ -9430,9 +9434,9 @@ ${skillDescriptions}`;
             },
             runtime_agent: {
               type: "string",
-              enum: ["codex"],
+              enum: ["codex", "claude"],
               description:
-                'When runtime is "acpx", selects the target adapter. v1 supports only "codex".',
+                'When runtime is "acpx", selects the target adapter, such as "codex" or "claude".',
             },
             wait: {
               type: "boolean",

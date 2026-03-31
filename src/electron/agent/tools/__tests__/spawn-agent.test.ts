@@ -337,6 +337,23 @@ describe("spawn_agent AgentConfig building", () => {
     });
   });
 
+  it("builds a Claude acpx external runtime from an explicit runtime override", () => {
+    expect(
+      resolveSpawnAgentExternalRuntime({
+        runtime: "acpx",
+        runtime_agent: "claude",
+        prompt: "Review the patch",
+        defaultCodexRuntimeMode: "native",
+      }),
+    ).toEqual({
+      kind: "acpx",
+      agent: "claude",
+      sessionMode: "persistent",
+      outputMode: "json",
+      permissionMode: "approve-reads",
+    });
+  });
+
   it("builds acpx external runtime from the default Codex runtime setting for explicit Codex flows", () => {
     expect(
       resolveSpawnAgentExternalRuntime({

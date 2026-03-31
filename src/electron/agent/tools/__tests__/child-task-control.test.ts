@@ -756,6 +756,53 @@ describe("ToolRegistry child task control tools", () => {
     });
   });
 
+  it("spawn_agent persists explicit Claude acpx runtime requests into agentConfig", async () => {
+    const daemon = {
+      getTaskById: vi.fn().mockResolvedValue({
+        id: "parent-task",
+        title: "Parent",
+        prompt: "x",
+        status: "executing",
+        workspaceId: workspace.id,
+        createdAt: 1,
+        updatedAt: 1,
+        depth: 0,
+      }),
+      getChildTasks: vi.fn().mockResolvedValue([]),
+      createChildTask: vi.fn().mockResolvedValue({
+        id: "child-acpx",
+        title: "Claude child",
+        prompt: "x",
+        status: "pending",
+        workspaceId: workspace.id,
+        createdAt: 1,
+        updatedAt: 1,
+        parentTaskId: "parent-task",
+        agentType: "sub",
+        depth: 1,
+      }),
+      logEvent: vi.fn(),
+    } as Any;
+
+    const registry = new ToolRegistry(workspace, daemon, "parent-task");
+    const result = await registry.executeTool("spawn_agent", {
+      title: "Claude review",
+      prompt: "Review the patch",
+      runtime: "acpx",
+      runtime_agent: "claude",
+    });
+
+    expect(result.success).toBe(true);
+    const call = daemon.createChildTask.mock.calls[0][0];
+    expect(call.agentConfig.externalRuntime).toEqual({
+      kind: "acpx",
+      agent: "claude",
+      sessionMode: "persistent",
+      outputMode: "json",
+      permissionMode: "approve-reads",
+    });
+  });
+
   it("spawn_agent uses the Codex runtime default only for explicit Codex flows", async () => {
     const runtimeSpy = vi
       .spyOn(BuiltinToolsSettingsManager, "getCodexRuntimeMode")
