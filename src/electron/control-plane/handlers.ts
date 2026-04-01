@@ -2037,6 +2037,63 @@ function registerACPMethodsOnServer(
       await deps.agentDaemon.startTask(task);
       return { taskId: task.id };
     },
+    createDelegatedGraphTask: async (params) => {
+      let workspaceId = params.workspaceId;
+      if (!workspaceId) {
+        const workspaceRepo = new WorkspaceRepository(db);
+        const workspaces = workspaceRepo.findAll().filter((w: any) => !w.isTemp);
+        if (workspaces.length > 0) {
+          workspaceId = workspaces[0].id;
+        } else {
+          throw new Error("No workspace available for ACP task delegation");
+        }
+      }
+      const snapshot = await deps.agentDaemon.createOrchestrationGraphRun({
+        rootTaskId: `acp:${params.acpTaskId}`,
+        workspaceId,
+        kind: "acp",
+        maxParallel: 1,
+        metadata: { acpTaskId: params.acpTaskId, assigneeId: params.assigneeId },
+        nodes: [
+          {
+            key: params.acpTaskId,
+            title: params.title,
+            prompt: params.prompt,
+            kind: "acp_task",
+            dispatchTarget: params.remote ? "remote_acp" : "local_role",
+            assignedAgentRoleId: params.assignedAgentRoleId,
+            acpAgentId: params.remote ? params.assigneeId : undefined,
+            acpTaskId: params.acpTaskId,
+            metadata: { source: "acp" },
+          },
+        ],
+      });
+      const node = snapshot.nodes[0];
+      return {
+        status: node.status,
+        coworkTaskId: node.taskId,
+        remoteTaskId: node.remoteTaskId,
+        result: node.output || node.summary,
+        error: node.error,
+      };
+    },
+    getDelegatedGraphStatus: (acpTaskId) => {
+      const node = deps.agentDaemon.getOrchestrationGraphRepository().findNodeByAcpTaskId(acpTaskId);
+      if (!node) return undefined;
+      return {
+        status: node.status,
+        coworkTaskId: node.taskId,
+        remoteTaskId: node.remoteTaskId,
+        result: node.output || node.summary,
+        error: node.error,
+      };
+    },
+    cancelDelegatedGraphTask: async (acpTaskId) => {
+      const node = deps.agentDaemon.getOrchestrationGraphRepository().findNodeByAcpTaskId(acpTaskId);
+      if (!node?.publicHandle) return;
+      const rootTaskId = node.parentTaskId || `acp:${acpTaskId}`;
+      await deps.agentDaemon.cancelDelegatedNode(rootTaskId, node.publicHandle);
+    },
     getTask: (taskId) => {
       const task = taskRepo.findById(taskId);
       if (!task) return undefined;
