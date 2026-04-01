@@ -7,6 +7,11 @@ function isLikelyTaskCompletionPayload(payload: Record<string, unknown> | null):
 
   if (typeof payload.terminalStatus === "string") return true;
   if (typeof payload.resultSummary === "string" && payload.resultSummary.trim().length > 0) return true;
+  if (typeof payload.semanticSummary === "string" && payload.semanticSummary.trim().length > 0) return true;
+  if (typeof payload.verificationVerdict === "string" && payload.verificationVerdict.trim().length > 0)
+    return true;
+  if (typeof payload.verificationReport === "string" && payload.verificationReport.trim().length > 0)
+    return true;
   if (payload.outputSummary && typeof payload.outputSummary === "object") return true;
   if (Array.isArray(payload.pendingChecklist) && payload.pendingChecklist.length > 0) return true;
 
