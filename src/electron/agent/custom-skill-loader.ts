@@ -604,7 +604,41 @@ export class CustomSkillLoader {
     );
   }
 
+  private requiresExplicitSkillInvocation(skill: CustomSkill): boolean {
+    return skill.id === "codex-cli";
+  }
+
+  private matchesExplicitSkillInvocation(skill: CustomSkill, query: string): boolean {
+    const normalizedQuery = this.normalizeRoutingPhrase(query);
+    if (!normalizedQuery) return false;
+
+    const activationCue =
+      /\b(?:use|run|call|invoke|activate|apply|launch|start|enable|turn on|work on|help with|help me with)\b/;
+    const skillCue = /\bskill\b/;
+    if (!activationCue.test(normalizedQuery) && !skillCue.test(normalizedQuery)) {
+      return false;
+    }
+
+    const skillId = String(skill.id || "").trim();
+    const skillName = String(skill.name || "").trim();
+
+    return (
+      (skillId.length > 0 && this.queryContainsRoutingPhrase(normalizedQuery, skillId)) ||
+      (skillName.length > 0 && this.queryContainsRoutingPhrase(normalizedQuery, skillName))
+    );
+  }
+
   matchesSkillRoutingQuery(skill: CustomSkill, query: string): boolean {
+    if (this.requiresExplicitSkillInvocation(skill)) {
+      const matched = this.matchesExplicitSkillInvocation(skill, query);
+      if (!matched) {
+        logger.debug(
+          `Explicit invocation gate BLOCKED skill "${skill.id}" for query "${query.slice(0, 80)}"`,
+        );
+      }
+      return matched;
+    }
+
     const keywords = skill.metadata?.routing?.keywords;
     if (!Array.isArray(keywords) || keywords.length === 0) return true;
 
