@@ -135,7 +135,7 @@ describe("AnthropicCompatibleProvider tool sequencing", () => {
     vi.unstubAllGlobals();
   });
 
-  it("rewrites orphan tool_result blocks into text", async () => {
+  it("omits orphan tool_result blocks before provider conversion", async () => {
     const provider = new AnthropicCompatibleProvider({
       type: "minimax-portal",
       providerName: "MiniMax Portal",
@@ -167,20 +167,14 @@ describe("AnthropicCompatibleProvider tool sequencing", () => {
 
     await provider.createMessage(request);
 
-    expect(capturedBody.messages[2].content).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          type: "text",
-          text: "[Recovered prior tool output omitted to preserve valid tool-call sequencing.]",
-        }),
-      ]),
-    );
-    expect(
-      capturedBody.messages[2].content.some((block: Any) => block.type === "tool_result"),
-    ).toBe(false);
+    expect(capturedBody.messages).toHaveLength(2);
+    expect(capturedBody.messages[1]).toEqual({
+      role: "assistant",
+      content: [{ type: "text", text: "done" }],
+    });
   });
 
-  it("rewrites assistant tool_use blocks when the next user turn does not immediately return a matching tool_result", async () => {
+  it("omits assistant tool_use blocks when the next user turn does not immediately return a matching tool_result", async () => {
     const provider = new AnthropicCompatibleProvider({
       type: "minimax-portal",
       providerName: "MiniMax Portal",
@@ -212,16 +206,9 @@ describe("AnthropicCompatibleProvider tool sequencing", () => {
 
     await provider.createMessage(request);
 
-    expect(capturedBody.messages[1].content).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          type: "text",
-          text: "[Recovered prior tool request omitted to preserve valid tool-call sequencing.]",
-        }),
-      ]),
-    );
-    expect(
-      capturedBody.messages[1].content.some((block: Any) => block.type === "tool_use"),
-    ).toBe(false);
+    expect(capturedBody.messages).toEqual([
+      { role: "user", content: "start" },
+      { role: "user", content: "no tool results here" },
+    ]);
   });
 });
