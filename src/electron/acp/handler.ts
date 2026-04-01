@@ -50,6 +50,29 @@ export interface ACPHandlerDeps {
     workspaceId: string;
     assignedAgentRoleId?: string;
   }) => Promise<{ taskId: string }>;
+  createDelegatedGraphTask?: (params: {
+    acpTaskId: string;
+    assigneeId: string;
+    title: string;
+    prompt: string;
+    workspaceId: string;
+    assignedAgentRoleId?: string;
+    remote: boolean;
+  }) => Promise<{
+    status: string;
+    coworkTaskId?: string;
+    remoteTaskId?: string;
+    result?: string;
+    error?: string;
+  }>;
+  getDelegatedGraphStatus?: (acpTaskId: string) => {
+    status: string;
+    coworkTaskId?: string;
+    remoteTaskId?: string;
+    result?: string;
+    error?: string;
+  } | undefined;
+  cancelDelegatedGraphTask?: (acpTaskId: string) => Promise<void>;
   /** Function to get a task by ID */
   getTask?: (taskId: string) => { id: string; status: string; error?: string } | undefined;
   /** Function to cancel a task by ID */
@@ -192,6 +215,22 @@ async function syncTaskStatus(
   deps: ACPHandlerDeps,
   reg: ACPAgentRegistry,
 ): Promise<ACPTask> {
+  if (deps.getDelegatedGraphStatus) {
+    const graphStatus = deps.getDelegatedGraphStatus(task.id);
+    if (graphStatus) {
+      task.status = graphStatus.status as ACPTask["status"];
+      task.result = graphStatus.result;
+      task.error = graphStatus.error;
+      task.coworkTaskId = graphStatus.coworkTaskId;
+      task.remoteTaskId = graphStatus.remoteTaskId;
+      task.updatedAt = Date.now();
+      if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
+        task.completedAt = Date.now();
+      }
+      persistTask(deps.db, task);
+      return task;
+    }
+  }
   if (task.coworkTaskId && deps.getTask) {
     const coworkTask = deps.getTask(task.coworkTaskId);
     if (coworkTask) {
@@ -436,8 +475,31 @@ export function registerACPMethods(server: ControlPlaneServer, deps: ACPHandlerD
       acpTask.error = "Local ACP task delegation is not configured on this server";
     }
 
-    // If assignee is a local agent, delegate to the CoWork task system
-    if (assignee.origin === "local" && assignee.localRoleId && deps.createTask) {
+    if (deps.createDelegatedGraphTask) {
+      try {
+        const result = await deps.createDelegatedGraphTask({
+          acpTaskId: acpTask.id,
+          assigneeId,
+          title,
+          prompt,
+          workspaceId: p.workspaceId || "",
+          assignedAgentRoleId: assignee.origin === "local" ? assignee.localRoleId : undefined,
+          remote: assignee.origin === "remote",
+        });
+        acpTask.coworkTaskId = result.coworkTaskId;
+        acpTask.remoteTaskId = result.remoteTaskId;
+        acpTask.status = result.status as ACPTask["status"];
+        acpTask.result = result.result;
+        acpTask.error = result.error;
+        if (acpTask.status === "completed" || acpTask.status === "failed" || acpTask.status === "cancelled") {
+          acpTask.completedAt = Date.now();
+        }
+      } catch (err: Any) {
+        acpTask.status = "failed";
+        acpTask.error = err?.message || "Failed to create delegated graph task";
+      }
+    } else if (assignee.origin === "local" && assignee.localRoleId && deps.createTask) {
+      // If assignee is a local agent, delegate to the CoWork task system
       try {
         const result = await deps.createTask({
           title,
@@ -547,8 +609,10 @@ export function registerACPMethods(server: ControlPlaneServer, deps: ACPHandlerD
       throw { code: ErrorCodes.INVALID_PARAMS, message: `Task is already ${acpTask.status}` };
     }
 
-    // Cancel the underlying CoWork task if it exists
-    if (acpTask.coworkTaskId && deps.cancelTask) {
+    if (deps.cancelDelegatedGraphTask) {
+      await deps.cancelDelegatedGraphTask(acpTask.id);
+    } else if (acpTask.coworkTaskId && deps.cancelTask) {
+      // Cancel the underlying CoWork task if it exists
       await deps.cancelTask(acpTask.coworkTaskId);
     } else if (acpTask.remoteTaskId) {
       const roles = deps.getActiveRoles();
