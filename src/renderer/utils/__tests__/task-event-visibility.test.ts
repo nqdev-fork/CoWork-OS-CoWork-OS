@@ -91,6 +91,15 @@ describe("task event visibility helpers", () => {
     ).toBe(true);
   });
 
+  it("keeps follow_up_completed visible in summary mode for completed tasks", () => {
+    expect(
+      shouldShowTaskEventInSummaryMode(
+        makeEvent("follow_up_completed", { message: "Follow-up message processed" }),
+        "completed",
+      ),
+    ).toBe(true);
+  });
+
   it("hides generic stage progress in summary mode for non-completed tasks", () => {
     expect(
       shouldShowTaskEventInSummaryMode(
@@ -163,7 +172,7 @@ describe("task event visibility helpers", () => {
     ).toBe(false);
   });
 
-  it("hides all timeline_step_updated events in verbose mode regardless of legacyType", () => {
+  it("keeps non-internal assistant timeline_step_updated events in verbose mode", () => {
     const t0 = 1_000_000;
     const filtered = filterVerboseTimelineNoise([
       makeEvent("timeline_step_updated", { message: "Progress update" }, { id: "a", timestamp: t0 }),
@@ -176,8 +185,18 @@ describe("task event visibility helpers", () => {
       makeEvent("timeline_step_updated", { legacyType: "plan_created" }, { id: "h", timestamp: t0 + 6000 }),
       makeEvent("timeline_step_updated", { legacyType: "task_analysis" }, { id: "i", timestamp: t0 + 7000 }),
       makeEvent("timeline_step_updated", { legacyType: "progress_update", message: "Starting execution" }, { id: "j", timestamp: t0 + 8000 }),
+      makeEvent(
+        "timeline_step_updated",
+        { legacyType: "assistant_message", message: "Here is the actual response." },
+        { id: "assistant-visible", timestamp: t0 + 9000 },
+      ),
+      makeEvent(
+        "timeline_step_updated",
+        { legacyType: "assistant_message", message: "OK", internal: true },
+        { id: "assistant-internal", timestamp: t0 + 10000 },
+      ),
     ]);
-    expect(filtered).toEqual([]);
+    expect(filtered.map((e) => e.id)).toEqual(["assistant-visible"]);
   });
 
   it("hides timeline_step_finished events but keeps task cancellation", () => {
