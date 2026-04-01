@@ -135,6 +135,54 @@ const isVerificationNoiseEvent = (event: TaskEvent): boolean => {
   return false;
 };
 
+const getAssistantStepDescription = (event: TaskEvent): string => {
+  if (typeof event.payload?.stepDescription === "string") return event.payload.stepDescription;
+  const step = event.payload?.step;
+  if (step && typeof step === "object" && typeof (step as Record<string, unknown>).description === "string") {
+    return (step as Record<string, string>).description;
+  }
+  return "";
+};
+
+const shouldRevealInternalAssistantMessageInVerbose = (event: TaskEvent): boolean => {
+  if (getEffectiveTaskEventType(event) !== "assistant_message" || event.payload?.internal !== true) {
+    return false;
+  }
+  const message = typeof event.payload?.message === "string" ? event.payload.message.trim() : "";
+  const stepDescription = getAssistantStepDescription(event);
+  if (!message) return false;
+  if (isVerificationStepDescription(stepDescription)) return false;
+  if (/^ok[\s.!?]*$/i.test(message) || message.length <= 12) return false;
+  return true;
+};
+
+const getCompletionSummaryText = (event: TaskEvent): string => {
+  if (getEffectiveTaskEventType(event) !== "task_completed") return "";
+  const resultSummary =
+    typeof event.payload?.resultSummary === "string" ? event.payload.resultSummary.trim() : "";
+  const semanticSummary =
+    typeof event.payload?.semanticSummary === "string" ? event.payload.semanticSummary.trim() : "";
+  const verificationVerdict =
+    typeof event.payload?.verificationVerdict === "string"
+      ? event.payload.verificationVerdict.trim()
+      : "";
+  const verificationReport =
+    typeof event.payload?.verificationReport === "string"
+      ? event.payload.verificationReport.trim()
+      : "";
+  const summary = [resultSummary, semanticSummary].filter((value) => value.length > 0).join("\n\n");
+  if (!verificationVerdict && !verificationReport) {
+    return summary;
+  }
+  const verification = [
+    verificationVerdict ? `Verification: ${verificationVerdict}` : "",
+    verificationReport || "",
+  ]
+    .filter((value) => value.length > 0)
+    .join("\n");
+  return [summary, verification].filter((value) => value.length > 0).join("\n\n");
+};
+
 const buildTaskTitle = (text: string): string => {
   const trimmed = text.trim();
   if (trimmed.length <= TASK_TITLE_MAX_LENGTH) {
@@ -3041,10 +3089,12 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                             event,
                             events,
                           );
+                          const completionSummaryText = getCompletionSummaryText(event);
                           const isMinimalCompletion =
                             !verboseSteps &&
                             effectiveType === "task_completed" &&
-                            !hasTaskOutputs(outputSummary);
+                            !hasTaskOutputs(outputSummary) &&
+                            completionSummaryText.length === 0;
                           if (isMinimalCompletion) {
                             return (
                               <Fragment key={event.id || `event-${eventIndex}`}>
@@ -3144,11 +3194,13 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                 const effectiveType = getEffectiveTaskEventType(event);
                 const isUserMessage = effectiveType === "user_message";
                 const isAssistantMessage = effectiveType === "assistant_message";
+                const completionSummaryText = getCompletionSummaryText(event);
+                const isCompletionSummaryMessage = completionSummaryText.length > 0;
                 const commandOutputsAfterEvent = commandOutputSessionsByInsertIndex.get(
                   item.eventIndex,
                 );
 
-                if (isChatTask && !isUserMessage && !isAssistantMessage) {
+                if (isChatTask && !isUserMessage && !isAssistantMessage && !isCompletionSummaryMessage) {
                   if (effectiveType === "llm_streaming" && isTaskWorking) {
                     const streamingText =
                       typeof event.payload?.text === "string"
@@ -3236,8 +3288,8 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                 }
 
                 // Render assistant messages as chat bubbles on the left
-                if (isAssistantMessage) {
-                  const messageText = event.payload?.message || "";
+                if (isAssistantMessage || isCompletionSummaryMessage) {
+                  const messageText = isCompletionSummaryMessage ? completionSummaryText : event.payload?.message || "";
                   const cleanedMessageText = cleanAssistantMessageForDisplay(messageText);
                   const isLastAssistant = event === lastAssistantMessage;
                   return (
@@ -4181,7 +4233,12 @@ export function MainContent({
       return true;
     });
     // Always keep explicit verification steps silent; surface failures elsewhere.
-    return dedupedEvents.filter((event) => !isVerificationNoiseEvent(event));
+    return dedupedEvents.filter((event) => {
+      if (verboseSteps && shouldRevealInternalAssistantMessageInVerbose(event)) {
+        return true;
+      }
+      return !isVerificationNoiseEvent(event);
+    });
   }, [events, verboseSteps, task?.status]);
 
   // Build projection from raw events so tool_call/tool_result data embedded
@@ -4587,6 +4644,16 @@ export function MainContent({
     let currentBlock: (typeof filteredEvents)[number][] = [];
     let currentBlockIndices: number[] = [];
     let blockCounter = 0;
+    const lastCompletionSummaryByTask = new Map<string, { summary: string; timestamp: number }>();
+
+    for (const event of filteredEvents) {
+      const summary = getCompletionSummaryText(event);
+      if (!summary) continue;
+      lastCompletionSummaryByTask.set(event.taskId, {
+        summary,
+        timestamp: event.timestamp,
+      });
+    }
 
     const flushBlock = () => {
       if (currentBlock.length > 0) {
@@ -4612,6 +4679,8 @@ export function MainContent({
       return (
         t === "user_message" ||
         t === "assistant_message" ||
+        t === "follow_up_completed" ||
+        (t === "task_completed" && getCompletionSummaryText(ev).length > 0) ||
         t === "artifact_created" ||
         t === "diagram_created" ||
         ev.type === "timeline_artifact_emitted"
@@ -4622,6 +4691,18 @@ export function MainContent({
       const event = filteredEvents[i];
 
       if (isBoundaryEvent(event)) {
+        if (getEffectiveTaskEventType(event) === "assistant_message") {
+          const message = typeof event.payload?.message === "string" ? event.payload.message.trim() : "";
+          const completion = lastCompletionSummaryByTask.get(event.taskId);
+          if (
+            message &&
+            completion &&
+            completion.summary === message &&
+            event.timestamp <= completion.timestamp
+          ) {
+            continue;
+          }
+        }
         flushBlock();
         eventItems.push({
           kind: "event",
@@ -5559,6 +5640,7 @@ export function MainContent({
     if (isVideoFileEvent(event)) return true;
     if (isSpreadsheetFileEvent(event)) return true;
     if (workspace?.path && getStepCompletionPreviewPath(event)) return true;
+    if (effectiveType === "follow_up_completed") return true;
     if (effectiveType === "task_completed") {
       return hasTaskOutputs(resolveTaskOutputSummaryFromCompletionEvent(event, events));
     }
@@ -5615,6 +5697,7 @@ export function MainContent({
     if (isVideoFileEvent(event)) return true;
     if (isSpreadsheetFileEvent(event)) return true;
     if (workspace?.path && getStepCompletionPreviewPath(event)) return true;
+    if (effectiveType === "follow_up_completed") return true;
     if (effectiveType === "task_completed") return hasEventDetails(event);
     if (shouldHideApprovalEventInStepFeed(event)) return false;
     if (
@@ -6590,12 +6673,13 @@ export function MainContent({
 
   // Get the last assistant message to always show the response
   const lastAssistantMessage = useMemo(() => {
-    const assistantMessages = events.filter(
-      (event) =>
-        getEffectiveTaskEventType(event) === "assistant_message" && event.payload?.internal !== true,
-    );
+    const assistantMessages = filteredEvents.filter((event) => {
+      const effectiveType = getEffectiveTaskEventType(event);
+      if (effectiveType === "assistant_message") return true;
+      return getCompletionSummaryText(event).length > 0;
+    });
     return assistantMessages.length > 0 ? assistantMessages[assistantMessages.length - 1] : null;
-  }, [events]);
+  }, [filteredEvents]);
 
   const {
     cleanedDisplayPrompt,
@@ -9350,7 +9434,14 @@ function renderEventTitle(
         ? "Completed - action required"
         : event.payload?.terminalStatus === "partial_success"
           ? "Completed - partial success"
-        : getMessage("taskComplete", msgCtx);
+          : getMessage("taskComplete", msgCtx);
+    case "follow_up_completed": {
+      const followUpMessage =
+        typeof event.payload?.followUpMessage === "string"
+          ? event.payload.followUpMessage.trim()
+          : "";
+      return followUpMessage ? `Follow-up: ${followUpMessage}` : "Follow-up received";
+    }
     case "plan_created":
       return getMessage("planCreated", msgCtx);
     case "step_started":
@@ -9811,6 +9902,24 @@ function renderEventDetails(
         </div>
       );
     }
+    case "follow_up_completed": {
+      const followUpMessage =
+        typeof event.payload?.followUpMessage === "string"
+          ? event.payload.followUpMessage.trim()
+          : "";
+      return (
+        <div className="event-details follow-up-completed-details">
+          <div className="follow-up-completed-title">Follow-up received</div>
+          {followUpMessage && (
+            <div className="markdown-content">
+              <ReactMarkdown remarkPlugins={userMarkdownPlugins} components={markdownComponents}>
+                {normalizeMarkdownForDisplay(followUpMessage)}
+              </ReactMarkdown>
+            </div>
+          )}
+        </div>
+      );
+    }
     case "plan_created": {
       const inlinePlanMarkdownComponents = {
         ...markdownComponents,
@@ -10068,6 +10177,7 @@ function renderEventDetails(
     case "file_created": {
       const fcPayload = event.payload;
       const fcPath = fcPayload?.path;
+      const fcIsScreenshot = fcPayload?.type === "screenshot";
       const fcIsImage =
         fcPayload?.type === "image" ||
         (typeof fcPayload?.mimeType === "string" &&
@@ -10080,6 +10190,18 @@ function renderEventDetails(
         videoExt.test(String(fcPath || ""));
 
       if (fcIsImage && fcPath && workspacePath) {
+        if (summaryMode && fcIsScreenshot) {
+          return (
+            <div className="event-details">
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>Screenshot output</div>
+              <ClickableFilePath
+                path={fcPath}
+                workspacePath={workspacePath}
+                onOpenViewer={onOpenViewer}
+              />
+            </div>
+          );
+        }
         return (
           <div className="event-details event-details-file-preview">
             <InlineImagePreview
@@ -10199,6 +10321,7 @@ function renderEventDetails(
     case "file_modified": {
       const fmPayload = event.payload;
       const fmPath = fmPayload?.path || fmPayload?.from;
+      const fmIsScreenshot = fmPayload?.type === "screenshot";
       const fmIsImage =
         fmPayload?.type === "image" ||
         (typeof fmPayload?.mimeType === "string" &&
@@ -10211,6 +10334,18 @@ function renderEventDetails(
         videoExt.test(String(fmPath || ""));
 
       if (fmIsImage && fmPath && workspacePath) {
+        if (summaryMode && fmIsScreenshot) {
+          return (
+            <div className="event-details">
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>Screenshot output</div>
+              <ClickableFilePath
+                path={fmPath}
+                workspacePath={workspacePath}
+                onOpenViewer={onOpenViewer}
+              />
+            </div>
+          );
+        }
         return (
           <div className="event-details event-details-file-preview">
             <InlineImagePreview
