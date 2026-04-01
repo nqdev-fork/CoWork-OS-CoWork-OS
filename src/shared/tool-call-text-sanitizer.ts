@@ -7,6 +7,7 @@ export interface ToolCallTextSanitizationResult {
 const XML_TOOL_PATTERNS: RegExp[] = [
   /<tool_call\b[\s\S]*?<\/tool_call>/gi,
   /<tool_result\b[\s\S]*?<\/tool_result>/gi,
+  /<tool\b[^>]*>[\s\S]*?<\/tool>/gi,
   /<function_call\b[\s\S]*?<\/function_call>/gi,
   /<tool_name>\s*[^<]+<\/tool_name>\s*<parameters>\s*[\s\S]*?<\/parameters>/gi,
   /<tool_name>\s*[^<]+<\/tool_name>/gi,
@@ -24,7 +25,10 @@ const TOOL_TEXT_MARKERS = [
   "</tool_call>",
   "<tool_result>",
   "</tool_result>",
+  "<tool ",
+  "</tool>",
   "\"tool_name\"",
+  "\"tool\"",
   "\"tool_call\"",
   "[TOOL_CALL]",
   "[/TOOL_CALL]",
@@ -46,6 +50,14 @@ const PLAIN_TOOL_TRANSCRIPT_MARKERS = [
   "\"file_path\":",
   "\"command\":",
   "\"query\":",
+  "\"tool\":",
+  "\"input\":",
+  "\"arguments\":",
+];
+
+const INLINE_TOOL_JSON_PATTERNS: RegExp[] = [
+  /\{\s*"id"\s*:\s*"call_[^"]+"\s*,\s*"tool"\s*:\s*"[^"]+"\s*,\s*"input"\s*:\s*\{[\s\S]*?\}\s*\}/gi,
+  /\{\s*"tool_name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*"(?:\\.|[^"])*"\s*\}/gi,
 ];
 
 function looksLikePlainToolTranscript(input: string): boolean {
@@ -181,6 +193,15 @@ export function sanitizeToolCallTextFromAssistant(raw: string): ToolCallTextSani
     });
   }
 
+  for (const pattern of INLINE_TOOL_JSON_PATTERNS) {
+    text = text.replace(pattern, (match) => {
+      if (match.trim().length > 0) {
+        removedSegments += 1;
+      }
+      return "";
+    });
+  }
+
   const strippedTranscript = stripLeadingPlainToolTranscriptLines(text);
   text = strippedTranscript.text;
   removedSegments += strippedTranscript.removed;
@@ -202,8 +223,10 @@ export function sanitizeToolCallTextFromAssistant(raw: string): ToolCallTextSani
   }
 
   text = text
+    .replace(/[ \t]{2,}/g, " ")
     .replace(/\n{3,}/g, "\n\n")
     .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+(?=[{\[])/g, "\n")
     .trim();
 
   return {
