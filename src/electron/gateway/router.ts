@@ -2145,6 +2145,11 @@ export class MessageRouter {
         await this.handleNewTaskCommand(adapter, message, sessionId);
         break;
 
+      case "/fork":
+      case "/forksession":
+        await this.handleForkSessionCommand(adapter, message, sessionId, args);
+        break;
+
       case "/task":
         await this.handleTaskCommand(adapter, message, sessionId);
         break;
@@ -7343,6 +7348,40 @@ ${status.queuedCount > 0 ? `Queued task IDs: ${status.queuedTaskIds.join(", ")}`
     await adapter.sendMessage({
       chatId: message.chatId,
       text: this.getUiCopy("newTaskReady"),
+    });
+  }
+
+  private async handleForkSessionCommand(
+    adapter: ChannelAdapter,
+    message: IncomingMessage,
+    sessionId: string,
+    args: string[],
+  ): Promise<void> {
+    if (!this.agentDaemon) {
+      await adapter.sendMessage({
+        chatId: message.chatId,
+        text: "Task runtime unavailable right now. Try again in the desktop app.",
+      });
+      return;
+    }
+
+    const session = this.sessionRepo.findById(sessionId);
+    if (!session?.taskId) {
+      await adapter.sendMessage({
+        chatId: message.chatId,
+        text: this.getUiCopy("cancelNoActive"),
+      });
+      return;
+    }
+
+    const forkedTask = await this.agentDaemon.forkTaskSession({
+      taskId: session.taskId,
+      branchLabel: args.join(" ").trim() || undefined,
+    });
+    this.sessionManager.linkSessionToTask(sessionId, forkedTask.id);
+    await adapter.sendMessage({
+      chatId: message.chatId,
+      text: `Forked a new session from the current task: ${forkedTask.title}`,
     });
   }
 
