@@ -79,6 +79,7 @@
     "@whiskeysockets/baileys"
   ],
   "scripts": {
+    "postinstall": "node scripts/codesign_electron_dev.mjs",
     "setup": "node scripts/setup.mjs",
     "hooks:install": "node scripts/install_git_hooks.mjs",
     "setup:native": "node scripts/setup_native_driver.mjs",
@@ -95,7 +96,8 @@
     "build:daemon": "tsc -p tsconfig.daemon.json",
     "build:connectors": "concurrently -n salesforce,jira,hubspot,zendesk,servicenow,linear,asana,okta,resend,discord,google-workspace,figma,vercel,monday \"tsc -p connectors/salesforce-mcp/tsconfig.json\" \"tsc -p connectors/jira-mcp/tsconfig.json\" \"tsc -p connectors/hubspot-mcp/tsconfig.json\" \"tsc -p connectors/zendesk-mcp/tsconfig.json\" \"tsc -p connectors/servicenow-mcp/tsconfig.json\" \"tsc -p connectors/linear-mcp/tsconfig.json\" \"tsc -p connectors/asana-mcp/tsconfig.json\" \"tsc -p connectors/okta-mcp/tsconfig.json\" \"tsc -p connectors/resend-mcp/tsconfig.json\" \"tsc -p connectors/discord-mcp/tsconfig.json\" \"tsc -p connectors/google-workspace-mcp/tsconfig.json\" \"tsc -p connectors/figma-mcp/tsconfig.json\" \"tsc -p connectors/vercel-mcp/tsconfig.json\" \"tsc -p connectors/monday-mcp/tsconfig.json\"",
     "prepack": "npm run build",
-    "package": "npm run build && electron-builder",
+    "package": "npm run build && electron-builder --publish never",
+    "package:mac": "node scripts/package-mac-with-env.mjs",
     "fmt": "oxfmt --write src",
     "fmt:check": "oxfmt --check src",
     "lint": "oxlint src -c .oxlintrc.json --tsconfig tsconfig.json",
@@ -136,7 +138,6 @@
     "discord.js": "^14.25.1",
     "docx": "^9.5.2",
     "e2b": "^2.12.1",
-    "electron": "^40.4.1",
     "electron-updater": "^6.3.9",
     "ethers": "^6.16.0",
     "eventsource": "^4.1.0",
@@ -189,6 +190,7 @@
     "@vitest/coverage-v8": "^4.0.18",
     "concurrently": "^9.2.1",
     "cross-env": "^10.1.0",
+    "electron": "^40.4.1",
     "electron-builder": "^26.7.0",
     "eslint": "^9.39.2",
     "globals": "^17.3.0",
@@ -247,16 +249,18 @@
         "zip"
       ],
       "category": "public.app-category.productivity",
-      "hardenedRuntime": false,
-      "gatekeeperAssess": false,
+      "hardenedRuntime": true,
+      "gatekeeperAssess": true,
       "entitlements": "build/entitlements.mac.plist",
-      "entitlementsInherit": "build/entitlements.mac.plist"
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "icon": "resources/branding/cowork-os-sl-color-name.png",
+      "notarize": true
     },
     "win": {
       "target": [
         "nsis"
       ],
-      "icon": "build/icon.ico"
+      "icon": "resources/branding/cowork-os-sl-color-name.png"
     },
     "publish": {
       "provider": "github",
