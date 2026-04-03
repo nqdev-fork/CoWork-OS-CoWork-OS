@@ -4,6 +4,9 @@ import * as path from "path";
 import { createHash } from "crypto";
 import mermaid from "mermaid";
 import {
+  ApprovalType,
+  SessionChecklistState,
+  SessionChecklistToolItemInput,
   Workspace,
   GatewayContextType,
   AgentConfig,
@@ -84,6 +87,9 @@ import {
   PERSONALITY_DEFINITIONS,
   PERSONA_DEFINITIONS,
   CustomSkill,
+  SkillApplication,
+  SkillApplicationTrigger,
+  SkillContextDirectives,
 } from "../../../shared/types";
 import {
   resolveModelPreferenceToModelKey,
@@ -499,6 +505,11 @@ export class ToolRegistry {
   private toolDescriptionsCache = new Map<string, string>();
   private readonly handlerRegistry = new ToolHandlerRegistry();
   private readonly executionMiddlewares: ToolExecutionMiddleware[];
+  private taskListHandler?: {
+    create: (items: SessionChecklistToolItemInput[]) => SessionChecklistState;
+    update: (items: SessionChecklistToolItemInput[]) => SessionChecklistState;
+    list: () => SessionChecklistState;
+  };
 
   constructor(
     private workspace: Workspace,
@@ -764,6 +775,11 @@ export class ToolRegistry {
     }
     if (visibleToolSet.has("request_user_input")) {
       routingHints.push("Use request_user_input only when a required user choice blocks the plan.");
+    }
+    if (visibleToolSet.has("task_list_create") || visibleToolSet.has("task_list_update")) {
+      routingHints.push(
+        "For non-trivial multi-step execution work, create and maintain a session checklist with task_list_create/task_list_update.",
+      );
     }
     if (visibleToolSet.has("run_command")) {
       routingHints.push("Use run_command for shell/test/build tasks instead of browser or web tools.");
@@ -1254,6 +1270,9 @@ export class ToolRegistry {
         [
           "revise_plan",
           "request_user_input",
+          "task_list_create",
+          "task_list_update",
+          "task_list_list",
           "task_history",
           "set_personality",
           "set_persona",
@@ -1339,6 +1358,43 @@ export class ToolRegistry {
     );
   }
 
+  getMcpServerName(toolName: string): string | null {
+    const settings = MCPSettingsManager.loadSettings();
+    const prefix = settings.toolNamePrefix || "mcp_";
+    if (!toolName.startsWith(prefix)) return null;
+    const rawToolName = toolName.slice(prefix.length);
+    try {
+      const manager = MCPClientManager.getInstance();
+      const serverId = manager.getServerIdForTool(rawToolName);
+      if (!serverId) return null;
+      const server = MCPSettingsManager.getServer(serverId);
+      return server?.name || null;
+    } catch {
+      return null;
+    }
+  }
+
+  private getApprovalTypeForTool(toolName: string): ApprovalType {
+    if (toolName === "run_command") return "run_command";
+    if (toolName === "delete_file") return "delete_file";
+    if (toolName.startsWith("mcp_")) return "external_service";
+    if (toolName.endsWith("_action") || toolName === "voice_call") return "external_service";
+    if (toolName.startsWith("computer_")) return "computer_use";
+    return "external_service";
+  }
+
+  private toolHandlesApprovalInternally(toolName: string): boolean {
+    return (
+      toolName === "run_command" ||
+      toolName === "delete_file" ||
+      toolName === "run_applescript" ||
+      toolName === "mcp_x402_fetch" ||
+      toolName.endsWith("_action") ||
+      toolName === "voice_call" ||
+      toolName.startsWith("computer_")
+    );
+  }
+
   getSchedulerSpec(toolName: string, input: Any): RuntimeToolSchedulerSpec {
     const runtime = this.getRuntimeMetadata(toolName);
     const override = this.handlerRegistry.resolveSchedulerSpec(toolName, input);
@@ -1370,6 +1426,9 @@ export class ToolRegistry {
   private buildExecutionMiddlewares(): ToolExecutionMiddleware[] {
     const policyMiddleware: ToolExecutionMiddleware = async (context, next) => {
       const runtime = this.getRuntimeMetadata(context.request.name);
+      const approvalType = this.getApprovalTypeForTool(context.request.name);
+      const permissionEvaluation = (this.daemon as Any)?.evaluateToolPermission;
+      const serverName = this.getMcpServerName(context.request.name);
       const pipeline = await evaluateToolPolicyPipeline({
         workspace: this.workspace,
         toolName: context.request.name,
@@ -1379,6 +1438,19 @@ export class ToolRegistry {
         approvalRequired: runtime.approvalKind !== "none" && runtime.approvalKind !== "workspace_policy"
           ? false
           : false,
+        permissionEvaluation:
+          typeof permissionEvaluation === "function"
+            ? () =>
+                permissionEvaluation.call(this.daemon, this.taskId, {
+                  approvalType,
+                  toolName: context.request.name,
+                  details: {
+                    tool: context.request.name,
+                    params: context.request.input ?? null,
+                    ...(serverName ? { serverName } : {}),
+                  },
+                })
+            : undefined,
       });
 
       if (pipeline.decision === "deny") {
@@ -1389,6 +1461,13 @@ export class ToolRegistry {
       }
 
       if (pipeline.decision === "require_approval") {
+        if (this.toolHandlesApprovalInternally(context.request.name)) {
+          const result = await next(context);
+          return {
+            result,
+            policyTrace: pipeline.trace,
+          };
+        }
         const requester = (this.daemon as Any)?.requestApproval;
         if (typeof requester !== "function") {
           throw Object.assign(
@@ -1401,12 +1480,13 @@ export class ToolRegistry {
         const approved = await requester.call(
           this.daemon,
           this.taskId,
-          "external_service",
+          approvalType,
           `Approve tool call: ${context.request.name}`,
           {
             tool: context.request.name,
             params: context.request.input ?? null,
             reason: pipeline.reason || null,
+            ...(serverName ? { serverName } : {}),
           },
         );
         if (approved !== true) {
@@ -1840,6 +1920,21 @@ export class ToolRegistry {
     register("task_history", async ({ request }) => this.taskHistory(request.input));
     register("task_events", async ({ request }) => this.taskEvents(request.input));
     register("request_user_input", async ({ request }) => this.requestUserInput(request.input));
+    register(
+      "task_list_create",
+      async ({ request }) => this.taskListCreate(request.input),
+      serialSchedulerSpec,
+    );
+    register(
+      "task_list_update",
+      async ({ request }) => this.taskListUpdate(request.input),
+      serialSchedulerSpec,
+    );
+    register(
+      "task_list_list",
+      async () => this.taskListList(),
+      readParallelSchedulerSpec,
+    );
     register("revise_plan", async ({ request }) => {
       if (!this.planRevisionHandler) {
         throw new Error("Plan revision not available at this time");
@@ -2052,6 +2147,14 @@ export class ToolRegistry {
     ) => void,
   ): void {
     this.planRevisionHandler = handler;
+  }
+
+  setTaskListHandler(handler: {
+    create: (items: SessionChecklistToolItemInput[]) => SessionChecklistState;
+    update: (items: SessionChecklistToolItemInput[]) => SessionChecklistState;
+    list: () => SessionChecklistState;
+  }): void {
+    this.taskListHandler = handler;
   }
 
   /**
@@ -2382,6 +2485,54 @@ export class ToolRegistry {
     };
   }
 
+  private async getTaskExecutionMode(): Promise<string> {
+    const currentTask = await this.daemon.getTaskById?.(this.taskId);
+    return currentTask?.agentConfig?.executionMode ?? "execute";
+  }
+
+  private async taskListCreate(input: {
+    items?: SessionChecklistToolItemInput[];
+  }): Promise<SessionChecklistState> {
+    const mode = await this.getTaskExecutionMode();
+    if (mode !== "execute" && mode !== "verified" && mode !== "debug") {
+      throw new Error(
+        'Tool "task_list_create" is only available in execute, verified, or debug mode.',
+      );
+    }
+    if (!this.taskListHandler) {
+      throw new Error("Session checklist tools are not available in this context.");
+    }
+    return this.taskListHandler.create(Array.isArray(input?.items) ? input.items : []);
+  }
+
+  private async taskListUpdate(input: {
+    items?: SessionChecklistToolItemInput[];
+  }): Promise<SessionChecklistState> {
+    const mode = await this.getTaskExecutionMode();
+    if (mode !== "execute" && mode !== "verified" && mode !== "debug") {
+      throw new Error(
+        'Tool "task_list_update" is only available in execute, verified, or debug mode.',
+      );
+    }
+    if (!this.taskListHandler) {
+      throw new Error("Session checklist tools are not available in this context.");
+    }
+    return this.taskListHandler.update(Array.isArray(input?.items) ? input.items : []);
+  }
+
+  private async taskListList(): Promise<SessionChecklistState> {
+    const mode = await this.getTaskExecutionMode();
+    if (mode !== "execute" && mode !== "verified" && mode !== "debug") {
+      throw new Error(
+        'Tool "task_list_list" is only available in execute, verified, or debug mode.',
+      );
+    }
+    if (!this.taskListHandler) {
+      throw new Error("Session checklist tools are not available in this context.");
+    }
+    return this.taskListHandler.list();
+  }
+
   /**
    * Get human-readable tool descriptions
    */
@@ -2698,6 +2849,9 @@ Channel Message Log (Local Gateway):
 		Plan Control:
 		- revise_plan: Modify remaining plan steps when obstacles are encountered or new information discovered
 		- request_user_input: Ask the user a structured multiple-choice question set (plan or debug mode) and wait for selection.
+		- task_list_create: Create the initial ordered session checklist for non-trivial execution work. Fails if a checklist already exists.
+		- task_list_update: Replace the full ordered session checklist state while preserving supplied item ids.
+		- task_list_list: Read the current session checklist and whether a verification nudge is active.
 		- task_history: Query recent task history/messages (use for "what did we talk about yesterday?")
 		- switch_workspace: Switch to a different workspace/working directory. Use when you need to work in a different folder.
 		- integration_setup: List/inspect/configure Tier-1 integrations from chat (resend/google-workspace/jira/linear/hubspot/salesforce/zendesk/servicenow), including plan_hash stale-plan safety and optional OAuth setup.
@@ -3201,6 +3355,15 @@ ${skillDescriptions}`;
     if (name === "request_user_input") {
       return await this.requestUserInput(input);
     }
+    if (name === "task_list_create") {
+      return await this.taskListCreate(input);
+    }
+    if (name === "task_list_update") {
+      return await this.taskListUpdate(input);
+    }
+    if (name === "task_list_list") {
+      return await this.taskListList();
+    }
 
     if (name === "revise_plan") {
       if (!this.planRevisionHandler) {
@@ -3501,6 +3664,7 @@ ${skillDescriptions}`;
         {
           tool: `mcp_${mcpToolName}`,
           params: input ?? null,
+          serverName: this.getMcpServerName(`mcp_${mcpToolName}`) || undefined,
           reason:
             amount !== null ? `MCP payment operation (${amount} USDC)` : "MCP payment operation",
         },
@@ -3725,8 +3889,18 @@ ${skillDescriptions}`;
   private async executeUseSkill(input: {
     skill_id: string;
     parameters?: Record<string, Any>;
+    trigger?: SkillApplicationTrigger;
   }): Promise<Any> {
     const { skill_id, parameters = {} } = input;
+    const trigger: SkillApplicationTrigger =
+      input.trigger === "slash" ||
+      input.trigger === "planner" ||
+      input.trigger === "model" ||
+      input.trigger === "explicit_hint"
+        ? input.trigger
+        : "model";
+    const isManualInvocation = trigger === "slash";
+    const isAutomaticInvocation = !isManualInvocation;
 
     const skillLoader = getCustomSkillLoader();
     const skill = skillLoader.getSkill(skill_id);
@@ -3742,8 +3916,16 @@ ${skillDescriptions}`;
       };
     }
 
+    if (isManualInvocation && skill.invocation?.userInvocable === false) {
+      return {
+        success: false,
+        error: `Skill '${skill_id}' cannot be invoked manually`,
+        reason: "This skill is configured for programmatic invocation only",
+      };
+    }
+
     // Check if skill can be invoked by model
-    if (skill.invocation?.disableModelInvocation) {
+    if (isAutomaticInvocation && skill.invocation?.disableModelInvocation) {
       return {
         success: false,
         error: `Skill '${skill_id}' cannot be invoked automatically`,
@@ -3751,13 +3933,13 @@ ${skillDescriptions}`;
       };
     }
 
-    // Keyword gate: skills with routing keywords can only be invoked when the task mentions them
-    if (!(await this.passesSkillKeywordGate(skill))) {
+    if (!(await this.passesSkillKeywordGate(skill, trigger))) {
       return {
         success: false,
         error: `Skill '${skill_id}' is not available for this task`,
-        reason:
-          "This skill requires a clear, explicit mention in the task prompt (for example naming the skill itself).",
+        reason: isAutomaticInvocation
+          ? "This skill is not auto-routable for the current canonical task intent."
+          : "This skill is not available for the current task.",
       };
     }
 
@@ -3886,6 +4068,27 @@ ${skillDescriptions}`;
 
     if (skill_id === "codex-cli") {
       const expandedPrompt = await this.buildCodexCliRuntimePrompt();
+      const contextDirectives: SkillContextDirectives = {
+        artifactDirectories: [artifactDir, workspaceArtifactDir],
+        metadata: {
+          source: skill.source || "unknown",
+          category: skill.category || "General",
+          runtimeMode: BuiltinToolsSettingsManager.getCodexRuntimeMode(),
+        },
+      };
+      const skillApplication: SkillApplication = {
+        skillId: skill_id,
+        skillName: skill.name,
+        trigger,
+        parameters,
+        content: expandedPrompt,
+        reason:
+          trigger === "slash"
+            ? `Applied via /${skill_id}`
+            : "Applied to add Codex runtime instructions without changing the original task.",
+        appliedAt: Date.now(),
+        contextDirectives,
+      };
       this.daemon.logEvent(this.taskId, "log", {
         message: `Using skill: ${skill.name}`,
         skillId: skill_id,
@@ -3898,9 +4101,13 @@ ${skillDescriptions}`;
         skill_id,
         skill_name: skill.name,
         skill_description: skill.description,
+        content: expandedPrompt,
+        context_messages: [{ role: "system", content: expandedPrompt }],
+        context_directives: contextDirectives,
+        application_summary:
+          "Applied Codex runtime guidance as additive skill context for the current task.",
+        skill_application: skillApplication,
         expanded_prompt: expandedPrompt,
-        instruction:
-          "Launch the Codex work as a dedicated child task using the configured runtime. Do not run Codex shell detection commands in the current task.",
       };
     }
 
@@ -3909,6 +4116,34 @@ ${skillDescriptions}`;
       artifactDir,
       workspaceArtifactDir,
     });
+    const contextDirectives: SkillContextDirectives = {
+      ...(Array.isArray((skill.requires as Any)?.tools) &&
+      ((skill.requires as Any)?.tools as unknown[]).some((tool) => typeof tool === "string")
+        ? {
+            allowedTools: ((skill.requires as Any).tools as unknown[]).filter(
+              (tool): tool is string => typeof tool === "string" && tool.trim().length > 0,
+            ),
+          }
+        : {}),
+      artifactDirectories: [artifactDir, workspaceArtifactDir],
+      metadata: {
+        source: skill.source || "unknown",
+        category: skill.category || "General",
+      },
+    };
+    const skillApplication: SkillApplication = {
+      skillId: skill_id,
+      skillName: skill.name,
+      trigger,
+      parameters,
+      content: expandedPrompt,
+      reason:
+        trigger === "slash"
+          ? `Applied via /${skill_id}`
+          : "Applied as additive skill context while preserving the original task.",
+      appliedAt: Date.now(),
+      contextDirectives,
+    };
 
     // Log the skill invocation
     this.daemon.logEvent(this.taskId, "log", {
@@ -3922,9 +4157,13 @@ ${skillDescriptions}`;
       skill_id,
       skill_name: skill.name,
       skill_description: skill.description,
+      content: expandedPrompt,
+      context_messages: [{ role: "system", content: expandedPrompt }],
+      context_directives: contextDirectives,
+      application_summary:
+        `Applied skill "${skill.name}" as additive context for the current task.`,
+      skill_application: skillApplication,
       expanded_prompt: expandedPrompt,
-      instruction:
-        "Execute the task according to the expanded_prompt above. Follow its instructions to complete the user's request.",
     };
   }
 
@@ -4029,20 +4268,30 @@ ${skillDescriptions}`;
    * List all skills with metadata
    */
   /**
-   * Check if a skill passes its keyword gate for the current task.
-   * Skills with routing keywords are only accessible when at least one keyword matches.
+   * Check if a skill can be invoked for the current task.
+   * Slash/manual invocation can always use user-invocable skills.
+   * Model/planner invocation is limited to skills that are auto-routable for this task.
    */
-  private async passesSkillKeywordGate(skill: CustomSkill): Promise<boolean> {
+  private async passesSkillKeywordGate(
+    skill: CustomSkill,
+    trigger: SkillApplicationTrigger = "model",
+  ): Promise<boolean> {
+    if (trigger === "slash") {
+      return skill.invocation?.userInvocable !== false;
+    }
+
     const skillLoader = getCustomSkillLoader();
-    const keywords = skill.metadata?.routing?.keywords;
-    if (!Array.isArray(keywords) || keywords.length === 0) return true; // no gate
     try {
       const task = await this.daemon.getTaskById(this.taskId);
-      const query = `${task?.title || ""} ${task?.prompt || ""}`.trim();
+      const prompt =
+        String(task?.rawPrompt || "").trim() ||
+        String(task?.userPrompt || "").trim() ||
+        String(task?.prompt || "").trim();
+      const query = [String(task?.title || "").trim(), prompt].filter(Boolean).join("\n");
       if (!query) return false;
       return skillLoader.matchesSkillRoutingQuery(skill, query);
     } catch {
-      return true; // allow on error
+      return false;
     }
   }
 
@@ -5160,7 +5409,7 @@ ${skillDescriptions}`;
         description:
           "Use a custom skill by ID to help accomplish a task. Skills are pre-configured prompt templates " +
           "that provide specialized capabilities. Use this when a skill matches what you need to do. " +
-          "The skill's expanded prompt will be injected into your context to guide execution.",
+          "The skill adds instructions and scoped runtime hints to the current task without replacing the original request.",
         input_schema: {
           type: "object",
           properties: {
@@ -9471,8 +9720,6 @@ ${skillDescriptions}`;
     }
 
     await this.daemon.cancelTask(resolved.taskId);
-    // Ensure DB status reflects the cancellation even when called outside renderer IPC.
-    this.daemon.updateTask(resolved.taskId, { status: "cancelled", completedAt: Date.now() });
 
     return { success: true, task_id: resolved.taskId, message: "Task cancelled" };
   }
@@ -9873,6 +10120,132 @@ ${skillDescriptions}`;
             },
           },
           required: ["questions"],
+        },
+      },
+      {
+        name: "task_list_create",
+        description:
+          "Create the initial ordered session checklist for multi-step execution work. " +
+          "Fails if a session checklist already exists. Use this to establish lightweight execution discipline for the current task.",
+        input_schema: {
+          type: "object",
+          properties: {
+            items: {
+              type: "array",
+              description:
+                "Non-empty ordered checklist. kind defaults to implementation when omitted.",
+              items: {
+                type: "object",
+                properties: {
+                  title: {
+                    type: "string",
+                    description: "Short checklist item title.",
+                  },
+                  kind: {
+                    type: "string",
+                    enum: ["implementation", "verification", "other"],
+                    description: "Checklist item kind. Defaults to implementation.",
+                  },
+                  status: {
+                    type: "string",
+                    enum: ["pending", "in_progress", "completed", "blocked"],
+                    description: "Current item status.",
+                  },
+                },
+                required: ["title", "status"],
+              },
+            },
+          },
+          required: ["items"],
+        },
+        runtime: {
+          concurrencyClass: "serial_only",
+          readOnly: false,
+          approvalKind: "none",
+          sideEffectLevel: "low",
+          interruptBehavior: "block",
+          deferLoad: false,
+          alwaysExpose: false,
+          resultKind: "generic",
+          supportsContextMutation: true,
+          capabilityTags: ["core"],
+          exposure: "conditional",
+        },
+      },
+      {
+        name: "task_list_update",
+        description:
+          "Replace the full ordered session checklist state. Existing items keep their ids when supplied; new items may omit id and the runtime will generate one.",
+        input_schema: {
+          type: "object",
+          properties: {
+            items: {
+              type: "array",
+              description:
+                "Non-empty ordered checklist replacement. Preserve item ids you want to keep stable.",
+              items: {
+                type: "object",
+                properties: {
+                  id: {
+                    type: "string",
+                    description: "Existing checklist item id to preserve when updating.",
+                  },
+                  title: {
+                    type: "string",
+                    description: "Short checklist item title.",
+                  },
+                  kind: {
+                    type: "string",
+                    enum: ["implementation", "verification", "other"],
+                    description: "Checklist item kind. Defaults to implementation.",
+                  },
+                  status: {
+                    type: "string",
+                    enum: ["pending", "in_progress", "completed", "blocked"],
+                    description: "Current item status.",
+                  },
+                },
+                required: ["title", "status"],
+              },
+            },
+          },
+          required: ["items"],
+        },
+        runtime: {
+          concurrencyClass: "serial_only",
+          readOnly: false,
+          approvalKind: "none",
+          sideEffectLevel: "low",
+          interruptBehavior: "block",
+          deferLoad: false,
+          alwaysExpose: false,
+          resultKind: "generic",
+          supportsContextMutation: true,
+          capabilityTags: ["core"],
+          exposure: "conditional",
+        },
+      },
+      {
+        name: "task_list_list",
+        description:
+          "Return the current session checklist state, including whether a verification nudge is active.",
+        input_schema: {
+          type: "object",
+          properties: {},
+          required: [],
+        },
+        runtime: {
+          concurrencyClass: "read_parallel",
+          readOnly: true,
+          approvalKind: "none",
+          sideEffectLevel: "none",
+          interruptBehavior: "cancel",
+          deferLoad: false,
+          alwaysExpose: false,
+          resultKind: "read",
+          supportsContextMutation: false,
+          capabilityTags: ["core"],
+          exposure: "conditional",
         },
       },
       {
