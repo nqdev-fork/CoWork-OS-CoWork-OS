@@ -210,17 +210,7 @@ export class DocumentEditorSessionService {
     message: string,
     failureClass: Task["failureClass"] = "tool_error",
   ): void {
-    this.taskRepo.update(taskId, {
-      status: "failed",
-      completedAt: Date.now(),
-      error: message,
-      terminalStatus: "failed",
-      failureClass,
-    });
-    this.agentDaemon.logEvent(taskId, "error", { message });
-    this.agentDaemon.logEvent(taskId, "task_status", {
-      status: "failed",
-      error: message,
+    this.agentDaemon.failTask(taskId, message, {
       terminalStatus: "failed",
       failureClass,
     });
