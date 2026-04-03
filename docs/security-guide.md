@@ -19,26 +19,46 @@ All of these capabilities are **consent-based** and **sandboxed** where possible
 
 ### Workspace Permissions
 
-Each workspace you create has configurable permissions:
+Each workspace you create has configurable permissions. These are coarse capability gates; the
+permission engine still decides whether a specific action should be allowed, denied, or prompted.
 
 | Permission | Description | Default |
 |------------|-------------|---------|
 | **Read** | Read files within the workspace | Enabled |
 | **Write** | Create and modify files | Enabled |
-| **Delete** | Remove files (requires approval) | Disabled |
-| **Shell** | Execute shell commands (requires approval) | Disabled |
+| **Delete** | Remove files; still subject to explicit permission rules and approval | Disabled |
+| **Shell** | Execute shell commands; still subject to explicit permission rules and approval | Disabled |
 
-**Recommendation**: Only enable shell and delete permissions for workspaces where you trust the AI to perform those operations.
+**Recommendation**: Only enable shell and delete permissions for workspaces where you trust the AI
+to perform those operations.
 
 ### Approval System
 
-Certain operations always require explicit user approval before execution:
+Approval prompts are now part of a layered permission engine:
 
-- **Shell commands**: You see the exact command before it runs
-- **File deletion**: Confirmation required before removing files
-- **Sensitive operations**: Any action flagged as potentially destructive
+- **Safe reads** may auto-allow when a matching mode or rule exists
+- **Writes, deletes, shell commands, and external side effects** may prompt based on mode or rule
+- **Hard guardrails** still block obviously dangerous commands before prompting
+- **Exact reasons** are shown so you know whether the decision came from a rule, mode, or guardrail
 
-You can approve or deny each request individually.
+You can still approve or deny each request individually, and you can persist some approvals as
+session, workspace, or profile rules.
+
+For the full evaluation order, rule precedence, and persistence model, see
+[Permission System](permission-system.md).
+
+### Workspace Rule Management
+
+Workspace-local permission rules are visible in **Settings > System & Security** for the active
+workspace. From there you can:
+
+- browse workspace-local rules
+- remove a rule directly
+- persist new workspace rules from approval prompts
+
+Workspace-local rule removal updates both the local SQLite row and the workspace policy manifest.
+If the manifest write fails, the database removal still succeeds and the app reports the partial
+result.
 
 ### Configurable Guardrails
 
@@ -70,6 +90,9 @@ The following command patterns are blocked by default:
 | `:(){ :|:& };:` | Fork bomb syntax |
 
 Commands are blocked **before** reaching the approval dialog. You can add custom patterns in Settings.
+
+Trusted-command patterns now feed the permission engine as compatibility rules instead of acting as
+the final approval system.
 
 #### Domain Allowlist
 
@@ -488,7 +511,7 @@ Tools are categorized by risk level for policy-based access control:
 |------------|-------|-------------|
 | **Read** | `read_file`, `list_directory`, `search_files` | Low risk, read-only operations |
 | **Write** | `write_file`, `copy_file`, `create_directory` | Medium risk, creates/modifies files |
-| **Destructive** | `delete_file`, `run_command` | High risk, always requires approval |
+| **Destructive** | `delete_file`, `run_command` | High risk, usually approval-gated unless an explicit allow rule or mode applies |
 | **System** | `read_clipboard`, `take_screenshot`, `open_application` | System-level access |
 | **Network** | `web_search`, `browser_*` | External network operations |
 
