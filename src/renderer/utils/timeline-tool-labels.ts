@@ -11,6 +11,28 @@ export function truncateLabel(s: string, max = TRUNC): string {
   return `${t.slice(0, max - 1)}…`;
 }
 
+function asTrimmedString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function asTrimmedStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+    .filter((entry) => entry.length > 0);
+}
+
+function fileBase(path: string): string {
+  return path.split("/").pop() || path;
+}
+
+function summarizeList(values: string[], maxItems = 2): string {
+  const items = values.slice(0, maxItems);
+  if (items.length === 0) return "";
+  const joined = items.join(", ");
+  return values.length > maxItems ? `${joined}, +${values.length - maxItems} more` : joined;
+}
+
 /** Short label for parallel lane "running" state */
 export function friendlyToolRunningLabel(toolName: string | undefined): string {
   const t = (toolName || "").trim();
@@ -77,13 +99,25 @@ export function friendlyToolCallTitle(tool: string | undefined, input: ToolInput
     return q ? `Web search${via}: ${truncateLabel(q, 52)}` : `Web search${via}`;
   }
   if (tc === "read_file") {
-    const path = typeof ins.path === "string" ? ins.path.trim() : "";
-    const base = path ? path.split("/").pop() || path : "";
+    const path = asTrimmedString(ins.path);
+    const base = path ? fileBase(path) : "";
     return base ? `Read ${base}` : "Read file";
   }
-  if (tc === "grep" || tc === "search_files") {
-    const pattern = typeof ins.pattern === "string" ? ins.pattern.trim() : "";
+  if (tc === "read_files") {
+    const patterns = asTrimmedStringArray(ins.patterns);
+    if (patterns.length > 0) {
+      return `Read files: ${truncateLabel(summarizeList(patterns), 52)}`;
+    }
+    const path = asTrimmedString(ins.path);
+    return path ? `Read files in ${truncateLabel(path, 48)}` : "Read files";
+  }
+  if (tc === "grep") {
+    const pattern = asTrimmedString(ins.pattern);
     return pattern ? `Search in files: ${truncateLabel(pattern, 48)}` : "Search in files";
+  }
+  if (tc === "search_files") {
+    const query = asTrimmedString(ins.query) || asTrimmedString(ins.pattern);
+    return query ? `Search files: ${truncateLabel(query, 48)}` : "Search files";
   }
   if (tc === "run_command") {
     const cmd = typeof ins.command === "string" ? ins.command.trim() : "";
@@ -100,7 +134,7 @@ export function friendlyToolCallTitle(tool: string | undefined, input: ToolInput
     return base ? `Edit ${base}` : "Edit file";
   }
   if (tc === "glob") {
-    const pattern = typeof ins.pattern === "string" ? ins.pattern.trim() : "";
+    const pattern = asTrimmedString(ins.pattern);
     return pattern ? `Find files: ${truncateLabel(pattern, 52)}` : "Find files";
   }
 
@@ -135,9 +169,40 @@ export function friendlyToolResultTitle(
     return q ? `Searched${via}: ${truncateLabel(q, 52)}` : `Search complete${via}`;
   }
   if (tc === "read_file") {
-    const path = typeof res.path === "string" ? res.path.trim() : "";
-    const base = path ? path.split("/").pop() || path : "";
+    const path = asTrimmedString(res.path);
+    const base = path ? fileBase(path) : "";
     return base ? `Read ${base}` : "Read file";
+  }
+  if (tc === "read_files") {
+    const files = Array.isArray(res.files)
+      ? res.files
+          .map((entry) => {
+            if (!entry || typeof entry !== "object" || Array.isArray(entry)) return "";
+            return asTrimmedString((entry as Record<string, unknown>).path);
+          })
+          .filter((entry) => entry.length > 0)
+      : [];
+    if (files.length === 1) return `Read ${fileBase(files[0])}`;
+    if (files.length > 1) {
+      return `Read files: ${truncateLabel(summarizeList(files.map((path) => fileBase(path))), 52)}`;
+    }
+    const patterns = asTrimmedStringArray(res.includePatterns);
+    if (patterns.length > 0) {
+      return `Read files: ${truncateLabel(summarizeList(patterns), 52)}`;
+    }
+    return "Read files";
+  }
+  if (tc === "grep") {
+    const pattern = asTrimmedString(res.pattern);
+    return pattern
+      ? `Searched in files: ${truncateLabel(pattern, 52)}`
+      : `${friendlyPastVerb(tc)}${detailSuffix(res, tc)}`;
+  }
+  if (tc === "search_files") {
+    const query = asTrimmedString(res.query) || asTrimmedString(res.pattern);
+    return query
+      ? `Searched files: ${truncateLabel(query, 52)}`
+      : `${friendlyPastVerb(tc)}${detailSuffix(res, tc)}`;
   }
 
   return `${friendlyPastVerb(tc)}${detailSuffix(res, tc)}`;
@@ -185,6 +250,8 @@ function friendlyPastVerb(tool: string): string {
       return "Searched files";
     case "read_file":
       return "Read file";
+    case "read_files":
+      return "Read files";
     case "run_command":
       return "Ran command";
     case "write_file":
@@ -202,7 +269,7 @@ function friendlyPastVerb(tool: string): string {
 
 function detailSuffix(res: Record<string, unknown>, tool: string): string {
   if (typeof res.path === "string" && res.path.trim()) {
-    const base = res.path.split("/").pop() || res.path;
+    const base = fileBase(res.path);
     return ` — ${truncateLabel(base, 48)}`;
   }
   if (Array.isArray(res.matches) && res.matches.length > 0) {
