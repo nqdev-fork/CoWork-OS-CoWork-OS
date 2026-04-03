@@ -13,8 +13,8 @@ CoWork OS implements a layered security model with multiple defense mechanisms.
 |  [Context Policies: DM vs Group]                                  |
 +------------------------------------------------------------------+
 |                    Policy Manager Layer                           |
-|  [4-Layer Monotonic Deny-Wins System]                            |
-|  [Tool Groups] [Blocked Patterns] [Approval Gates]               |
+|  [Layered Permission Engine]                                     |
+|  [Tool Groups] [Blocked Patterns] [Mode Defaults] [Rule Sources] |
 +------------------------------------------------------------------+
 |                    Encrypted Storage Layer                        |
 |  [OS Keychain] [AES-256 Fallback] [Integrity Checksums]          |
@@ -50,7 +50,7 @@ This treats group messages as higher risk than direct messages, where shared con
 
 ## Policy Manager
 
-The policy manager implements a **monotonic deny-wins** system with four layers:
+The policy manager implements a **layered permission engine** with hard-stop precedence:
 
 ### Layer 1: Global Guardrails
 
@@ -69,6 +69,9 @@ Per-workspace controls:
 - **Shell**: Allow command execution
 - **Network**: Allow web/browser access
 
+These remain coarse capability gates. They do not replace explicit rules, workspace policy files, or
+mode defaults.
+
 ### Layer 3: Context Restrictions
 
 Based on message context (private/group/public):
@@ -77,9 +80,18 @@ Based on message context (private/group/public):
 
 ### Layer 4: Tool-Specific Rules
 
-Individual tool permissions and approval gates:
-- Destructive tools require user approval
-- Shell commands always require approval
+Individual tool permissions and approval decisions:
+- Destructive tools usually prompt unless an explicit allow rule or mode applies
+- Shell commands usually prompt unless an explicit allow rule or mode applies
+- Exact reasons and matched scopes are surfaced in the prompt when available
+
+### Layer 5: Permission Modes And Fallback
+
+The selected mode and the denial fallback tracker finalize the decision:
+
+- `default`, `plan`, `accept_edits`, `dont_ask`, and `bypass_permissions` define baseline behavior
+- soft denials can escalate to a direct prompt after repeated hits
+- hard guardrails and explicit deny rules are never bypassed
 
 ## Sandboxing
 
