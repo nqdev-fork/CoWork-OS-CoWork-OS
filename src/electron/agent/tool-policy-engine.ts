@@ -166,6 +166,12 @@ const ALWAYS_VISIBLE_TOOLS = new Set([
   "skill_get",
 ]);
 
+const SESSION_CHECKLIST_TOOLS = new Set([
+  "task_list_create",
+  "task_list_update",
+  "task_list_list",
+]);
+
 const INTEGRATION_INTENT_PATTERN =
   /\b(gmail|google drive|google calendar|calendar|notion|box|dropbox|onedrive|sharepoint|slack|jira|linear|hubspot|salesforce|asana|discord|zendesk|servicenow|okta|resend|connector|integration|crm|inbox|email|drive|cloud storage|mcp)\b/i;
 const BROWSER_INTENT_PATTERN =
@@ -255,6 +261,9 @@ function inferToolExposureMetadata(
   }
   if (ORCHESTRATION_TOOLS.has(toolName)) {
     return { lane: "orchestration", exposure: "explicit_only", overlapGroup: "multi_agent" };
+  }
+  if (SESSION_CHECKLIST_TOOLS.has(toolName)) {
+    return { lane: "core", exposure: "conditional", overlapGroup: "session_checklist" };
   }
   if (INTEGRATION_TOOLS.has(toolName) || toolName.endsWith("_action") || toolName.startsWith("mcp_")) {
     return { lane: "integration", exposure: "conditional", overlapGroup: "integration" };
@@ -514,6 +523,10 @@ function applyModeGate(toolName: string, mode: ExecutionMode): string | null {
   if (toolName === "request_user_input") {
     if (mode === "plan" || mode === "debug") return null;
     return `Tool "${toolName}" is only available in plan or debug mode. Switch mode to plan or debug to request structured user input.`;
+  }
+  if (SESSION_CHECKLIST_TOOLS.has(toolName)) {
+    if (mode === "execute" || mode === "verified" || mode === "debug") return null;
+    return `Tool "${toolName}" is only available in execute, verified, or debug mode.`;
   }
 
   // Verified and debug modes allow mutations (like execute); debug adds runtime-evidence investigation.
