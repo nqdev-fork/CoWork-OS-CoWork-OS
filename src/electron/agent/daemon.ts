@@ -10,6 +10,7 @@ import {
   TaskEventRepository,
   WorkspaceRepository,
   ApprovalRepository,
+  WorkspacePermissionRuleRepository,
   InputRequestRepository,
   ArtifactRepository,
   MemoryType,
@@ -24,6 +25,14 @@ import { extractMentionedRoles } from "../agents/mentions";
 import { selectAgentsForTask } from "../agents/capabilityMatcher";
 import {
   Task,
+  ApprovalResponseAction,
+  ApprovalType,
+  DEFAULT_TRUSTED_COMMAND_PATTERNS,
+  PermissionEffect,
+  PermissionEvaluationResult,
+  PermissionMode,
+  PermissionPromptDetails,
+  PermissionRule,
   TaskVerificationEvidenceBundle,
   TaskStatus,
   TaskEvent,
@@ -79,15 +88,25 @@ import {
   isTimelineEventType,
   normalizeTaskEventToTimelineV2,
 } from "../../shared/timeline-v2";
-import { deriveCanonicalTaskStatus } from "../../shared/task-status";
+import { deriveCanonicalTaskStatus, isTerminalTaskStatus } from "../../shared/task-status";
 import { createTimelineEmitter } from "./timeline-emitter";
 import { TaskExecutor } from "./executor";
 import { TaskQueueManager } from "./queue-manager";
+import { BuiltinToolsSettingsManager } from "./tools/builtin-settings";
 import { ComputerUseSessionManager } from "../computer-use/session-manager";
 import { decideTaskOutcome, getTaskBestKnownOutcome, hasSubstantiveOutcomeEvidence } from "./outcome-policy";
 import { approvalIdempotency, taskIdempotency as _taskIdempotency, IdempotencyManager } from "../security/concurrency";
 import { MemoryService } from "../memory/MemoryService";
 import { GuardrailManager } from "../guardrails/guardrail-manager";
+import { PermissionSettingsManager } from "../security/permission-settings-manager";
+import {
+  appendWorkspacePermissionManifestRule,
+  loadWorkspacePermissionManifest,
+} from "../security/workspace-permission-manifest";
+import {
+  permissionScopeFingerprint,
+  summarizePermissionScope,
+} from "../security/permission-utils";
 import { PlaybookService } from "../memory/PlaybookService";
 import { UserProfileService } from "../memory/UserProfileService";
 import { RelationshipMemoryService } from "../memory/RelationshipMemoryService";
@@ -112,6 +131,7 @@ import {
   resolveOperationalAutonomyPolicy,
   buildAgentConfigFromAutonomyPolicy,
 } from "../agents/autonomy-policy";
+import { PermissionEngine } from "./runtime/PermissionEngine";
 import { WorktreeManager } from "../git/WorktreeManager";
 import type { ComparisonService } from "../git/ComparisonService";
 import {
@@ -272,6 +292,7 @@ export class AgentDaemon extends EventEmitter {
   private eventRepo: TaskEventRepository;
   private workspaceRepo: WorkspaceRepository;
   private approvalRepo: ApprovalRepository;
+  private workspacePermissionRuleRepo: WorkspacePermissionRuleRepository;
   private inputRequestRepo: InputRequestRepository;
   private artifactRepo: ArtifactRepository;
   private activityRepo: ActivityRepository;
@@ -284,6 +305,7 @@ export class AgentDaemon extends EventEmitter {
     string,
     {
       taskId: string;
+      approval: Any;
       resolve: (value: boolean) => void;
       reject: (reason?: unknown) => void;
       resolved: boolean;
@@ -350,6 +372,7 @@ export class AgentDaemon extends EventEmitter {
     this.eventRepo = new TaskEventRepository(db);
     this.workspaceRepo = new WorkspaceRepository(db);
     this.approvalRepo = new ApprovalRepository(db);
+    this.workspacePermissionRuleRepo = new WorkspacePermissionRuleRepository(db);
     this.inputRequestRepo = new InputRequestRepository(db);
     this.artifactRepo = new ArtifactRepository(db);
     this.activityRepo = new ActivityRepository(db);
@@ -865,10 +888,10 @@ export class AgentDaemon extends EventEmitter {
           console.log(
             `[AgentDaemon] Orphaned task ${task.id} has no saved state — marking as failed`,
           );
-          this.taskRepo.update(task.id, {
-            status: "failed",
-            error: "Task interrupted - application crashed before any progress was saved",
-          });
+          this.failTask(
+            task.id,
+            "Task interrupted - application crashed before any progress was saved",
+          );
         }
       }
     }
@@ -1034,19 +1057,12 @@ export class AgentDaemon extends EventEmitter {
     if (requiresWorktree && !canUseWorktree) {
       const errorMessage =
         "Task requires git worktree isolation, but worktrees are unavailable for this workspace.";
-      this.taskRepo.update(executionTask.id, {
-        status: "failed",
-        completedAt: Date.now(),
-        error: errorMessage,
+      this.failTask(executionTask.id, errorMessage, {
         terminalStatus: "failed",
         failureClass: "dependency_unavailable",
       });
       this.logEvent(executionTask.id, "error", {
         message: errorMessage,
-      });
-      this.logEvent(executionTask.id, "task_status", {
-        status: "failed",
-        error: errorMessage,
       });
       return;
     }
@@ -1087,19 +1103,12 @@ export class AgentDaemon extends EventEmitter {
       } catch (error: Any) {
         if (requiresWorktree) {
           const errorMessage = `Worktree creation failed: ${error.message}`;
-          this.taskRepo.update(executionTask.id, {
-            status: "failed",
-            completedAt: Date.now(),
-            error: errorMessage,
+          this.failTask(executionTask.id, errorMessage, {
             terminalStatus: "failed",
             failureClass: "dependency_unavailable",
           });
           this.logEvent(executionTask.id, "error", {
             message: errorMessage,
-          });
-          this.logEvent(executionTask.id, "task_status", {
-            status: "failed",
-            error: errorMessage,
           });
           return;
         }
@@ -1128,16 +1137,12 @@ export class AgentDaemon extends EventEmitter {
       console.log(`[AgentDaemon] TaskExecutor created successfully`);
     } catch (error: Any) {
       console.error(`[AgentDaemon] Task ${effectiveTask.id} failed to initialize:`, error);
-      this.taskRepo.update(effectiveTask.id, {
-        status: "failed",
-        error: error.message || "Failed to initialize task executor",
-        completedAt: Date.now(),
-      });
+      this.failTask(
+        effectiveTask.id,
+        error.message || "Failed to initialize task executor",
+      );
       this.pendingTaskImages.delete(effectiveTask.id);
-      this.clearRetryState(effectiveTask.id);
       this.logEvent(effectiveTask.id, "error", { error: error.message });
-      // Notify queue manager so it can start next task
-      this.finishQueueSlot(effectiveTask.id);
       return;
     }
 
@@ -1170,16 +1175,9 @@ export class AgentDaemon extends EventEmitter {
       .catch((error) => {
         MemoryService.clearExecutionSideChannelPolicy();
         console.error(`[AgentDaemon] Task ${effectiveTask.id} execution failed:`, error);
-        this.taskRepo.update(effectiveTask.id, {
-          status: "failed",
-          error: error.message,
-          completedAt: Date.now(),
-        });
-        this.clearRetryState(effectiveTask.id);
+        this.failTask(effectiveTask.id, error.message);
         this.logEvent(effectiveTask.id, "error", { error: error.message });
         this.activeTasks.delete(effectiveTask.id);
-        // Notify queue manager so it can start next task
-        this.finishQueueSlot(effectiveTask.id);
         // Even on failure, process orphaned follow-ups so they aren't silently lost
         this.processOrphanedFollowUps(effectiveTask.id, executor);
       });
@@ -1196,11 +1194,7 @@ export class AgentDaemon extends EventEmitter {
         await this.resumeInterruptedTask(task);
       } catch (error: Any) {
         console.error(`[AgentDaemon] Failed to resume task ${task.id}:`, error);
-        this.taskRepo.update(task.id, {
-          status: "failed",
-          error: `Failed to resume after interruption: ${error.message}`,
-          completedAt: Date.now(),
-        });
+        this.failTask(task.id, `Failed to resume after interruption: ${error.message}`);
         this.logEvent(task.id, "error", {
           message: `Failed to resume interrupted task: ${error.message}`,
         });
@@ -1226,14 +1220,14 @@ export class AgentDaemon extends EventEmitter {
     if (current.status !== "interrupted" && current.status !== "planning" && current.status !== "executing") {
       return;
     }
-    this.taskRepo.update(task.id, {
-      status: "cancelled",
-      completedAt: Date.now(),
-      error: "Skipped automatic resume for background, collaborative, or system task after restart.",
-    });
-    this.logEvent(task.id, "log", {
-      message: "Skipped automatic resume for background, collaborative, or system task after restart.",
-    });
+    this.cancelTaskRecord(
+      task.id,
+      "Skipped automatic resume for background, collaborative, or system task after restart.",
+      {
+        errorMessage:
+          "Skipped automatic resume for background, collaborative, or system task after restart.",
+      },
+    );
   }
 
   /**
@@ -1374,15 +1368,9 @@ export class AgentDaemon extends EventEmitter {
       .catch((error) => {
         MemoryService.clearExecutionSideChannelPolicy();
         console.error(`[AgentDaemon] Resumed task ${effectiveTask.id} failed:`, error);
-        this.taskRepo.update(effectiveTask.id, {
-          status: "failed",
-          error: error.message,
-          completedAt: Date.now(),
-        });
-        this.clearRetryState(effectiveTask.id);
+        this.failTask(effectiveTask.id, error.message);
         this.logEvent(effectiveTask.id, "error", { error: error.message });
         this.activeTasks.delete(effectiveTask.id);
-        this.finishQueueSlot(effectiveTask.id);
         this.processOrphanedFollowUps(effectiveTask.id, executor);
       });
   }
@@ -1507,12 +1495,7 @@ export class AgentDaemon extends EventEmitter {
       .catch((error) => {
         MemoryService.clearExecutionSideChannelPolicy();
         console.error(`[AgentDaemon] Continued task ${effectiveTask.id} failed:`, error);
-        this.taskRepo.update(effectiveTask.id, {
-          status: "failed",
-          error: error.message,
-          completedAt: Date.now(),
-        });
-        this.clearRetryState(effectiveTask.id);
+        this.failTask(effectiveTask.id, error.message);
         if (
           !this.hasRecentEquivalentErrorEvent(
             effectiveTask.id,
@@ -1524,7 +1507,6 @@ export class AgentDaemon extends EventEmitter {
           this.logEvent(effectiveTask.id, "error", { error: error.message });
         }
         this.activeTasks.delete(effectiveTask.id);
-        this.finishQueueSlot(effectiveTask.id);
         this.processOrphanedFollowUps(effectiveTask.id, executor);
       });
   }
@@ -1564,16 +1546,13 @@ export class AgentDaemon extends EventEmitter {
     console.log(`[AgentDaemon] Starting queued continuation for task ${task.id}: ${task.title}`);
     const events = this.getTaskEventsForReplay(task.id);
     if (!this.isTurnLimitContinuationEligible(task, events)) {
-      this.taskRepo.update(task.id, {
-        status: "failed",
-        error:
-          "Task can no longer be continued because latest failure is not turn-limit exhaustion.",
-        completedAt: Date.now(),
-      });
+      this.failTask(
+        task.id,
+        "Task can no longer be continued because latest failure is not turn-limit exhaustion.",
+      );
       this.logEvent(task.id, "error", {
         error: "Queued continuation was rejected because latest task error is not turn-limit.",
       });
-      await this.finishQueueSlotAsync(task.id);
       return;
     }
 
@@ -1583,13 +1562,8 @@ export class AgentDaemon extends EventEmitter {
       ({ effectiveTask, executor } = this.createContinuationExecutor(task, events));
     } catch (error: Any) {
       const message = error?.message || String(error);
-      this.taskRepo.update(task.id, {
-        status: "failed",
-        error: message,
-        completedAt: Date.now(),
-      });
+      this.failTask(task.id, message);
       this.logEvent(task.id, "error", { error: message });
-      await this.finishQueueSlotAsync(task.id);
       return;
     }
 
@@ -2371,15 +2345,8 @@ export class AgentDaemon extends EventEmitter {
 
     // Check if task is queued (not yet started)
     if (this.queueManager.cancelQueuedTask(taskId)) {
-      this.taskRepo.update(taskId, { status: "cancelled", completedAt: Date.now() });
+      this.cancelTaskRecord(taskId, "Task removed from queue");
       this.pendingTaskImages.delete(taskId);
-      this.clearRetryState(taskId);
-      this.logEvent(taskId, "task_cancelled", {
-        message: "Task removed from queue",
-      });
-      if (this.teamOrchestrator) {
-        void this.teamOrchestrator.onTaskTerminal(taskId).catch(() => {});
-      }
       // Cascade cancellation to child tasks even for queued parents
       const queuedChildren = this.taskRepo.findByParent(taskId);
       for (const child of queuedChildren) {
@@ -2402,10 +2369,7 @@ export class AgentDaemon extends EventEmitter {
     }
 
     // Persist cancellation for running tasks too (important for remote clients querying task status).
-    this.taskRepo.update(taskId, { status: "cancelled", completedAt: Date.now() });
-    if (this.teamOrchestrator) {
-      void this.teamOrchestrator.onTaskTerminal(taskId).catch(() => {});
-    }
+    this.cancelTaskRecord(taskId, "Task was stopped by user");
 
     // Always notify queue manager to remove from running set
     // (handles orphaned tasks that are in runningTaskIds but have no executor)
@@ -2413,10 +2377,6 @@ export class AgentDaemon extends EventEmitter {
 
     // Always emit cancelled event so UI updates
     this.pendingTaskImages.delete(taskId);
-    this.clearRetryState(taskId);
-    this.logEvent(taskId, "task_cancelled", {
-      message: "Task was stopped by user",
-    });
 
     // Cascade cancellation to all child tasks (agent sub-tasks)
     const children = this.taskRepo.findByParent(taskId);
@@ -2456,14 +2416,8 @@ export class AgentDaemon extends EventEmitter {
       await cached.executor.wrapUp();
     } else if (this.queueManager.cancelQueuedTask(taskId)) {
       // Task was queued but hadn't started — no work to preserve, just cancel it
-      this.taskRepo.update(taskId, { status: "cancelled", completedAt: Date.now() });
+      this.cancelTaskRecord(taskId, "Task removed from queue during wrap-up request");
       this.finishQueueSlot(taskId);
-      this.logEvent(taskId, "task_cancelled", {
-        message: "Task removed from queue during wrap-up request",
-      });
-      if (this.teamOrchestrator) {
-        void this.teamOrchestrator.onTaskTerminal(taskId).catch(() => {});
-      }
     }
   }
 
@@ -2557,10 +2511,19 @@ export class AgentDaemon extends EventEmitter {
   async resumeTask(taskId: string): Promise<boolean> {
     const cached = this.activeTasks.get(taskId);
     if (cached) {
+      const currentTask = this.taskRepo.findById(taskId);
+      const currentStatus = currentTask ? deriveCanonicalTaskStatus(currentTask) : undefined;
+      if (isTerminalTaskStatus(currentStatus)) {
+        cached.lastAccessed = Date.now();
+        return false;
+      }
+
       cached.lastAccessed = Date.now();
       cached.status = "active";
-      this.updateTaskStatus(taskId, "executing");
-      this.logEvent(taskId, "task_resumed", { message: "Task resumed" });
+      if (currentStatus !== "executing") {
+        this.updateTaskStatus(taskId, "executing");
+        this.logEvent(taskId, "task_resumed", { message: "Task resumed" });
+      }
       await cached.executor.resume();
       return true;
     }
@@ -2618,6 +2581,384 @@ export class AgentDaemon extends EventEmitter {
 
   getSessionAutoApproveAll(): boolean {
     return this.sessionAutoApproveAll;
+  }
+
+  private getExecutorForTask(taskId: string): TaskExecutor | null {
+    const cached = this.activeTasks.get(taskId);
+    return cached?.executor || null;
+  }
+
+  private buildPermissionMode(taskId: string, task?: Task): PermissionMode {
+    const runtime = this.getExecutorForTask(taskId)?.runtime;
+    if (runtime?.getPermissionState().mode) {
+      return runtime.getPermissionState().mode;
+    }
+    if (task?.agentConfig?.executionMode === "plan" || task?.agentConfig?.executionMode === "analyze") {
+      return "plan";
+    }
+    return PermissionSettingsManager.loadSettings().defaultMode || "default";
+  }
+
+  private buildPermissionRules(
+    taskId: string,
+    task: Task | undefined,
+    workspace: Workspace | undefined,
+  ): PermissionRule[] {
+    const runtime = this.getExecutorForTask(taskId)?.runtime;
+    const sessionRules = runtime?.getPermissionState().sessionRules || [];
+    const workspaceDbRules = workspace
+      ? this.workspacePermissionRuleRepo.listByWorkspaceId(workspace.id)
+      : [];
+    const manifestRules = workspace?.path
+      ? loadWorkspacePermissionManifest(workspace.path).rules
+      : [];
+    const profileRules = PermissionSettingsManager.loadSettings().rules || [];
+    const guardrailSettings = GuardrailManager.loadSettings();
+    const trustedCommandRules = guardrailSettings.autoApproveTrustedCommands
+      ? [...DEFAULT_TRUSTED_COMMAND_PATTERNS, ...guardrailSettings.trustedCommandPatterns].map(
+          (pattern): PermissionRule => ({
+            source: "legacy_guardrails",
+            effect: "allow",
+            scope: {
+              kind: "command_prefix",
+              prefix: pattern.replace(/\*/g, "").trim(),
+            },
+          }),
+        )
+      : [];
+    const builtinRules: PermissionRule[] = BuiltinToolsSettingsManager.getToolAutoApprove("run_command")
+      ? [
+          {
+            source: "legacy_builtin_settings",
+            effect: "allow",
+            scope: {
+              kind: "tool",
+              toolName: "run_command",
+            },
+          },
+        ]
+      : [];
+    const autonomyRules: PermissionRule[] =
+      task?.agentConfig?.autonomousMode === true
+        ? (task.agentConfig.autoApproveTypes || []).map(
+            (approvalType): PermissionRule => ({
+              source: "session",
+              effect: "allow",
+              scope: {
+                kind: "tool",
+                toolName: this.inferToolNameFromApprovalType(approvalType),
+              },
+              metadata: {
+                legacyAutonomyType: approvalType,
+              },
+            }),
+          )
+        : [];
+
+    return [
+      ...sessionRules,
+      ...workspaceDbRules,
+      ...manifestRules,
+      ...profileRules,
+      ...trustedCommandRules,
+      ...builtinRules,
+      ...autonomyRules,
+    ];
+  }
+
+  private inferToolNameFromApprovalType(approvalType: string): string {
+    switch (approvalType) {
+      case "run_command":
+        return "run_command";
+      case "delete_file":
+      case "delete_multiple":
+        return "delete_file";
+      case "network_access":
+        return "web_fetch";
+      default:
+        return approvalType === "external_service" ? "external_service" : approvalType;
+    }
+  }
+
+  private buildPermissionTrackingKey(scope: PermissionRule["scope"]): string {
+    return permissionScopeFingerprint(scope);
+  }
+
+  private inferPermissionToolName(type: string, details: Any): string {
+    const explicitTool = typeof details?.tool === "string" ? details.tool.trim() : "";
+    if (explicitTool) return explicitTool;
+    return this.inferToolNameFromApprovalType(type);
+  }
+
+  private evaluatePermissionRequest(
+    taskId: string,
+    type: string,
+    details: Any,
+    allowPersistence = true,
+  ): {
+    evaluation: PermissionEvaluationResult;
+    promptDetails: PermissionPromptDetails;
+    scope: PermissionRule["scope"];
+    trackingKey: string;
+    runtime: TaskExecutor["runtime"] | null;
+    workspace: Workspace | undefined;
+  } {
+    const task = this.taskRepo.findById(taskId);
+    const workspace = task ? this.workspaceRepo.findById(task.workspaceId) : undefined;
+    const runtime = this.getExecutorForTask(taskId)?.runtime || null;
+    const toolName = this.inferPermissionToolName(type, details);
+    const serverName =
+      typeof details?.serverName === "string" && details.serverName.trim()
+        ? details.serverName.trim()
+        : null;
+    const mode = this.buildPermissionMode(taskId, task);
+    const bundleGrantKey =
+      type === "run_command" && details?.approvalMode === "single_bundle"
+        ? "run_command:single_bundle"
+        : "";
+    if (runtime && bundleGrantKey && runtime.hasActiveTemporaryPermissionGrant(bundleGrantKey)) {
+      const scope = PermissionEngine.inferScope({
+        workspace: workspace as Workspace,
+        toolName,
+        toolInput: details?.params ?? details,
+        mode,
+        approvalType: type as ApprovalType,
+        command: details?.command,
+        path: details?.path,
+        serverName,
+        allowPersistence,
+        rules: [],
+      });
+      return {
+        evaluation: {
+          decision: "allow",
+          reason: {
+            type: "bundle_grant",
+            summary: "Temporary bundle grant is active for this task.",
+          },
+          suggestions: [],
+          scopePreview: summarizePermissionScope(scope),
+        },
+        promptDetails: {
+          scope,
+          reason: {
+            type: "bundle_grant",
+            summary: "Temporary bundle grant is active for this task.",
+          },
+          scopePreview: summarizePermissionScope(scope),
+          suggestedActions: [],
+        },
+        scope,
+        trackingKey: this.buildPermissionTrackingKey(scope),
+        runtime,
+        workspace,
+      };
+    }
+
+    const rules = this.buildPermissionRules(taskId, task, workspace);
+    const autoApproveTypes = task?.agentConfig?.autoApproveTypes;
+    if (
+      task?.agentConfig?.autonomousMode === true &&
+      (!Array.isArray(autoApproveTypes) || autoApproveTypes.length === 0)
+    ) {
+      rules.push({
+        source: "session",
+        effect: "allow",
+        scope: {
+          kind: "tool",
+          toolName,
+        },
+        metadata: {
+          legacyAutonomy: true,
+        },
+      });
+    }
+    const evaluation = PermissionEngine.evaluate({
+      workspace:
+        workspace ||
+        ({
+          id: "unknown",
+          name: "Unknown",
+          path: details?.cwd || process.cwd(),
+          permissions: {
+            read: true,
+            write: true,
+            delete: false,
+            shell: false,
+            network: true,
+          },
+          createdAt: 0,
+        } as Workspace),
+      toolName,
+      toolInput: details?.params ?? details,
+      mode,
+      rules,
+      approvalType: type as ApprovalType,
+      command: typeof details?.command === "string" ? details.command : null,
+      path: typeof details?.path === "string" ? details.path : null,
+      serverName,
+      allowPersistence,
+      denyState: runtime
+        ? runtime.getPermissionDenialState(
+            this.buildPermissionTrackingKey(
+              PermissionEngine.inferScope({
+                workspace: workspace as Workspace,
+                toolName,
+                toolInput: details?.params ?? details,
+                mode,
+                approvalType: type as ApprovalType,
+                command: details?.command,
+                path: details?.path,
+                serverName,
+                allowPersistence,
+                rules,
+              }),
+            ),
+          )
+        : undefined,
+    });
+    const scope = PermissionEngine.inferScope({
+      workspace:
+        workspace ||
+        ({
+          id: "unknown",
+          name: "Unknown",
+          path: details?.cwd || process.cwd(),
+          permissions: {
+            read: true,
+            write: true,
+            delete: false,
+            shell: false,
+            network: true,
+          },
+          createdAt: 0,
+        } as Workspace),
+      toolName,
+      toolInput: details?.params ?? details,
+      mode,
+      approvalType: type as ApprovalType,
+      command: details?.command,
+      path: details?.path,
+      serverName,
+      allowPersistence,
+      rules,
+    });
+    const promptDetails: PermissionPromptDetails = {
+      scope,
+      reason: evaluation.reason,
+      matchedRule: evaluation.matchedRule,
+      scopePreview: evaluation.scopePreview,
+      suggestedActions: evaluation.suggestions,
+      ...(serverName ? { serverName } : {}),
+    };
+    runtime?.setLatestPermissionPromptContext(promptDetails);
+    return {
+      evaluation,
+      promptDetails,
+      scope,
+      trackingKey: this.buildPermissionTrackingKey(scope),
+      runtime,
+      workspace,
+    };
+  }
+
+  private persistApprovalActionRule(
+    action: ApprovalResponseAction,
+    approval: Any,
+  ): {
+    effect?: PermissionEffect;
+    destination?: "session" | "workspace" | "profile";
+    dbPersisted?: boolean;
+    manifestPersisted?: boolean;
+    manifestError?: string;
+  } {
+    const details =
+      approval?.details && typeof approval.details === "object" ? (approval.details as Record<string, unknown>) : {};
+    const prompt = details.permissionPrompt as PermissionPromptDetails | undefined;
+    if (!prompt?.scope) {
+      return {};
+    }
+    const effect: PermissionEffect = action.startsWith("deny_") ? "deny" : "allow";
+    const destination =
+      action.endsWith("_session")
+        ? "session"
+        : action.endsWith("_workspace")
+          ? "workspace"
+          : action.endsWith("_profile")
+            ? "profile"
+            : undefined;
+    if (!destination) {
+      return { effect };
+    }
+
+    const rule: PermissionRule = {
+      source:
+        destination === "session"
+          ? "session"
+          : destination === "workspace"
+            ? "workspace_db"
+            : "profile",
+      effect,
+      scope: prompt.scope,
+      metadata: {
+        createdByApprovalId: approval.id,
+        createdFromApprovalType: approval.type,
+      },
+    };
+
+    const task = this.taskRepo.findById(approval.taskId);
+    const workspace = task ? this.workspaceRepo.findById(task.workspaceId) : undefined;
+    const runtime = this.getExecutorForTask(approval.taskId)?.runtime || null;
+
+    if (destination === "session") {
+      runtime?.addSessionPermissionRule(rule);
+      return { effect, destination };
+    }
+    if (destination === "profile") {
+      PermissionSettingsManager.appendRule({
+        ...rule,
+        source: "profile",
+      });
+      return { effect, destination };
+    }
+    if (workspace) {
+      this.workspacePermissionRuleRepo.create({
+        workspaceId: workspace.id,
+        effect,
+        scope: prompt.scope,
+        metadata: rule.metadata,
+      });
+      const manifestResult = appendWorkspacePermissionManifestRule(workspace.path, {
+        ...rule,
+        source: "workspace_manifest",
+      });
+      return {
+        effect,
+        destination,
+        dbPersisted: true,
+        manifestPersisted: manifestResult.success,
+        ...(manifestResult.success ? {} : { manifestError: manifestResult.error }),
+      };
+    }
+    return { effect, destination };
+  }
+
+  evaluateToolPermission(taskId: string, opts: {
+    approvalType: ApprovalType;
+    toolName: string;
+    details?: Any;
+    allowPersistence?: boolean;
+  }): PermissionEvaluationResult {
+    const result = this.evaluatePermissionRequest(
+      taskId,
+      opts.approvalType,
+      {
+        ...(opts.details && typeof opts.details === "object" ? opts.details : {}),
+        tool: opts.toolName,
+      },
+      opts.allowPersistence !== false,
+    );
+    return result.evaluation;
   }
 
   listInputRequests(params?: {
@@ -2683,6 +3024,8 @@ export class AgentDaemon extends EventEmitter {
     opts?: { allowAutoApprove?: boolean },
   ): Promise<boolean> {
     const allowAutoApprove = opts?.allowAutoApprove !== false;
+    const enrichedDetails =
+      details && typeof details === "object" && !Array.isArray(details) ? { ...details } : { value: details };
 
     // Session-level auto-approve (set via "Approve all" UI button)
     if (allowAutoApprove && this.sessionAutoApproveAll) {
@@ -2690,7 +3033,7 @@ export class AgentDaemon extends EventEmitter {
         taskId,
         type: type as Any,
         description,
-        details,
+        details: enrichedDetails,
         status: "approved",
         requestedAt: Date.now(),
       });
@@ -2707,20 +3050,22 @@ export class AgentDaemon extends EventEmitter {
       return true;
     }
 
-    const task = this.taskRepo.findById(taskId);
-    const autoApproveTypes = task?.agentConfig?.autoApproveTypes;
-    const taskAllowsAutoApprove =
-      allowAutoApprove &&
-      task?.agentConfig?.autonomousMode &&
-      (!Array.isArray(autoApproveTypes) ||
-        autoApproveTypes.length === 0 ||
-        autoApproveTypes.includes(type));
-    if (taskAllowsAutoApprove) {
+    const permission = this.evaluatePermissionRequest(taskId, type, enrichedDetails, allowAutoApprove);
+    const permissionDetails = {
+      ...enrichedDetails,
+      permissionPrompt: permission.promptDetails,
+    };
+
+    if (permission.evaluation.decision === "allow") {
+      permission.runtime?.recordPermissionSuccess(permission.trackingKey);
+      if (type === "run_command" && enrichedDetails.approvalMode === "single_bundle") {
+        permission.runtime?.addTemporaryPermissionGrant("run_command:single_bundle");
+      }
       const approval = this.approvalRepo.create({
         taskId,
         type: type as Any,
         description,
-        details,
+        details: permissionDetails,
         status: "approved",
         requestedAt: Date.now(),
       });
@@ -2732,50 +3077,37 @@ export class AgentDaemon extends EventEmitter {
       this.logEvent(taskId, "approval_granted", {
         approvalId: approval.id,
         autoApproved: true,
-        reason: "task_autonomous_policy",
+        reason: permission.evaluation.reason.type,
+        permissionReason: permission.evaluation.reason,
       });
       return true;
     }
 
-    // Allowlist fallback for gateway tasks: when run_command and task is gateway-originated,
-    // if command matches trusted patterns, auto-approve (avoids blocking when prompt cannot be shown)
-    if (
-      allowAutoApprove &&
-      type === "run_command" &&
-      typeof task?.agentConfig?.originChannel === "string"
-    ) {
-      const command = typeof details?.command === "string" ? details.command : "";
-      if (command) {
-        const trustCheck = GuardrailManager.isCommandTrusted(command);
-        if (trustCheck.trusted) {
-          const approval = this.approvalRepo.create({
-            taskId,
-            type: type as Any,
-            description,
-            details,
-            status: "approved",
-            requestedAt: Date.now(),
-          });
-          this.approvalRepo.update(approval.id, "approved");
-          this.logEvent(taskId, "approval_requested", {
-            approval,
-            autoApproved: true,
-          });
-          this.logEvent(taskId, "approval_granted", {
-            approvalId: approval.id,
-            autoApproved: true,
-            reason: "gateway_allowlist_fallback",
-          });
-          return true;
-        }
-      }
+    if (permission.evaluation.decision === "deny") {
+      permission.runtime?.recordPermissionDenial(permission.trackingKey);
+      const approval = this.approvalRepo.create({
+        taskId,
+        type: type as Any,
+        description,
+        details: permissionDetails,
+        status: "denied",
+        requestedAt: Date.now(),
+      });
+      this.approvalRepo.update(approval.id, "denied");
+      this.logEvent(taskId, "approval_denied", {
+        approvalId: approval.id,
+        autoResolved: true,
+        reason: permission.evaluation.reason.type,
+        permissionReason: permission.evaluation.reason,
+      });
+      return false;
     }
 
     const approval = this.approvalRepo.create({
       taskId,
       type: type as Any,
       description,
-      details,
+      details: permissionDetails,
       status: "pending",
       requestedAt: Date.now(),
     });
@@ -2817,6 +3149,7 @@ export class AgentDaemon extends EventEmitter {
 
       this.pendingApprovals.set(approval.id, {
         taskId,
+        approval,
         resolve,
         reject,
         resolved: false,
@@ -2833,12 +3166,13 @@ export class AgentDaemon extends EventEmitter {
   async respondToApproval(
     approvalId: string,
     approved: boolean,
+    action?: ApprovalResponseAction,
   ): Promise<"handled" | "duplicate" | "not_found" | "in_progress"> {
     // Generate idempotency key for this approval response
     const idempotencyKey = IdempotencyManager.generateKey(
       "approval:respond",
       approvalId,
-      approved ? "approve" : "deny",
+      action || (approved ? "approve" : "deny"),
     );
 
     // Check if this exact response was already processed
@@ -2857,6 +3191,39 @@ export class AgentDaemon extends EventEmitter {
     try {
       const pending = this.pendingApprovals.get(approvalId);
       if (pending && !pending.resolved) {
+        const normalizedAction: ApprovalResponseAction =
+          action ||
+          (approved ? "allow_once" : "deny_once");
+        const persistenceResult = this.persistApprovalActionRule(normalizedAction, pending.approval);
+        const didApprove =
+          normalizedAction === "allow_once" ||
+          normalizedAction === "allow_session" ||
+          normalizedAction === "allow_workspace" ||
+          normalizedAction === "allow_profile";
+        const runtime = this.getExecutorForTask(pending.taskId)?.runtime || null;
+        const prompt =
+          pending.approval?.details && typeof pending.approval.details === "object"
+            ? ((pending.approval.details as Record<string, unknown>)
+                .permissionPrompt as PermissionPromptDetails | undefined)
+            : undefined;
+        const trackingKey = prompt?.scope
+          ? this.buildPermissionTrackingKey(prompt.scope)
+          : "";
+        if (runtime && trackingKey) {
+          if (didApprove) {
+            runtime.recordPermissionSuccess(trackingKey);
+          } else {
+            runtime.recordPermissionDenial(trackingKey);
+          }
+        }
+        if (
+          didApprove &&
+          pending.approval?.type === "run_command" &&
+          pending.approval?.details?.approvalMode === "single_bundle"
+        ) {
+          runtime?.addTemporaryPermissionGrant("run_command:single_bundle");
+        }
+
         // Mark as resolved first to prevent race condition with timeout
         pending.resolved = true;
 
@@ -2864,19 +3231,23 @@ export class AgentDaemon extends EventEmitter {
         clearTimeout(pending.timeoutHandle);
 
         this.pendingApprovals.delete(approvalId);
-        this.approvalRepo.update(approvalId, approved ? "approved" : "denied");
+        this.approvalRepo.update(approvalId, didApprove ? "approved" : "denied");
         this.updateTask(pending.taskId, {
-          status: approved ? "executing" : "paused",
-          terminalStatus: approved ? undefined : "needs_user_action",
+          status: didApprove ? "executing" : "paused",
+          terminalStatus: didApprove ? undefined : "needs_user_action",
           failureClass: undefined,
-          error: approved ? null : "User denied approval",
+          error: didApprove ? null : "User denied approval",
         });
 
         // Emit event so UI knows the approval has been handled
-        const eventType = approved ? "approval_granted" : "approval_denied";
-        this.logEvent(pending.taskId, eventType, { approvalId });
+        const eventType = didApprove ? "approval_granted" : "approval_denied";
+        this.logEvent(pending.taskId, eventType, {
+          approvalId,
+          action: normalizedAction,
+          persistence: persistenceResult,
+        });
 
-        if (approved) {
+        if (didApprove) {
           pending.resolve(true);
         } else {
           pending.reject(new Error("User denied approval"));
@@ -5238,6 +5609,176 @@ export class AgentDaemon extends EventEmitter {
     }
   }
 
+  failTask(
+    taskId: string,
+    errorMessage: string,
+    metadata?: Partial<
+      Pick<
+        Task,
+        | "completedAt"
+        | "resultSummary"
+        | "terminalStatus"
+        | "failureClass"
+        | "budgetUsage"
+        | "continuationCount"
+        | "continuationWindow"
+        | "lifetimeTurnsUsed"
+        | "lastProgressScore"
+        | "autoContinueBlockReason"
+        | "compactionCount"
+        | "lastCompactionAt"
+        | "lastCompactionTokensBefore"
+        | "lastCompactionTokensAfter"
+        | "noProgressStreak"
+        | "lastLoopFingerprint"
+        | "bestKnownOutcome"
+        | "semanticSummary"
+        | "verificationVerdict"
+        | "verificationReport"
+      >
+    >,
+  ): void {
+    const completedAt = metadata?.completedAt ?? Date.now();
+    const terminalStatus = metadata?.terminalStatus ?? "failed";
+    const updates: Partial<Task> = {
+      status: "failed",
+      error: errorMessage,
+      completedAt,
+      terminalStatus,
+      ...(typeof metadata?.resultSummary === "string" && metadata.resultSummary.trim().length > 0
+        ? { resultSummary: metadata.resultSummary.trim() }
+        : {}),
+      ...(metadata?.failureClass !== undefined ? { failureClass: metadata.failureClass } : {}),
+      ...(metadata?.budgetUsage !== undefined ? { budgetUsage: metadata.budgetUsage } : {}),
+      ...(metadata?.continuationCount !== undefined
+        ? { continuationCount: metadata.continuationCount }
+        : {}),
+      ...(metadata?.continuationWindow !== undefined
+        ? { continuationWindow: metadata.continuationWindow }
+        : {}),
+      ...(metadata?.lifetimeTurnsUsed !== undefined
+        ? { lifetimeTurnsUsed: metadata.lifetimeTurnsUsed }
+        : {}),
+      ...(metadata?.lastProgressScore !== undefined
+        ? { lastProgressScore: metadata.lastProgressScore }
+        : {}),
+      ...(metadata?.autoContinueBlockReason !== undefined
+        ? { autoContinueBlockReason: metadata.autoContinueBlockReason }
+        : {}),
+      ...(metadata?.compactionCount !== undefined ? { compactionCount: metadata.compactionCount } : {}),
+      ...(metadata?.lastCompactionAt !== undefined
+        ? { lastCompactionAt: metadata.lastCompactionAt }
+        : {}),
+      ...(metadata?.lastCompactionTokensBefore !== undefined
+        ? { lastCompactionTokensBefore: metadata.lastCompactionTokensBefore }
+        : {}),
+      ...(metadata?.lastCompactionTokensAfter !== undefined
+        ? { lastCompactionTokensAfter: metadata.lastCompactionTokensAfter }
+        : {}),
+      ...(metadata?.noProgressStreak !== undefined ? { noProgressStreak: metadata.noProgressStreak } : {}),
+      ...(metadata?.lastLoopFingerprint !== undefined
+        ? { lastLoopFingerprint: metadata.lastLoopFingerprint }
+        : {}),
+      ...(metadata?.bestKnownOutcome !== undefined ? { bestKnownOutcome: metadata.bestKnownOutcome } : {}),
+      ...(typeof metadata?.semanticSummary === "string" && metadata.semanticSummary.trim().length > 0
+        ? { semanticSummary: metadata.semanticSummary.trim() }
+        : {}),
+      ...(metadata?.verificationVerdict !== undefined
+        ? { verificationVerdict: metadata.verificationVerdict }
+        : {}),
+      ...(typeof metadata?.verificationReport === "string" &&
+      metadata.verificationReport.trim().length > 0
+        ? { verificationReport: metadata.verificationReport.trim() }
+        : {}),
+    };
+
+    this.taskRepo.update(taskId, updates);
+    this.clearRetryState(taskId);
+
+    const cached = this.activeTasks.get(taskId);
+    if (cached) {
+      cached.status = "completed";
+      cached.lastAccessed = Date.now();
+    }
+
+    this.logEvent(taskId, "task_status", {
+      status: "failed",
+      message: errorMessage,
+      terminalStatus,
+      ...(typeof metadata?.resultSummary === "string" && metadata.resultSummary.trim().length > 0
+        ? { resultSummary: metadata.resultSummary.trim() }
+        : {}),
+      ...(metadata?.failureClass ? { failureClass: metadata.failureClass } : {}),
+      ...(metadata?.bestKnownOutcome !== undefined
+        ? { bestKnownOutcome: metadata.bestKnownOutcome }
+        : {}),
+      ...(metadata?.budgetUsage !== undefined ? { budgetUsage: metadata.budgetUsage } : {}),
+      ...(typeof metadata?.semanticSummary === "string" && metadata.semanticSummary.trim().length > 0
+        ? { semanticSummary: metadata.semanticSummary.trim() }
+        : {}),
+      ...(metadata?.verificationVerdict !== undefined
+        ? { verificationVerdict: metadata.verificationVerdict }
+        : {}),
+      ...(typeof metadata?.verificationReport === "string" &&
+      metadata.verificationReport.trim().length > 0
+        ? { verificationReport: metadata.verificationReport.trim() }
+        : {}),
+    });
+
+    if (this.teamOrchestrator) {
+      void this.teamOrchestrator.onTaskTerminal(taskId).catch(() => {});
+    }
+    this.clearTimelineTaskState(taskId);
+    this.finishQueueSlot(taskId);
+  }
+
+  cancelTaskRecord(
+    taskId: string,
+    message: string,
+    metadata?: {
+      completedAt?: number;
+      errorMessage?: string | null;
+    },
+  ): void {
+    const existing = this.taskRepo.findById(taskId);
+    const completedAt = metadata?.completedAt ?? Date.now();
+    const errorMessage =
+      metadata && Object.prototype.hasOwnProperty.call(metadata, "errorMessage")
+        ? metadata.errorMessage
+        : null;
+
+    this.taskRepo.update(taskId, {
+      status: "cancelled",
+      completedAt,
+      error: errorMessage,
+      terminalStatus: undefined,
+      failureClass: undefined,
+    });
+    this.clearRetryState(taskId);
+    this.clearTimelineTaskState(taskId);
+
+    const cached = this.activeTasks.get(taskId);
+    if (cached) {
+      cached.status = "completed";
+      cached.lastAccessed = Date.now();
+    }
+
+    this.logEvent(taskId, "task_status", {
+      status: "cancelled",
+      message,
+      ...(typeof errorMessage === "string" && errorMessage.trim().length > 0
+        ? { error: errorMessage }
+        : {}),
+    });
+    this.logEvent(taskId, "task_cancelled", {
+      message,
+    });
+
+    if (this.teamOrchestrator && existing?.status !== "cancelled") {
+      void this.teamOrchestrator.onTaskTerminal(taskId).catch(() => {});
+    }
+  }
+
   private clearRetryState(taskId: string): void {
     const pending = this.pendingRetries.get(taskId);
     if (pending) {
@@ -6212,20 +6753,11 @@ export class AgentDaemon extends EventEmitter {
         gate: "completion_failed_step_gate",
         legacyType: "error",
       });
-      this.taskRepo.update(taskId, {
-        status: "failed",
-        error: message,
-        completedAt: Date.now(),
+      this.failTask(taskId, message, {
         terminalStatus: terminalFailureStatus,
         failureClass: terminalFailureClass,
         ...(bestKnownOutcome ? { bestKnownOutcome } : {}),
       });
-      this.clearRetryState(taskId);
-      if (this.teamOrchestrator) {
-        void this.teamOrchestrator.onTaskTerminal(taskId).catch(() => {});
-      }
-      this.clearTimelineTaskState(taskId);
-      this.finishQueueSlot(taskId);
       return;
     }
     if (nonBlockingFailedStepIds.size > 0) {
@@ -6787,6 +7319,7 @@ export class AgentDaemon extends EventEmitter {
    */
   async handleTaskTimeout(taskId: string): Promise<void> {
     console.log(`[AgentDaemon] Task ${taskId} has timed out, cancelling...`);
+    const timeoutMessage = "Task timed out - exceeded maximum allowed execution time";
 
     const cached = this.activeTasks.get(taskId);
     if (cached) {
@@ -6799,13 +7332,8 @@ export class AgentDaemon extends EventEmitter {
       }
     }
 
-    // Update task status to failed with timeout message
-    this.taskRepo.update(taskId, {
-      status: "failed",
-      error: "Task timed out - exceeded maximum allowed execution time",
-    });
+    this.failTask(taskId, timeoutMessage);
     this.pendingTaskImages.delete(taskId);
-    this.clearRetryState(taskId);
 
     // Emit timeout event
     this.logEvent(taskId, "step_timeout", {
