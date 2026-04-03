@@ -78,4 +78,54 @@ describe("ParallelGroupFeed", () => {
     expect(markup).toContain("Fetched 1 page");
     expect(markup).not.toContain("Fetching a web page");
   });
+
+  it("renders completed groups expanded when the parent block is active", () => {
+    const markup = render(
+      React.createElement(ParallelGroupFeed, {
+        group: makeGroup({
+          status: "completed",
+          lanes: [
+            {
+              laneKey: "use-1",
+              toolName: "web_fetch",
+              title: "Fetching a web page",
+              status: "completed",
+              startedAt: 1001,
+            },
+          ],
+        }),
+        timeLabel: "12:03",
+        formatTime: () => "12:03",
+        defaultExpanded: true,
+      }),
+    );
+
+    expect(markup).toContain("Fetched 1 page");
+    expect(markup).toContain("Fetching a web page");
+  });
+
+  it("prefers semantic group labels when available", () => {
+    const markup = render(
+      React.createElement(ParallelGroupFeed, {
+        group: makeGroup({
+          label: "Read Claude Code docs",
+          status: "completed",
+          lanes: [
+            {
+              laneKey: "use-1",
+              toolName: "web_fetch",
+              title: "Fetched ccunpacked.dev",
+              status: "completed",
+              startedAt: 1001,
+            },
+          ],
+        }),
+        timeLabel: "12:03",
+        formatTime: () => "12:03",
+      }),
+    );
+
+    expect(markup).toContain("Read Claude Code docs");
+    expect(markup).not.toContain("Fetched 1 page");
+  });
 });
