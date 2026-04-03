@@ -42,10 +42,13 @@ import type {
   DocumentEditRequest,
   DocumentEditorSession,
   DocumentVersionEntry,
+  ApprovalResponse,
   InputRequest,
   InputRequestResponse,
   Workspace,
   GuardrailSettings,
+  PersistedPermissionRule,
+  PermissionSettingsData,
   CouncilConfig,
   CouncilMemo,
   CouncilRun,
@@ -533,6 +536,11 @@ const IPC_CHANNELS = {
   GUARDRAIL_GET_SETTINGS: "guardrail:getSettings",
   GUARDRAIL_SAVE_SETTINGS: "guardrail:saveSettings",
   GUARDRAIL_GET_DEFAULTS: "guardrail:getDefaults",
+  // Permissions
+  PERMISSIONS_GET_SETTINGS: "permissions:getSettings",
+  PERMISSIONS_SAVE_SETTINGS: "permissions:saveSettings",
+  PERMISSIONS_GET_WORKSPACE_RULES: "permissions:getWorkspaceRules",
+  PERMISSIONS_DELETE_WORKSPACE_RULE: "permissions:deleteWorkspaceRule",
   // Appearance
   APPEARANCE_GET_SETTINGS: "appearance:getSettings",
   APPEARANCE_SAVE_SETTINGS: "appearance:saveSettings",
@@ -2812,7 +2820,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_UPDATE_PERMISSIONS, id, permissions),
 
   // Approval APIs
-  respondToApproval: (data: Any) => ipcRenderer.invoke(IPC_CHANNELS.APPROVAL_RESPOND, data),
+  respondToApproval: (data: ApprovalResponse) => ipcRenderer.invoke(IPC_CHANNELS.APPROVAL_RESPOND, data),
   setSessionAutoApprove: (enabled: boolean) =>
     ipcRenderer.invoke(IPC_CHANNELS.APPROVAL_SESSION_AUTO_APPROVE_SET, enabled),
   getSessionAutoApprove: () => ipcRenderer.invoke(IPC_CHANNELS.APPROVAL_SESSION_AUTO_APPROVE_GET),
@@ -3081,6 +3089,15 @@ contextBridge.exposeInMainWorld("electronAPI", {
   saveGuardrailSettings: (settings: Any) =>
     ipcRenderer.invoke(IPC_CHANNELS.GUARDRAIL_SAVE_SETTINGS, settings),
   getGuardrailDefaults: () => ipcRenderer.invoke(IPC_CHANNELS.GUARDRAIL_GET_DEFAULTS),
+
+  // Permission Settings APIs
+  getPermissionSettings: () => ipcRenderer.invoke(IPC_CHANNELS.PERMISSIONS_GET_SETTINGS),
+  savePermissionSettings: (settings: Any) =>
+    ipcRenderer.invoke(IPC_CHANNELS.PERMISSIONS_SAVE_SETTINGS, settings),
+  getWorkspacePermissionRules: (workspaceId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.PERMISSIONS_GET_WORKSPACE_RULES, workspaceId),
+  deleteWorkspacePermissionRule: (payload: { workspaceId: string; ruleId: string }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.PERMISSIONS_DELETE_WORKSPACE_RULE, payload),
 
   // Appearance Settings APIs
   getAppearanceSettings: () => ipcRenderer.invoke(IPC_CHANNELS.APPEARANCE_GET_SETTINGS),
@@ -4659,7 +4676,7 @@ export interface ElectronAPI {
     id: string,
     permissions: { shell?: boolean; network?: boolean },
   ) => Promise<Any>;
-  respondToApproval: (data: Any) => Promise<void>;
+  respondToApproval: (data: ApprovalResponse) => Promise<void>;
   setSessionAutoApprove: (enabled: boolean) => Promise<void>;
   getSessionAutoApprove: () => Promise<boolean>;
   listInputRequests: (query?: {
@@ -5100,6 +5117,14 @@ export interface ElectronAPI {
   getGuardrailSettings: () => Promise<GuardrailSettings>;
   saveGuardrailSettings: (settings: Any) => Promise<{ success: boolean }>;
   getGuardrailDefaults: () => Promise<GuardrailSettings>;
+  // Permission Settings
+  getPermissionSettings: () => Promise<PermissionSettingsData>;
+  savePermissionSettings: (settings: PermissionSettingsData) => Promise<{ success: boolean }>;
+  getWorkspacePermissionRules: (workspaceId: string) => Promise<PersistedPermissionRule[]>;
+  deleteWorkspacePermissionRule: (payload: {
+    workspaceId: string;
+    ruleId: string;
+  }) => Promise<{ success: boolean; removed: boolean; dbRemoved?: boolean; manifestRemoved?: boolean; manifestPath?: string; manifestError?: string }>;
   // Appearance Settings
   getAppearanceSettings: () => Promise<{
     themeMode: "light" | "dark" | "system";
