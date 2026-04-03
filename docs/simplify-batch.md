@@ -79,9 +79,11 @@ Parser constraints:
 For recognized `/simplify` and `/batch` commands, executor behavior is deterministic:
 
 - Calls `use_skill` directly with `skill_id` and parsed parameters.
-- Replaces prompt with the expanded skill prompt before normal execution continues.
+- Applies the returned skill as additive context for the existing task.
+- Merges any scoped runtime directives from the skill into executor state.
+- Preserves the canonical task prompt for planning, execution, safety checks, and UI display.
 
-This avoids best-effort routing ambiguity for these two commands.
+This avoids best-effort routing ambiguity for these two commands without letting the slash skill redefine the task.
 
 ## `/batch` External Effects Policy
 
