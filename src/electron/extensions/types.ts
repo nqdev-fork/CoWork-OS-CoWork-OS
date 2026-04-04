@@ -9,6 +9,7 @@
  */
 
 import { ChannelAdapter, ChannelConfig } from "../gateway/channels/types";
+import type { CapabilitySecurityReport } from "../../shared/types";
 
 /**
  * Plugin manifest schema (cowork.plugin.json)
@@ -437,6 +438,9 @@ export interface LoadedPlugin {
 
   /** Loaded timestamp */
   loadedAt: Date;
+
+  /** Security report for imported or unmanaged-local packs */
+  securityReport?: CapabilitySecurityReport;
 }
 
 /**
@@ -467,6 +471,9 @@ export interface PluginDiscoveryResult {
 
   /** Plugin manifest */
   manifest: PluginManifest;
+
+  /** Optional security report for imported or unmanaged-local packs */
+  securityReport?: CapabilitySecurityReport | null;
 }
 
 /**
