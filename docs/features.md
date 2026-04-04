@@ -32,7 +32,11 @@
 - **Ideas Panel**: Curated launch panel accessible from the sidebar above Sessions. Pre-written prompts organized by category let you start common workflows in one click. See [Ideas Panel: Supported Capabilities](ideas-capabilities.md) for the full list of tools each prompt uses and their graceful fallbacks.
 - **Task-Based Workflow**: Multi-step execution with plan-execute-observe loops
 - **Runtime Orchestration**: SessionRuntime owns task-session state, session checklists, resume snapshots, recovery state, and task projection while the turn kernel handles each individual step, follow-up, or text turn; metadata-driven tool scheduling, graph-backed delegation, typed worker roles, verifier verdicts, semantic tool-batch summaries, and terminal-state reconciliation keep delegated work coherent across tasks, follow-ups, teams, and ACP runs.
+- **Prompt-Aware Tooling**: visible tools receive concise prompt-local guidance after policy filtering, and planning plus execution share the same render source for compact tool text and provider-facing tool descriptions.
+- **Sectioned Prompt Stack**: execution and follow-up prompts are built from named session- and turn-scoped sections with explicit budgets, memoization of stable sections, provider-aware prompt caching, and truncation/drop reporting when token pressure rises.
+- **Provider-Aware Prompt Caching**: CoWork keeps stable system blocks cacheable and dynamic turn context uncached, prefers Anthropic automatic caching where supported, uses explicit Claude breakpoints on OpenRouter, and derives stable OpenAI-family cache keys for GPT routes.
 - **Session Checklist Primitive**: execution-style tasks can create a session-local ordered checklist with `task_list_create`, maintain it with `task_list_update`, inspect it with `task_list_list`, and surface it read-only in the task UI. The runtime can issue a non-blocking verification nudge when implementation items are done but no verification item exists yet.
+- **Structured Delegation Briefs**: `spawn_agent` and `orchestrate_agents` resolve a worker role, package parent-step context plus evidence requirements into a structured brief, and apply the corresponding completion/tool contract to the child.
 - **Permission Engine**: layered tool approvals combine explicit modes, per-tool/path/command-prefix/MCP-server rules, session grants, workspace-local rules, profile rules, and hard guardrails; the active workspace can browse and remove its own rules in Settings.
 - **Live Terminal**: Shell commands run in a real-time terminal view — see output as it happens, stop execution, or provide interactive input (e.g. `y`/`n` prompts)
 - **Dynamic Re-Planning**: Agent can revise its plan mid-execution
@@ -132,7 +136,7 @@ See [Remote Access](remote-access.md) for connection patterns and [Mission Contr
 Automation features are now grouped together in `Settings > Automations`:
 
 - **Task Queue**: concurrency, queueing, and background execution policy
-- **Self-Improve**: bounded autonomous improvement campaigns for git-backed workspaces
+- **Subconscious**: reflective automation with target-scoped evidence, hypotheses, critique, winner selection, backlog, and dispatch
 - **Scheduled Tasks**: recurring time-based task execution
 - **Webhooks**: inbound automation entry points
 - **Event Triggers**: condition-based actions triggered by channel, webhook, or runtime events
@@ -162,18 +166,19 @@ This workflow is designed for "human-directed, agent-operated" execution:
 
 See [Zero-Human Company Operations](zero-human-company.md) for architecture, setup recipe, monitoring flow, and example operating models.
 
-### Self-Improve
+### Subconscious
 
-The self-improvement loop is now intentionally narrower and more operational:
+`Subconscious` is the primary reflective automation layer in CoWork OS:
 
-- **Owner-only eligibility**: currently restricted to unpackaged runs of the canonical CoWork OS repository with maintainer-signed owner enrollment
-- **Single-lane bounded campaigns by default**: new settings default to one variant, one concurrent executor, and one queued campaign
-- **Explicit campaign stages**: `queued`, `preflight`, `reproducing`, `implementing`, `verifying`, and `completed`
-- **Promotion gate hardening**: campaigns are promoted only when the winning run shows reproduction, verification, and PR-readiness evidence
-- **Cooldowns and parking**: repeated provider failures or deterministic failures are cooled down and eventually parked instead of retried forever
-- **Provider health visibility**: the settings panel surfaces recent provider-related incidents and blocked/degraded states
+- **Global coordinator, namespaced targets**: one brain ranks work globally while each workflow target keeps its own history, winner, backlog, and dispatch stream
+- **Stable target identities**: supports `global`, `workspace`, `agent_role`, `mailbox_thread`, `scheduled_task`, `event_trigger`, `briefing`, and `code_workspace`
+- **Fixed reflective pipeline**: collect evidence, generate 3-5 hypotheses, critique them, synthesize one winner, write backlog, and dispatch immediately when an executor exists
+- **Durable artifacts plus SQLite indexing**: files are written under `.cowork/subconscious/` and indexed for UI/search/filtering
+- **Automatic downstream execution**: dispatch kinds include `task`, `suggestion`, `scheduled_task`, `briefing`, `event_trigger_update`, `mailbox_automation`, and `code_change_task`
+- **Recommendation-only success path**: if no executor mapping exists, the run still completes with a winner, rejected paths, and next-step backlog
+- **No maintainer-only enrollment gate**: safety remains enforced by the existing executor approval and capability policies
 
-See [Self-Improving Agent](self-improving-agent.md) for the architecture and operational guidance.
+See [Subconscious Reflective Loop](subconscious-loop.md) for the architecture and operational guidance.
 
 ### Reliability Flywheel
 
@@ -284,6 +289,9 @@ Role-specific bundles that group skills, agent roles, connectors, and slash comm
 - **Update detection**: Background check against the remote registry with orange dot indicators on packs with newer versions
 - **"Try asking" in chat**: Empty chat state shows randomized prompt suggestions from enabled packs for one-click task creation
 - **Plugin Store**: In-app marketplace for discovering, installing, and creating packs (from Git repos, URLs, or scaffold)
+- **Managed import scanning**: Git and URL pack installs are staged and scanned before activation, with install results surfaced as installed, installed with warning, or quarantined
+- **Quarantine & report UX**: blocked imported packs move into a dedicated quarantine area with stored reports, retry scan, and removal actions in the Customize panel
+- **Warning-only local detection**: unmanaged local pack folders remain discoverable in v1, but security findings can surface as warning badges and report details
 - **Remote Pack Registry**: Community-contributed packs catalog with search and category filtering
 - **Extensible**: Create custom packs with JSON manifests in `~/.cowork/extensions/`
 - **Active Context sidebar**: Always-visible right-panel section showing connected MCP connectors with branded Lucide icons (44 connectors supported) and enabled skills, with scrollable sub-sections and 30-second auto-refresh
@@ -302,8 +310,11 @@ CoWork OS supports external skill installation through the desktop GUI, not just
 - **ClawHub tab**: Search ClawHub directly from the app, view live skill stats, and install from result cards
 - **Popular ClawHub list**: Opening the ClawHub tab with no query shows the top downloaded public ClawHub skills
 - **External import field**: Install skills from Git repositories, ClawHub page URLs, raw JSON manifests, or raw `SKILL.md` URLs
-- **Managed install path**: Imported skills are copied into CoWork’s managed skills directory and treated as managed skills afterward
+- **Managed install path**: Imported skills are staged, scanned, and then copied into CoWork’s managed skills directory only when activation is allowed
+- **Security outcomes**: installs now return installed, installed with warning, or quarantined, with summary text surfaced directly in the Skill Store UI
+- **Quarantine & report UX**: blocked imported skills move to a dedicated quarantine area with stored reports, retry scan, and removal actions
 - **Optional external directories**: Add one or more absolute read-only skill folders in Settings so shared team skills can load without being copied into CoWork
+- **Warning-only local discovery**: optional external skill directories are not auto-quarantined in v1, but CoWork can still surface unscanned or warning-state badges and reports for those bundles
 - **Clear precedence**: Workspace skills override managed installs, managed installs override external directories, and external directories override bundled defaults
 - **Cross-ecosystem support**: Other external skill stores are supported when they expose Git repos, raw manifests, or raw `SKILL.md` bundle entry points
 - **Shared runtime contract**: Once loaded, external skills follow the same additive execution model as bundled skills. They can add context and scoped directives, but they cannot replace the canonical task prompt.
@@ -407,9 +418,9 @@ Most AI assistants start with zero context about you. Every new tool means re-ex
 
 ---
 
-## Self-Improving Agent
+## Durable Learning Stack
 
-Multi-layered learning system that improves agent behaviour across sessions. No external dependencies — all learning runs locally.
+CoWork OS still keeps a multi-layered learning stack under the reflective loop. These services improve recall, personalization, and future evidence quality across sessions.
 
 | Layer | Service | What It Learns |
 |-------|---------|----------------|
@@ -426,7 +437,7 @@ Multi-layered learning system that improves agent behaviour across sessions. No 
 - **Mid-task correction detection**: regex-based detection of user corrections during execution
 - **`/learn` skill**: manually teach the agent insights, corrections, preferences, or rules
 
-See [Self-Improving Agent](self-improving-agent.md) for the full architecture guide.
+These layers feed the `Subconscious` loop and the normal task runtime. See [Subconscious Reflective Loop](subconscious-loop.md) for the full architecture guide.
 
 ### Evolving Agent Intelligence
 
@@ -699,7 +710,7 @@ The workspace dropdown at the top lets you filter insights to a single workspace
 
 | Section | Description |
 |---------|-------------|
-| **Cost & Tokens** | Total cost, input/output token counts, and cost breakdown by model |
+| **Cost & Tokens** | Total cost, input/output token counts, cached-token totals, cache-read rate when available, and cost breakdown by model |
 | **Agent Efficiency (AWU)** | Agentic Work Unit metrics — see below |
 | **Activity by Day** | Tasks per day-of-week with peak day indicator |
 | **Activity by Hour** | Hourly task histogram with peak hour indicator |
