@@ -5,6 +5,7 @@ import type {
   ApprovalType,
   PermissionPromptDetails,
 } from "../../shared/types";
+import { buildApprovalCommandPreview } from "../../shared/approval-command-preview";
 
 type ScopeKey = "once" | "session" | "workspace" | "profile";
 
@@ -111,6 +112,7 @@ export function GenericApprovalDialog({
       ? (approval.details as Record<string, unknown>)
       : {};
   const command = typeof details.command === "string" ? details.command : null;
+  const commandPreview = command ? buildApprovalCommandPreview(command) : null;
   const cwd = typeof details.cwd === "string" ? details.cwd : null;
   const timeoutMs = typeof details.timeout === "number" && Number.isFinite(details.timeout) ? details.timeout : null;
   const bundleScope = typeof details.bundleScope === "string" ? details.bundleScope : null;
@@ -129,9 +131,18 @@ export function GenericApprovalDialog({
     rows.push({
       label: "Command",
       value: (
-        <div className="session-approval-code-scroll" role="region" aria-label="Command to approve">
-          <code className="session-approval-code session-approval-code--multiline">{command}</code>
-        </div>
+        <>
+          <div className="session-approval-code-scroll" role="region" aria-label="Command to approve">
+            <code className="session-approval-code session-approval-code--multiline">
+              {commandPreview?.text ?? command}
+            </code>
+          </div>
+          {commandPreview?.truncated ? (
+            <p className="session-approval-preview-note">
+              Preview condensed for readability. Approval still applies to the full command.
+            </p>
+          ) : null}
+        </>
       ),
     });
   }
@@ -191,7 +202,9 @@ export function GenericApprovalDialog({
 
   return (
     <div className="session-approval-overlay" role="dialog" aria-modal="true">
-      <div className="session-approval-card">
+      <div
+        className={commandPreview ? "session-approval-card session-approval-card--command" : "session-approval-card"}
+      >
         <div className="session-approval-icon-wrap" aria-hidden="true">
           <span className="session-approval-icon">{iconForType(approval.type)}</span>
         </div>
