@@ -22,7 +22,7 @@
 <p align="center">
   <a href="docs/getting-started.md">Getting Started</a> &middot;
   <a href="docs/showcase.md">Use Cases</a> &middot;
-  <a href="docs/release-notes-0.5.22.md">Release Notes 0.5.22</a> &middot;
+  <a href="docs/release-notes-0.5.23.md">Release Notes 0.5.23</a> &middot;
   <a href="docs/integration-skill-bootstrap-lifecycle.md">Platform Updates</a> &middot;
   <a href="docs/">Documentation</a> &middot;
   <a href="CHANGELOG.md">Changelog</a> &middot;
@@ -61,7 +61,7 @@
 - **Usage Insights** — Dashboard showing task stats, cost/token tracking by model, activity heatmaps, top skills, per-pack analytics, per-persona success/retry metrics, and task-result satisfaction signals.
 - **ChatGPT History Import** — Import your full ChatGPT conversation history. CoWork OS instantly knows your preferences, past projects, and context — no cold start. All data stays encrypted on your machine and never leaves it.
 - **Computer use (macOS)** — Native desktop control via `computer_*` tools with a single active session, safety overlay, **Esc** to abort, per-app session consent (not per click), and a Settings onboarding panel for Accessibility + Screen Recording. Prefer browser and shell tools for web and repo work; computer use is routed as a last-resort lane in policy and planning guidance. **Documentation:** [docs/computer-use.md](docs/computer-use.md).
-- **Security-first** — Approval workflows, sandboxed execution, configurable guardrails, encrypted storage, and 4,500+ automated tests.
+- **Security-first** — Approval workflows, sandboxed execution, configurable guardrails, encrypted storage, and a verified suite of 4,932 automated tests across 390 test files.
 - **Structured guidance** — In plan-mode flows, the agent can pause with short multiple-choice prompts instead of ambiguous free-text follow-ups.
 - **Runtime resilience** — Adaptive turn budgets, context-overflow recovery, and safe path normalization keep long-running tasks moving without silent file drift.
 - **Local-first & BYOK** — Your data and API keys stay on your machine. No telemetry. No middleman.
@@ -79,7 +79,7 @@ See [Features](docs/features.md), [Heartbeat v3](docs/heartbeat-v3.md), [Provide
 
 ### Latest Release
 
-**`0.5.22`** packages the session runtime ownership split, layered permission engine, workspace rule manager, session checklist primitive, metadata-driven tool scheduling, graph-backed delegation, typed worker roles, and refreshed completion/UI surfaces into a publishable release. Start with [Release Notes 0.5.22](docs/release-notes-0.5.22.md), then [Features](docs/features.md), [Getting Started](docs/getting-started.md), [Channels](docs/channels.md), and the [Changelog](CHANGELOG.md).
+**`0.5.23`** packages the subconscious reflective loop, provider-aware prompt caching, adaptive output budgeting, managed import security, richer Usage Insights, and the latest provider failover and approval UX fixes into a publishable release. Start with [Release Notes 0.5.23](docs/release-notes-0.5.23.md), then [Features](docs/features.md), [Getting Started](docs/getting-started.md), [Channels](docs/channels.md), and the [Changelog](CHANGELOG.md).
 
 ## Quick Start
 
@@ -346,7 +346,7 @@ See [Architecture](docs/architecture.md) for the full technical deep-dive.
 - **Approval workflows**: User consent required for destructive operations
 - **Sandbox isolation**: macOS `sandbox-exec` (native), Docker containers, or process-level isolation on Windows
 - **Encrypted storage**: OS keychain + AES-256 fallback
-- **4,500+ automated tests** (4,583 passing in `npm run test`) including **135+** security unit tests under `tests/security/` and **250+** control-plane and WebSocket protocol tests
+- **4,932 automated tests** in the suite across **390 test files** (`4,854 passed`, `78 skipped`), including **135+** security unit tests under `tests/security/` and **250+** control-plane and WebSocket protocol tests
 
 See [Security Guide](docs/security-guide.md) and [Security Architecture](docs/security/) for details.
 
