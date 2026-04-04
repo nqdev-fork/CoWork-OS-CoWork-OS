@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Session checklist primitive**: execution-style tasks can create a session-local ordered checklist via `task_list_create`, maintain it with `task_list_update`, inspect it with `task_list_list`, and surface it read-only in the task UI with verification nudge state.
 - **SessionRuntime owner**: task-session state, retry/recovery mirrors, worker state, verification state, and resume snapshots now live in one canonical runtime owner instead of being mirrored across executor paths.
+- **Prompt-aware tool descriptions**: built-in tool definitions can now carry internal prompt metadata so visible tools render concise execution descriptions and compact planning text from one shared source.
+- **Structured delegation briefs**: delegated child work now receives a normalized brief with role, parent-step context, scope, evidence requirements, deliverable shape, and completion contract.
 - **Session snapshot resume algorithm**: persisted task state now prefers `session_runtime_v2` checkpoint/event payloads, falls back to legacy `conversationHistory` payloads or event reconstruction, and rewrites legacy resumes to V2 on the next checkpoint.
 - **Permission engine**: layered tool approvals now evaluate explicit modes, per-tool/path/command-prefix/MCP-server rules, workspace-local policy files, profile rules, and denial fallback instead of relying on a single risk gate.
 - **Workspace rule manager**: Settings now lets users browse and remove workspace-local permission rules directly, and approval prompts can persist workspace or profile rules with explicit scope and reason.
@@ -18,19 +20,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Graph-backed delegation**: spawned agents, collaborative runs, workflow phases, and ACP task delegation now resolve through a normalized orchestration graph engine.
 - **Typed worker roles**: built-in `researcher`, `implementer`, `verifier`, and `synthesizer` worker roles drive delegation, prompts, and hard tool scopes.
 - **Semantic tool summaries**: completed tool batches now carry concise semantic labels for timeline rows and completion relays.
+- **Configurable primary retry cooldown**: `Settings > LLM > Provider Failover` now includes `Retry primary after (seconds)` so ordered LLM fallback chains can temporarily stay on a working fallback before probing the primary route again. Leaving it blank uses the default 60-second cooldown; `0` retries the primary on the next route refresh.
+- **Imported capability security reports**: skills and plugin packs now share persisted import security reports, quarantine records, retry/remove actions, and aligned IPC contracts for install-time security outcomes.
+- **Provider-aware prompt caching**: CoWork now persists stable prompt-cache metadata in `SessionRuntime`, keeps stable system sections cacheable, prefers Anthropic automatic caching when available, uses explicit OpenRouter Claude breakpoints, and derives stable OpenAI-family cache keys for GPT routes including Azure OpenAI profile-based routing.
 
 ### Changed
 - **SessionRuntime boundary**: runtime state now includes the session checklist bucket, replayable checklist events, and the non-blocking verification nudge algorithm for implementation-first tasks.
+- **Prompt stack composition**: execution and follow-up prompts now assemble from named session- and turn-scoped sections with cache-aware reuse of stable sections and per-section budgeting.
+- **Verification guidance timing**: checklist reminders and pre-finalization reminders now surface missing verification evidence before the final post-hoc verification gate runs.
 - **Completion projection**: task completion relays now compose from `resultSummary`, semantic batch labels, and verifier verdict/report fields.
 - **Runtime boundary**: TaskExecutor now owns bootstrap, plan construction, finalization, and daemon/UI projection while SessionRuntime owns mutable turn-loop state, persistence, and recovery.
 - **Security surfaces**: the approval dialog, Settings permission panel, workspace manifest mirror, and workspace DB now all participate in the same permission workflow.
 - **Follow-up visibility**: follow-up completion events now preserve the triggering user text so the timeline can surface orphaned follow-ups explicitly.
 - **Canvas / visual refinement UX**: screenshot-heavy refinement loops render more compactly in summary mode to keep the feed readable.
+- **Imported skills and packs**: managed imports now stage into a temp location, run structural/content/package scanning before activation, persist sidecar reports, and move to quarantine instead of activating when the scan blocks the bundle.
+- **Prompt-cache defaults**: prompt caching now defaults to `auto` for supported providers, uses a 5-minute TTL unless overridden, and records cache reads/writes in usage telemetry and cost accounting when upstream APIs report them.
 
 ### Fixed
 - **Resume race on terminal tasks**: approval- or follow-up-driven resume handling no longer overwrites a freshly completed task row back to `executing`; resume now re-checks canonical persisted task state before applying active status.
 - **Stale completion state**: follow-up completion now persists terminal task state together with the completion payload, preventing sidebar/task-detail divergence after a task finishes.
 - **Hidden follow-up triggers**: session follow-up messages now remain visible in the timeline rather than collapsing behind later action blocks.
+- **LLM fallback settings persistence**: saving LLM settings now reliably preserves the configured fallback provider/model list and the primary-retry cooldown in the encrypted settings store.
+- **LLM failover retry routing**: retryable provider errors such as OpenRouter `429` responses now advance to the next configured fallback route without immediately snapping back to the primary provider on the next retry loop.
+- **Return-to-primary thrash**: after failover, the executor now preserves the active fallback route for the configured cooldown window before attempting the primary route again.
+- **Approval timeout completion race**: stale approval timers no longer overwrite terminal task state after a task has already completed, failed, or been cancelled.
+- **Post-install tampering on managed imports**: previously installed imported skills and packs are now rechecked by digest on discovery/load so modified managed bundles can be quarantined before activation.
 
 ## [0.5.19] - 2026-03-30
 
@@ -71,7 +85,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Gateway edge cases**: router/channel fixes (e.g. `channelId` on pending maps, stricter typing and allowlist behavior) and related adapter tests.
 
 ### Removed
-- **Legacy Hermes-named parity helper**: removed in favor of `RuntimeVisibilityService` and updated tests.
+- **Legacy parity helper**: removed in favor of `RuntimeVisibilityService` and updated tests.
 
 ## [0.5.18] - 2026-03-30
 
@@ -138,7 +152,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Docker timezone**: `COWORK_TZ` env var for IANA timezone in Docker and systemd. Invalid values fall back to UTC.
 - **Gateway exec approval fallback**: Per-agent policy and allowlist honored for channel-originated `run_command`; trusted commands auto-approved when approval UI unavailable.
 - **Managed devices docs refresh**: documented the Devices tab, saved remote devices, remote task launching, per-device summaries, and remote file selection workflows.
-- **Automation control center docs refresh**: documented the consolidated `Automations` settings group and the relationship between Task Queue, Scheduled Tasks, Webhooks, Event Triggers, Daily Briefing, and Self-Improve.
+- **Automation control center docs refresh**: documented the consolidated `Automations` settings group and the relationship between Task Queue, Scheduled Tasks, Webhooks, Event Triggers, Daily Briefing, and the reflective automation surface available at the time.
 - **Zero-human-company docs refresh**: documented the `Settings > Companies` workflow, persisted company-linked digital twins, and company-aware handoff between Companies, Digital Twins, and Mission Control.
 - **HuggingFace Local AI provider**: added `hf-agents` + `llama.cpp` local-model support with installation checks, model selection, and local server lifecycle management from Settings.
 - **Research channels**: Telegram and WhatsApp chats can now be designated as link-research channels that automatically turn posted URLs into a structured findings report.
@@ -146,7 +160,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Dashboard chat UI**: Batched tool events (400ms flush) to avoid UI freeze; flush on subscription cleanup.
-- **README and feature documentation**: updated product-facing docs to reflect managed devices, automation navigation, bounded self-improvement campaigns, remote session inspection, and the current companies workflow.
+- **README and feature documentation**: updated product-facing docs to reflect managed devices, automation navigation, bounded reflective automation for git-backed workflows, remote session inspection, and the current companies workflow.
 - **Self-improvement documentation**: added detailed architecture and troubleshooting coverage for staged autonomous campaigns, startup ordering, worktree requirements, candidate parking/cooldowns, notification flow, and `logs/dev-latest.log` verification steps.
 - **IPC contract documentation**: clarified that `kit:openFile`, `kit:resetAdaptiveStyle`, and `kit:submitMessageFeedback` live in the shared `IPC_CHANNELS` registry used by preload, renderer, and Electron handlers.
 - **Connector surface consolidation**: the shipped MCP allowlist is now Salesforce, Jira, HubSpot, Zendesk, ServiceNow, Linear, Asana, Okta, Resend, Discord, and Google Workspace. Google services are consolidated under `google-workspace`; DocuSign, Outreach, and Slack were removed from the shipped Tier-1 connector surface.
