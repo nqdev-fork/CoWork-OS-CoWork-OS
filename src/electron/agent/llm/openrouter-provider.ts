@@ -1,6 +1,7 @@
 import {
   LLMProvider,
   LLMProviderConfig,
+  LLMProviderError,
   LLMRequest,
   LLMResponse,
   LLMContent,
@@ -8,6 +9,14 @@ import {
   LLMTool,
 } from "./types";
 import { getOpenRouterAttributionHeaders } from "./openrouter-attribution";
+import {
+  applyAnthropicExplicitCacheControl,
+  applyExplicitSystemBlockMarker,
+  convertSystemBlocksToTextParts,
+  extractOpenAICompatibleCacheUsage,
+  normalizeSystemBlocks,
+} from "./prompt-cache";
+import { buildOpenAICompatibleSystemMessages } from "./openai-compatible";
 
 /**
  * OpenRouter API provider implementation
@@ -33,7 +42,13 @@ export class OpenRouterProvider implements LLMProvider {
   }
 
   async createMessage(request: LLMRequest): Promise<LLMResponse> {
-    const messages = this.convertMessages(request.messages, request.system);
+    const promptCache =
+      request.promptCache?.mode === "anthropic_auto"
+        ? { ...request.promptCache, mode: "anthropic_explicit" as const }
+        : request.promptCache?.mode === "disabled"
+          ? undefined
+          : request.promptCache;
+    const messages = this.convertMessages(request, promptCache);
     const tools = request.tools ? this.convertTools(request.tools) : undefined;
 
     try {
@@ -50,7 +65,12 @@ export class OpenRouterProvider implements LLMProvider {
           model: request.model || this.defaultModel,
           messages,
           max_tokens: request.maxTokens,
-          ...(tools && { tools, tool_choice: "auto" }),
+          ...(tools && tools.length > 0
+            ? {
+                tools,
+                tool_choice: request.toolChoice || "auto",
+              }
+            : {}),
         }),
         // Pass abort signal to allow cancellation
         signal: request.signal,
@@ -64,10 +84,11 @@ export class OpenRouterProvider implements LLMProvider {
         const fullMessage =
           `OpenRouter API error: ${response.status} ${response.statusText}` +
           (detail ? ` - ${detail}` : "");
-        const err = new Error(fullMessage) as Error & { retryable?: boolean };
-        if (response.status === 429 || /rate limit|too many requests|free-models-per-min/i.test(detail)) {
-          err.retryable = true;
-        }
+        const err = new Error(fullMessage) as LLMProviderError;
+        err.status = response.status;
+        err.providerMessage = detail || undefined;
+        err.errorData = errorData;
+        err.retryable = this.isRetryableOpenRouterError(response.status, detail);
         throw err;
       }
 
@@ -123,18 +144,49 @@ export class OpenRouterProvider implements LLMProvider {
     }
   }
 
+  private isRetryableOpenRouterError(status: number, detail: string): boolean {
+    const normalized = String(detail || "").toLowerCase();
+    if (status === 429 || /rate limit|too many requests|free-models-per-min/i.test(normalized)) {
+      return true;
+    }
+
+    // Some free OpenRouter routes are blocked behind OpenInference moderation.
+    // That is a route-level incompatibility, so fail over to the next configured provider/model.
+    return (
+      status === 403 &&
+      (normalized.includes("requires moderation on openinference") ||
+        (normalized.includes("openinference") && normalized.includes("input was flagged")))
+    );
+  }
+
   private convertMessages(
-    messages: LLMMessage[],
-    system?: string,
+    request: Pick<LLMRequest, "messages" | "system" | "systemBlocks">,
+    promptCache?: LLMRequest["promptCache"],
   ): Array<{ role: string; content: Any; tool_call_id?: string }> {
     const result: Array<{ role: string; content: Any; tool_call_id?: string }> = [];
 
-    // Add system message if provided
-    if (system) {
-      result.push({ role: "system", content: system });
+    if (promptCache?.mode === "openrouter_implicit") {
+      result.push(...buildOpenAICompatibleSystemMessages(request.system, request.systemBlocks));
+    } else {
+      const systemBlocks = normalizeSystemBlocks(request.system, request.systemBlocks);
+      if (systemBlocks.length > 0) {
+        const parts = convertSystemBlocksToTextParts(request.system, request.systemBlocks);
+        if (promptCache?.mode === "anthropic_explicit") {
+          applyExplicitSystemBlockMarker(parts, systemBlocks, promptCache.ttl);
+        }
+        result.push({
+          role: "system",
+          content:
+            !request.systemBlocks && parts.length === 1 && !parts[0].cache_control
+              ? parts[0].text
+              : parts,
+        });
+      } else if (request.system) {
+        result.push({ role: "system", content: request.system });
+      }
     }
 
-    for (const msg of messages) {
+    for (const msg of request.messages) {
       if (typeof msg.content === "string") {
         result.push({ role: msg.role, content: msg.content });
       } else {
@@ -190,7 +242,21 @@ export class OpenRouterProvider implements LLMProvider {
       }
     }
 
-    return result;
+    if (promptCache?.mode !== "anthropic_explicit") {
+      return result;
+    }
+
+    const systemMessage = result[0]?.role === "system" ? [result[0]] : [];
+    const nonSystemMessages = systemMessage.length > 0 ? result.slice(1) : result.slice();
+    return [
+      ...systemMessage,
+      ...(applyAnthropicExplicitCacheControl(nonSystemMessages as Any[], {
+        ttl: promptCache.ttl,
+        includeSystem: false,
+        maxBreakpoints: Math.max(0, promptCache.explicitRecentMessages || 3),
+        nativeAnthropic: false,
+      }) as Array<{ role: string; content: Any; tool_call_id?: string }>),
+    ];
   }
 
   private convertTools(tools: LLMTool[]): Array<{
@@ -268,8 +334,9 @@ export class OpenRouterProvider implements LLMProvider {
       stopReason: this.mapStopReason(choice.finish_reason),
       usage: response.usage
         ? {
-            inputTokens: response.usage.prompt_tokens || 0,
-            outputTokens: response.usage.completion_tokens || 0,
+            inputTokens: response.usage.prompt_tokens || response.usage.input_tokens || 0,
+            outputTokens: response.usage.completion_tokens || response.usage.output_tokens || 0,
+            ...extractOpenAICompatibleCacheUsage(response.usage),
           }
         : undefined,
     };
