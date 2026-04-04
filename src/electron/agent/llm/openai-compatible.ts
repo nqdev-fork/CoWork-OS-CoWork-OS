@@ -1,17 +1,45 @@
-import { LLMContent, LLMImageContent, LLMMessage, LLMResponse, LLMTool, LLMToolResult } from "./types";
+import {
+  LLMContent,
+  LLMImageContent,
+  LLMMessage,
+  LLMResponse,
+  LLMSystemBlock,
+  LLMTool,
+  LLMToolResult,
+} from "./types";
 import { imageToTextFallback } from "./image-utils";
 import { createLogger } from "../../utils/logger";
 import { assertNormalizedTurnTranscript } from "../runtime/turn-transcript-normalizer";
+import {
+  extractOpenAICompatibleCacheUsage,
+  splitSystemBlocksForOpenAIPrefix,
+} from "./prompt-cache";
 
 const logger = createLogger("openai-compat");
 
 export interface OpenAICompatibleMessageOptions {
   /** Set to false to replace image blocks with text fallback (default: false) */
   supportsImages?: boolean;
+  systemBlocks?: LLMSystemBlock[];
 }
 
 export function sanitizeToolCallHistory(messages: LLMMessage[]): LLMMessage[] {
   return assertNormalizedTurnTranscript(messages, (message) => logger.warn(message));
+}
+
+export function buildOpenAICompatibleSystemMessages(
+  system?: string,
+  systemBlocks?: LLMSystemBlock[],
+): Array<{ role: "system"; content: string }> {
+  const { stableText, volatileText } = splitSystemBlocksForOpenAIPrefix(system || "", systemBlocks);
+  const result: Array<{ role: "system"; content: string }> = [];
+  if (stableText) {
+    result.push({ role: "system", content: stableText });
+  }
+  if (volatileText) {
+    result.push({ role: "system", content: volatileText });
+  }
+  return result;
 }
 
 export function toOpenAICompatibleMessages(
@@ -24,9 +52,7 @@ export function toOpenAICompatibleMessages(
     [];
   const supportsImages = options?.supportsImages === true;
 
-  if (system) {
-    result.push({ role: "system", content: system });
-  }
+  result.push(...buildOpenAICompatibleSystemMessages(system, options?.systemBlocks));
 
   for (const msg of sanitizedMessages) {
     if (typeof msg.content === "string") {
@@ -230,7 +256,7 @@ export function fromOpenAICompatibleResponse(response: Any): LLMResponse {
       ? {
           inputTokens: response.usage.prompt_tokens || 0,
           outputTokens: response.usage.completion_tokens || 0,
-          cachedTokens: response.usage.prompt_tokens_details?.cached_tokens || undefined,
+          ...extractOpenAICompatibleCacheUsage(response.usage),
         }
       : undefined,
   };
