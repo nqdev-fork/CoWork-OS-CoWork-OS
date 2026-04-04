@@ -15,6 +15,12 @@ export interface CoordinatedToolExecutionResult {
 export class ToolExecutionCoordinator {
   constructor(private readonly toolRegistry: ToolRegistry) {}
 
+  private getModelReminder(result: unknown): string | undefined {
+    if (!result || typeof result !== "object" || Array.isArray(result)) return undefined;
+    const reminder = (result as { immediateReminder?: unknown }).immediateReminder;
+    return typeof reminder === "string" && reminder.trim().length > 0 ? reminder.trim() : undefined;
+  }
+
   async executeTool(
     toolName: string,
     input: Any,
@@ -34,6 +40,7 @@ export class ToolExecutionCoordinator {
       });
       const result = executionWithRuntime?.result;
       const policyTrace = executionWithRuntime?.policyTrace;
+      const modelReminder = this.getModelReminder(result);
       const envelope = buildToolResultEnvelope({
         toolUseId,
         toolName,
@@ -41,6 +48,7 @@ export class ToolExecutionCoordinator {
         result,
         retryable: false,
         policyTrace,
+        modelReminder,
         userSummary: `${toolName} ${result?.success === false ? "failed" : "completed"}`,
       });
       context.emitEvent?.("log", {
@@ -53,7 +61,7 @@ export class ToolExecutionCoordinator {
       return {
         result,
         durationMs: Date.now() - startedAt,
-        resultJson: JSON.stringify(result),
+        resultJson: envelope.modelPayload,
         policyTrace,
         envelope,
       };
@@ -69,17 +77,20 @@ export class ToolExecutionCoordinator {
       });
       if (recovery?.recovered) {
         const recoveredResult = recovery.result;
+        const recoveredReminder = this.getModelReminder(recoveredResult);
+        const envelope = buildToolResultEnvelope({
+          toolUseId,
+          toolName,
+          status: "success",
+          result: recoveredResult,
+          modelReminder: recoveredReminder,
+          userSummary: `${toolName} recovered and completed`,
+        });
         return {
           result: recoveredResult,
           durationMs: Date.now() - startedAt,
-          resultJson: JSON.stringify(recoveredResult),
-          envelope: buildToolResultEnvelope({
-            toolUseId,
-            toolName,
-            status: "success",
-            result: recoveredResult,
-            userSummary: `${toolName} recovered and completed`,
-          }),
+          resultJson: envelope.modelPayload,
+          envelope,
         };
       }
       const envelope = buildToolResultEnvelope({
