@@ -1,5 +1,5 @@
 import { ipcMain } from "electron";
-import { IPC_CHANNELS } from "../../shared/types";
+import { CapabilitySecurityReport, IPC_CHANNELS } from "../../shared/types";
 import { PluginRegistry } from "../extensions/registry";
 import { MCPClientManager } from "../mcp/client/MCPClientManager";
 import { MCPSettingsManager } from "../mcp/settings";
@@ -37,6 +37,8 @@ export interface PluginPackData {
   policyBlocked: boolean;
   /** Whether this pack is required by admin policy (cannot be disabled) */
   policyRequired: boolean;
+  /** Security report for managed or unmanaged-local imported packs */
+  securityReport?: CapabilitySecurityReport;
 }
 
 /**
@@ -155,6 +157,7 @@ export function setupPluginPackHandlers(): void {
         enabled: blocked ? false : p.state !== "disabled",
         policyBlocked: blocked,
         policyRequired: required,
+        securityReport: p.securityReport,
       };
     });
   });
@@ -203,6 +206,7 @@ export function setupPluginPackHandlers(): void {
       enabled: !isPackAllowed(m.name) ? false : plugin.state !== "disabled",
       policyBlocked: !isPackAllowed(m.name),
       policyRequired: isPackRequired(m.name),
+      securityReport: plugin.securityReport,
     } satisfies PluginPackData;
   });
 
