@@ -295,7 +295,9 @@ function HomeFilePreview({
 function getTaskStatusInfo(task: Task): { icon: "live" | "complete" | "paused"; label: string } {
   if (isActiveSessionStatus(task.status)) {
     if (task.source === "cron") return { icon: "live", label: "Scheduled run" };
-    if (task.source === "improvement") return { icon: "live", label: "Improvement loop" };
+    if (task.source === "improvement" || task.source === "subconscious") {
+      return { icon: "live", label: "Subconscious loop" };
+    }
     return { icon: "live", label: "Working" };
   }
   if (task.status === "paused" || task.status === "blocked") return { icon: "paused", label: "Awaiting reply" };
@@ -315,7 +317,7 @@ function getTaskTone(task: Task): "live" | "queued" | "done" | "attention" {
 function getAutomationSender(task: Task): string {
   if (task.heartbeatRunId) return "Heartbeat";
   if (task.source === "cron") return "Scheduled task";
-  if (task.source === "improvement") return "Self-improve";
+  if (task.source === "improvement" || task.source === "subconscious") return "Subconscious";
   if (task.source === "hook") return "Event trigger";
   if (task.source === "api") return "API";
   return "Manual";
@@ -335,7 +337,7 @@ function getAutomationPreview(task: Task): string {
 function getAutomationTag(task: Task): string {
   if (task.heartbeatRunId) return "Companion";
   if (task.source === "cron") return "Recurring";
-  if (task.source === "improvement") return "Self-improve";
+  if (task.source === "improvement" || task.source === "subconscious") return "Subconscious";
   if (task.source === "hook") return "Triggered";
   if (task.source === "api") return "API";
   return "Manual";
@@ -657,7 +659,7 @@ export function HomeDashboard({
       if (!isAutomatedSession(task)) continue;
       if (task.heartbeatRunId) counts.heartbeat += 1;
       else if (task.source === "cron") counts.cron += 1;
-      else if (task.source === "improvement") counts.improvement += 1;
+      else if (task.source === "improvement" || task.source === "subconscious") counts.improvement += 1;
       else if (task.source === "hook") counts.hook += 1;
       else if (task.source === "api") counts.api += 1;
     }
@@ -933,7 +935,7 @@ export function HomeDashboard({
                 <Sparkles size={20} />
               </div>
               <div className="home-auto-card-copy">
-                <strong>Self-improve</strong>
+                <strong>Subconscious</strong>
                 <span>{automationGroups.improvement} active</span>
               </div>
             </button>
