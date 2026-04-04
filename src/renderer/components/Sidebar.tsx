@@ -414,7 +414,9 @@ export function Sidebar({
 
     const groupedNodes: TaskTreeNode[] = [];
     const consumed = new Set<string>();
-    const improvementRoots = rootTasks.filter((task) => task.source === "improvement");
+    const improvementRoots = rootTasks.filter(
+      (task) => task.source === "improvement" || task.source === "subconscious",
+    );
 
     for (const task of improvementRoots) {
       if (consumed.has(task.id)) continue;
