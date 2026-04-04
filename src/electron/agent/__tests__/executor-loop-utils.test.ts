@@ -55,6 +55,28 @@ describe("executor-loop-utils guardrails", () => {
     expect(messages[1].role).toBe("user");
   });
 
+  it("skips continuation retries when adaptive output handling disallows it", () => {
+    const messages: LLMMessage[] = [];
+    const result = handleMaxTokensRecovery({
+      response: {
+        stopReason: "max_tokens",
+        content: [{ type: "text", text: "partial output" }],
+      },
+      messages,
+      recoveryCount: 0,
+      maxRecoveries: 3,
+      remainingTurns: 3,
+      minTurnsRequiredForRetry: 1,
+      allowRetry: false,
+      log: vi.fn(),
+      emitMaxTokensRecovery: vi.fn(),
+    });
+
+    expect(result.action).toBe("exhausted");
+    expect(messages).toHaveLength(1);
+    expect(messages[0].role).toBe("assistant");
+  });
+
   it("injects low-progress nudge for repeated mixed-tool probing on same target", () => {
     const calls: ToolLoopCall[] = [
       { tool: "read", target: "/tmp/a.html:1-200", baseTarget: "/tmp/a.html" },
