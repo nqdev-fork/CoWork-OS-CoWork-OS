@@ -13,6 +13,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import {
+  CapabilitySecurityReport,
   CustomSkill,
   SkillSource,
   SkillStatusEntry,
@@ -28,7 +29,6 @@ import { createLogger } from "../utils/logger";
 const SKILLS_FOLDER_NAME = "skills";
 const SKILL_FILE_EXTENSION = ".json";
 const RELOAD_DEBOUNCE_MS = 100; // Debounce rapid reload calls
-const IGNORED_SKILL_METADATA_FILES = new Set(["build-mode.json"]);
 const logger = createLogger("CustomSkillLoader");
 const DEFAULT_MODEL_SKILL_SHORTLIST_SIZE = 20;
 const DEFAULT_ROUTING_CONFIDENCE_THRESHOLD = 0.55;
@@ -84,6 +84,16 @@ interface ModelSkillDescriptionOptions {
   lowConfidenceThreshold?: number;
   textBudgetChars?: number;
   includePrereqBlockedSkills?: boolean;
+}
+
+export interface RuntimeSkillDescriptor {
+  name: string;
+  description: string;
+  whenToUse: string;
+  allowedTools?: string[];
+  disableModelInvocation: boolean;
+  userInvocable: boolean;
+  skill: CustomSkill;
 }
 
 interface RankedSkillMatch {
@@ -148,6 +158,7 @@ export class CustomSkillLoader {
   private initializationPromise: Promise<void> | null = null;
   private skillsConfig?: SkillsConfig;
   private eligibilityChecker: SkillEligibilityChecker;
+  private securityReports: Map<string, CapabilitySecurityReport> = new Map();
 
   // Debounce state for reloadSkills
   private reloadDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -274,13 +285,9 @@ export class CustomSkillLoader {
 
     try {
       const files = fs.readdirSync(dir);
-      const skillFiles = files.filter((f) => f.endsWith(SKILL_FILE_EXTENSION));
+      const skillFiles = files.filter((f) => f.endsWith(SKILL_FILE_EXTENSION) && !this.isSecurityMetadataFile(f));
 
       for (const file of skillFiles) {
-        if (IGNORED_SKILL_METADATA_FILES.has(file.toLowerCase())) {
-          logger.debug(`Skipping metadata file: ${file}`);
-          continue;
-        }
         try {
           const filePath = path.join(dir, file);
           const content = fs.readFileSync(filePath, "utf-8");
@@ -347,6 +354,9 @@ export class CustomSkillLoader {
    */
   private async doReloadSkills(): Promise<CustomSkill[]> {
     this.skills.clear();
+    this.securityReports.clear();
+
+    await this.verifyManagedSkills();
 
     // Load from all sources
     const bundledSkills = this.loadSkillsFromDir(this.bundledSkillsDir, "bundled");
@@ -390,7 +400,57 @@ export class CustomSkillLoader {
       `Loaded ${counts.total} skills (bundled: ${counts.bundled}, external: ${counts.external}, managed: ${counts.managed}, workspace: ${counts.workspace}, overridden: ${overridden})`,
     );
 
+    await this.populateSecurityReports(externalSkills, managedSkills);
+
     return this.listSkills();
+  }
+
+  private isSecurityMetadataFile(fileName: string): boolean {
+    const lower = fileName.toLowerCase();
+    return lower === "build-mode.json" || lower.endsWith(".security.json");
+  }
+
+  private async verifyManagedSkills(): Promise<void> {
+    const skillRegistry = _getSkillRegistry();
+    for (const skill of skillRegistry.listManagedSkills()) {
+      try {
+        const report = await skillRegistry.verifyManagedSkillIntegrity(skill.id);
+        if (report) {
+          this.securityReports.set(skill.id, report);
+        }
+      } catch (error) {
+        logger.warn(`Managed skill verification failed for ${skill.id}`, error);
+      }
+    }
+  }
+
+  private async populateSecurityReports(
+    externalSkills: CustomSkill[],
+    managedSkills: CustomSkill[],
+  ): Promise<void> {
+    for (const skill of managedSkills) {
+      if (this.securityReports.has(skill.id)) {
+        continue;
+      }
+      const report = _getSkillRegistry().getImportSecurityReport({
+        bundleKind: "skill",
+        bundleId: skill.id,
+      });
+      if (report) {
+        this.securityReports.set(skill.id, report);
+      }
+    }
+
+    for (const skill of externalSkills) {
+      try {
+        const report = await _getSkillRegistry().inspectExternalSkill(skill);
+        if (report) {
+          this.securityReports.set(skill.id, report);
+        }
+      } catch (error) {
+        logger.warn(`External skill security inspection failed for ${skill.id}`, error);
+      }
+    }
   }
 
   /**
@@ -878,11 +938,11 @@ export class CustomSkillLoader {
    * Groups skills by category and includes parameter info
    */
   getSkillDescriptionsForModel(options: ModelSkillDescriptionOptions = {}): string {
-    const skills = this.listModelInvocableSkills({
+    const descriptors = this.listRuntimeSkillDescriptors({
       availableToolNames: options.availableToolNames,
       includePrereqBlockedSkills: options.includePrereqBlockedSkills,
     });
-    if (skills.length === 0) {
+    if (descriptors.length === 0) {
       return "";
     }
 
@@ -900,38 +960,46 @@ export class CustomSkillLoader {
         ? Math.max(Math.floor(options.textBudgetChars), 1_500)
         : DEFAULT_SKILL_TEXT_BUDGET_CHARS;
 
-    const routed = this.shortlistSkillsForQuery(skills, options.routingQuery || "", shortlistSize);
-    const selectedSkills = routed.skills;
+    const routed = this.shortlistSkillsForQuery(
+      descriptors.map((descriptor) => descriptor.skill),
+      options.routingQuery || "",
+      shortlistSize,
+    );
+    const selectedDescriptors = routed.skills
+      .map((skill) => descriptors.find((descriptor) => descriptor.skill.id === skill.id))
+      .filter((descriptor): descriptor is RuntimeSkillDescriptor => Boolean(descriptor));
 
     // Group skills by category
-    const byCategory: Record<string, CustomSkill[]> = {};
-    for (const skill of selectedSkills) {
-      const category = skill.category || "General";
+    const byCategory: Record<string, RuntimeSkillDescriptor[]> = {};
+    for (const descriptor of selectedDescriptors) {
+      const category = descriptor.skill.category || "General";
       if (!byCategory[category]) {
         byCategory[category] = [];
       }
-      byCategory[category].push(skill);
+      byCategory[category].push(descriptor);
     }
 
     // Format descriptions
     const lines: string[] = [];
-    if (selectedSkills.length < routed.totalEligible) {
+    if (selectedDescriptors.length < routed.totalEligible) {
       lines.push(
-        `Routing shortlist: showing ${selectedSkills.length} of ${routed.totalEligible} skills for this task.`,
+        `Routing shortlist: showing ${selectedDescriptors.length} of ${routed.totalEligible} skills for this task.`,
       );
     }
     if (routed.confidence < lowConfidenceThreshold) {
-      lines.push("Routing confidence is low. If needed, call skill_list for additional discovery.");
+      lines.push("Routing confidence is low. Review the listed skills carefully before choosing one.");
     }
-    for (const [category, categorySkills] of Object.entries(byCategory).sort()) {
+    for (const [category, categoryDescriptors] of Object.entries(byCategory).sort()) {
       lines.push(`\n${category}:`);
-      for (const skill of categorySkills) {
+      for (const descriptor of categoryDescriptors) {
+        const { skill } = descriptor;
         const paramInfo = skill.parameters?.length
-          ? ` (params: ${skill.parameters.map((p) => p.name + (p.required ? "*" : "")).join(", ")})`
+          ? ` (args: ${skill.parameters.map((p) => p.name + (p.required ? "*" : "")).join(", ")})`
           : "";
-        lines.push(`- ${skill.id}: ${skill.description}${paramInfo}`);
+        const userMarker = descriptor.userInvocable ? " [user-invocable]" : "";
+        lines.push(`- ${descriptor.name}: ${descriptor.description}${paramInfo}${userMarker}`);
 
-        const routingHints = this.getSkillRoutingHints(skill);
+        const routingHints = this.getSkillRoutingHints(descriptor);
         for (const hint of routingHints) {
           lines.push(`  ${hint}`);
         }
@@ -939,24 +1007,52 @@ export class CustomSkillLoader {
     }
     let rendered = lines.join("\n");
     if (rendered.length > textBudgetChars) {
-      rendered = `${rendered.slice(0, textBudgetChars)}\n[Skill descriptions truncated for prompt budget. Use skill_list for full inventory.]`;
+      rendered = `${rendered.slice(0, textBudgetChars)}\n[Skill descriptions truncated for prompt budget.]`;
     }
     return rendered;
+  }
+
+  getRuntimeSkillDescriptor(skill: CustomSkill): RuntimeSkillDescriptor {
+    const allowedTools = Array.isArray((skill.requires as Any)?.tools)
+      ? ((skill.requires as Any).tools as unknown[]).filter(
+          (tool): tool is string => typeof tool === "string" && tool.trim().length > 0,
+        )
+      : undefined;
+    return {
+      name: skill.id,
+      description: String(skill.description || "").trim(),
+      whenToUse:
+        String(skill.metadata?.routing?.useWhen || "").trim() ||
+        String(skill.description || "").trim() ||
+        `Use when the ${skill.name || skill.id} skill clearly matches the task.`,
+      allowedTools,
+      disableModelInvocation: skill.invocation?.disableModelInvocation === true,
+      userInvocable: skill.invocation?.userInvocable !== false,
+      skill,
+    };
+  }
+
+  listRuntimeSkillDescriptors(options: {
+    availableToolNames?: Set<string>;
+    includePrereqBlockedSkills?: boolean;
+  } = {}): RuntimeSkillDescriptor[] {
+    return this.listModelInvocableSkills(options).map((skill) => this.getRuntimeSkillDescriptor(skill));
   }
 
   /**
    * Build compact routing and success hints for model prompt listing.
    * These are intentionally short and should act like decision boundaries.
    */
-  private getSkillRoutingHints(skill: CustomSkill): string[] {
+  private getSkillRoutingHints(descriptor: RuntimeSkillDescriptor): string[] {
+    const { skill } = descriptor;
     const routing = skill.metadata?.routing;
     if (!routing) {
-      return [];
+      return descriptor.whenToUse ? [`Use when: ${descriptor.whenToUse}`] : [];
     }
 
     const hints: string[] = [];
-    if (routing.useWhen) {
-      hints.push(`Use when: ${routing.useWhen}`);
+    if (descriptor.whenToUse) {
+      hints.push(`Use when: ${descriptor.whenToUse}`);
     }
     if (routing.dontUseWhen && !this.isLowSignalRoutingHint("dontUseWhen", routing.dontUseWhen)) {
       hints.push(`Don't use when: ${routing.dontUseWhen}`);
@@ -1139,7 +1235,10 @@ export class CustomSkillLoader {
    */
   async getSkillStatus(): Promise<SkillStatusReport> {
     const skills = this.listSkills();
-    const statusEntries = await this.eligibilityChecker.buildStatusEntries(skills);
+    const statusEntries = (await this.eligibilityChecker.buildStatusEntries(skills)).map((entry) => ({
+      ...entry,
+      securityReport: this.securityReports.get(entry.id),
+    }));
 
     const summary = {
       total: statusEntries.length,
@@ -1167,7 +1266,11 @@ export class CustomSkillLoader {
     const skill = this.getSkill(skillId);
     if (!skill) return null;
 
-    return this.eligibilityChecker.buildStatusEntry(skill);
+    const entry = await this.eligibilityChecker.buildStatusEntry(skill);
+    return {
+      ...entry,
+      securityReport: this.securityReports.get(skillId),
+    };
   }
 
   /**
