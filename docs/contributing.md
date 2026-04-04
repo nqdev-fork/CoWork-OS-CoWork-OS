@@ -2,7 +2,7 @@
 
 Thank you for your interest in contributing to CoWork OS! This document provides guidelines and instructions for contributing.
 
-> **Note:** This entire codebase was AI-generated using Claude Code and OpenAI Codex — no code was written manually. You may encounter AI-typical patterns, inconsistencies, or areas that could use refactoring. Fresh eyes and improvements are very welcome!
+> **Note:** This entire codebase was AI-generated using modern coding agents and OpenAI Codex — no code was written manually. You may encounter AI-typical patterns, inconsistencies, or areas that could use refactoring. Fresh eyes and improvements are very welcome!
 
 ## Table of Contents
 
@@ -107,7 +107,7 @@ git push && git push --tags
 
 ### AI-Assisted PRs Welcome!
 
-Built with Claude Code, Codex, Cursor, or other AI tools? **Awesome — we embrace it!**
+Built with Codex, Cursor, or other AI tools? **Awesome — we embrace it!**
 
 This entire codebase was AI-generated, so AI-assisted contributions are first-class citizens here. Just be transparent:
 
