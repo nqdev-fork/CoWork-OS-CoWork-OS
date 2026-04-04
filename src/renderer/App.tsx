@@ -328,7 +328,7 @@ export function App() {
     | "digitaltwins"
     | "mcp"
     | "triggers"
-    | "improvement"
+    | "subconscious"
     | "health"
     | "suggestions"
   >("appearance");
@@ -2850,7 +2850,7 @@ export function App() {
                   setCurrentView("settings");
                 }}
                 onOpenSelfImprove={() => {
-                  setSettingsTab("improvement");
+                  setSettingsTab("subconscious");
                   setCurrentView("settings");
                 }}
                 onCreateTask={handleCreateTask}
@@ -2925,7 +2925,11 @@ export function App() {
                 }}
                 workspace={currentWorkspace}
                 onOpenSettings={(tab) => {
-                  setSettingsTab((tab as typeof settingsTab | undefined) || "appearance");
+                  setSettingsTab(
+                    tab === "improvement"
+                      ? "subconscious"
+                      : ((tab as typeof settingsTab | undefined) || "appearance"),
+                  );
                   setCurrentView("settings");
                 }}
                 availableProviders={availableProviders}
@@ -2978,7 +2982,9 @@ export function App() {
                 onChangeWorkspace={handleChangeWorkspace}
                 onSelectWorkspace={(workspace) => setCurrentWorkspace(workspace)}
                 onOpenSettings={(tab) => {
-                  setSettingsTab((tab as typeof settingsTab | undefined) || "appearance");
+                  setSettingsTab(
+                    (tab as typeof settingsTab | undefined) || "appearance",
+                  );
                   setCurrentView("settings");
                 }}
                 onStopTask={handleCancelTask}
