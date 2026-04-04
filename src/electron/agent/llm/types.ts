@@ -7,6 +7,10 @@ import type {
   LLMProviderType,
   AzureReasoningEffort,
   RuntimeToolMetadata,
+  ExecutionMode,
+  TaskDomain,
+  WebSearchMode,
+  WorkerRoleKind,
 } from "../../../shared/types";
 
 export type { LLMProviderType, AzureReasoningEffort };
@@ -76,6 +80,32 @@ export interface LLMTool {
     required?: string[];
   };
   runtime?: RuntimeToolMetadata;
+  prompting?: LLMToolPromptMetadata;
+}
+
+export interface LLMToolPromptRenderContext {
+  executionMode: ExecutionMode;
+  taskDomain: TaskDomain;
+  webSearchMode: WebSearchMode;
+  shellEnabled: boolean;
+  agentType?: string | null;
+  workerRole?: WorkerRoleKind | null;
+  allowUserInput?: boolean;
+}
+
+export interface LLMToolPromptRenderResult {
+  description?: string;
+  compactDescription?: string;
+  appendDescription?: string;
+  appendCompactDescription?: string;
+}
+
+export interface LLMToolPromptMetadata {
+  version?: string;
+  render?: (
+    context: LLMToolPromptRenderContext,
+    tool: Pick<LLMTool, "name" | "description" | "input_schema" | "runtime">,
+  ) => LLMToolPromptRenderResult | void;
 }
 
 export interface LLMToolUse {
@@ -180,6 +210,42 @@ export interface LLMMessage {
   content: string | LLMContent[] | LLMToolResult[];
 }
 
+export type LLMSystemBlockScope = "session" | "turn" | "none";
+
+export interface LLMSystemBlock {
+  text: string;
+  scope: LLMSystemBlockScope;
+  cacheable: boolean;
+  stableKey: string;
+}
+
+export type LLMPromptCacheMode =
+  | "disabled"
+  | "anthropic_auto"
+  | "anthropic_explicit"
+  | "openai_key"
+  | "openrouter_implicit";
+
+export type PromptCacheProviderFamily =
+  | "unsupported"
+  | "anthropic"
+  | "azure-anthropic"
+  | "anthropic-compatible"
+  | "openrouter-claude"
+  | "openai"
+  | "azure-openai"
+  | "openrouter-openai";
+
+export interface LLMPromptCacheConfig {
+  mode: LLMPromptCacheMode;
+  ttl: "5m" | "1h";
+  explicitRecentMessages: number;
+  cacheKey?: string;
+  retention?: "24h";
+}
+
+export type LLMToolChoiceMode = "auto" | "none";
+
 /** Progress info emitted periodically during streaming LLM responses. */
 export interface StreamProgress {
   inputTokens: number;
@@ -196,8 +262,11 @@ export interface LLMRequest {
   model: string;
   maxTokens: number;
   system: string;
+  systemBlocks?: LLMSystemBlock[];
+  promptCache?: LLMPromptCacheConfig;
   messages: LLMMessage[];
   tools?: LLMTool[];
+  toolChoice?: LLMToolChoiceMode;
   /** Optional abort signal to cancel the request */
   signal?: AbortSignal;
   /** Optional callback for streaming progress (token counts, elapsed time). */
@@ -214,6 +283,8 @@ export interface LLMResponse {
     outputTokens: number;
     /** Tokens served from the provider's prompt cache (subset of inputTokens). */
     cachedTokens?: number;
+    /** Tokens used to create or extend a provider-side prompt cache entry. */
+    cacheWriteTokens?: number;
   };
 }
 
@@ -252,6 +323,11 @@ export interface LLMProvider {
  * Note: Ollama models are dynamic and fetched from the server
  */
 export const MODELS = {
+  "opus-4-6": {
+    anthropic: "claude-opus-4-6",
+    bedrock: "anthropic.claude-opus-4-6",
+    displayName: "Opus 4.6",
+  },
   "opus-4-5": {
     anthropic: "claude-opus-4-5-20251101",
     bedrock: "anthropic.claude-opus-4-5-20251101",
@@ -263,12 +339,12 @@ export const MODELS = {
     displayName: "Sonnet 4.6",
   },
   "sonnet-4-5": {
-    anthropic: "claude-sonnet-4-5-20250514",
+    anthropic: "claude-sonnet-4-5",
     bedrock: "anthropic.claude-sonnet-4-5-20250514",
     displayName: "Sonnet 4.5",
   },
   "haiku-4-5": {
-    anthropic: "claude-haiku-4-5-20250514",
+    anthropic: "claude-haiku-4-5",
     bedrock: "anthropic.claude-haiku-4-5-20250514",
     displayName: "Haiku 4.5",
   },
@@ -288,6 +364,17 @@ export const MODELS = {
     displayName: "Haiku 3.5",
   },
 } as const;
+
+const LEGACY_ANTHROPIC_MODEL_IDS: Record<string, string> = {
+  "claude-opus-4-5-20250514": "claude-opus-4-5-20251101",
+  "claude-sonnet-4-5-20250514": "claude-sonnet-4-5",
+  "claude-haiku-4-5-20250514": "claude-haiku-4-5",
+};
+
+export function normalizeAnthropicModelId(modelId: string): string {
+  const normalized = modelId.trim();
+  return LEGACY_ANTHROPIC_MODEL_IDS[normalized] || normalized;
+}
 
 /**
  * Available Gemini models from Google AI Studio
