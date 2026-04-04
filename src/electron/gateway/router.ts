@@ -48,10 +48,18 @@ import { AgentRoleRepository } from "../agents/AgentRoleRepository";
 import * as os from "os";
 import { LLMProviderFactory, LLMSettings } from "../agent/llm/provider-factory";
 import { LLMProviderType } from "../agent/llm/types";
-import { recordLlmCallError, recordLlmCallSuccess } from "../agent/llm/usage-telemetry";
+import {
+  recordLlmCallError,
+  recordLlmCallSuccess,
+} from "../agent/llm/usage-telemetry";
 import { getCustomSkillLoader } from "../agent/custom-skill-loader";
 import { PersonalityManager } from "../settings/personality-manager";
-import { describeSchedule, getCronService, parseIntervalToMs, type CronSchedule } from "../cron";
+import {
+  describeSchedule,
+  getCronService,
+  parseIntervalToMs,
+  type CronSchedule,
+} from "../cron";
 import { getUserDataDir } from "../utils/user-data-dir";
 import {
   getChannelMessage,
@@ -217,9 +225,16 @@ export class MessageRouter {
   // defensively on pause/follow-up events).
   private telegramDraftStreamTouchedTasks: Set<string> = new Set();
   // Destination-scoped cache for recently-sent idempotent messages.
-  private sentIdempotencyKeys: Map<string, { messageId: string; sentAtMs: number }> = new Map();
+  private sentIdempotencyKeys: Map<
+    string,
+    { messageId: string; sentAtMs: number }
+  > = new Map();
 
-  constructor(db: Database.Database, config: RouterConfig = {}, agentDaemon?: AgentDaemon) {
+  constructor(
+    db: Database.Database,
+    config: RouterConfig = {},
+    agentDaemon?: AgentDaemon,
+  ) {
     this.db = db;
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.agentDaemon = agentDaemon;
@@ -283,12 +298,18 @@ export class MessageRouter {
         };
       }
     } catch (error) {
-      console.error("[MessageRouter] Failed to load personality settings:", error);
+      console.error(
+        "[MessageRouter] Failed to load personality settings:",
+        error,
+      );
     }
     return DEFAULT_CHANNEL_CONTEXT;
   }
 
-  private normalizeSimpleChannelMessage(text: string, context: ChannelMessageContext): string {
+  private normalizeSimpleChannelMessage(
+    text: string,
+    context: ChannelMessageContext,
+  ): string {
     if (!text) return text;
 
     let normalized = text;
@@ -321,7 +342,9 @@ export class MessageRouter {
 
     if (
       /i ran into an issue with\s+/.test(normalized) &&
-      /tool|canvas|visual|webview|browser|command|action|screenshot|annotation/i.test(normalized)
+      /tool|canvas|visual|webview|browser|command|action|screenshot|annotation/i.test(
+        normalized,
+      )
     ) {
       return true;
     }
@@ -339,7 +362,9 @@ export class MessageRouter {
       /tool.+(not available|unavailable in this context|unsupported|cannot be used|disabled|failed|permission)/i.test(
         normalized,
       ) &&
-      /canvas|visual|webview|browser|file|command|network|screenshot/i.test(normalized)
+      /canvas|visual|webview|browser|file|command|network|screenshot/i.test(
+        normalized,
+      )
     ) {
       return true;
     }
@@ -438,14 +463,19 @@ export class MessageRouter {
       }
     }
 
-    for (const restriction of this.getChannelBasedToolRestrictions(channelType)) {
+    for (const restriction of this.getChannelBasedToolRestrictions(
+      channelType,
+    )) {
       merged.add(restriction);
     }
 
     return Array.from(merged);
   }
 
-  private normalizeIncomingTextForRouting(channelType: ChannelType, text: string): string {
+  private normalizeIncomingTextForRouting(
+    channelType: ChannelType,
+    text: string,
+  ): string {
     const trimmed = text.trim();
     if (!trimmed || trimmed.startsWith("/")) {
       return trimmed;
@@ -462,9 +492,11 @@ export class MessageRouter {
       return commandFromReply;
     }
 
-    const preambleStrippedText = stripWhatsAppCommandPreamble(replyStrippedText);
+    const preambleStrippedText =
+      stripWhatsAppCommandPreamble(replyStrippedText);
     if (preambleStrippedText !== replyStrippedText) {
-      const commandFromPreamble = normalizeWhatsAppNaturalCommand(preambleStrippedText);
+      const commandFromPreamble =
+        normalizeWhatsAppNaturalCommand(preambleStrippedText);
       return commandFromPreamble ?? preambleStrippedText;
     }
 
@@ -574,9 +606,17 @@ export class MessageRouter {
       const workspaceId = identity.workspaceId;
       const existing = this.workspaceRepo.findById(workspaceId);
       if (existing) {
-        workspace = this.ensureTempWorkspaceRecord(workspaceId, existing.path, existing);
+        workspace = this.ensureTempWorkspaceRecord(
+          workspaceId,
+          existing.path,
+          existing,
+        );
       } else {
-        const workspacePath = path.join(os.tmpdir(), TEMP_WORKSPACE_ROOT_DIR_NAME, identity.slug);
+        const workspacePath = path.join(
+          os.tmpdir(),
+          TEMP_WORKSPACE_ROOT_DIR_NAME,
+          identity.slug,
+        );
         workspace = this.ensureTempWorkspaceRecord(workspaceId, workspacePath);
       }
     } else {
@@ -595,7 +635,11 @@ export class MessageRouter {
         );
         const identity = createScopedTempWorkspaceIdentity("gateway", key);
         const workspaceId = identity.workspaceId;
-        const workspacePath = path.join(os.tmpdir(), TEMP_WORKSPACE_ROOT_DIR_NAME, identity.slug);
+        const workspacePath = path.join(
+          os.tmpdir(),
+          TEMP_WORKSPACE_ROOT_DIR_NAME,
+          identity.slug,
+        );
         workspace = this.ensureTempWorkspaceRecord(workspaceId, workspacePath);
       }
     }
@@ -668,7 +712,8 @@ export class MessageRouter {
 
     // Set up status handler
     adapter.onStatusChange((status, error) => {
-      const eventType = status === "connected" ? "channel:connected" : "channel:disconnected";
+      const eventType =
+        status === "connected" ? "channel:connected" : "channel:disconnected";
       this.emitEvent({
         type: eventType,
         channel: adapter.type,
@@ -733,7 +778,12 @@ export class MessageRouter {
    * Get all registered adapters
    */
   getAllAdapters(): ChannelAdapter[] {
-    return Array.from(new Set([...this.adapters.values(), ...this.adaptersByChannelId.values()]));
+    return Array.from(
+      new Set([
+        ...this.adapters.values(),
+        ...this.adaptersByChannelId.values(),
+      ]),
+    );
   }
 
   private getChannelIdForAdapter(adapter: ChannelAdapter): string | undefined {
@@ -742,7 +792,9 @@ export class MessageRouter {
 
   private getChannelForAdapter(adapter: ChannelAdapter): Channel | undefined {
     const channelId = this.getChannelIdForAdapter(adapter);
-    return channelId ? this.channelRepo.findById(channelId) : this.channelRepo.findByType(adapter.type);
+    return channelId
+      ? this.channelRepo.findById(channelId)
+      : this.channelRepo.findByType(adapter.type);
   }
 
   /**
@@ -753,7 +805,8 @@ export class MessageRouter {
 
     for (const channel of enabledChannels) {
       const adapter =
-        this.getAdapterByChannelId(channel.id) || this.adapters.get(channel.type as ChannelType);
+        this.getAdapterByChannelId(channel.id) ||
+        this.adapters.get(channel.type as ChannelType);
       if (!adapter) continue;
 
       if (adapter.status !== "connected") {
@@ -769,13 +822,18 @@ export class MessageRouter {
         try {
           await this.restorePendingTaskRoutes(adapter);
         } catch (error) {
-          console.error(`[Router] Failed to restore pending tasks for ${adapter.type}:`, error);
+          console.error(
+            `[Router] Failed to restore pending tasks for ${adapter.type}:`,
+            error,
+          );
         }
       }
     }
   }
 
-  private async restorePendingTaskRoutes(adapter: ChannelAdapter): Promise<void> {
+  private async restorePendingTaskRoutes(
+    adapter: ChannelAdapter,
+  ): Promise<void> {
     const channel = this.getChannelForAdapter(adapter);
     if (!channel) return;
 
@@ -788,7 +846,11 @@ export class MessageRouter {
 
       const task = this.taskRepo.findById(session.taskId);
       if (!task) continue;
-      if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
+      if (
+        task.status === "completed" ||
+        task.status === "failed" ||
+        task.status === "cancelled"
+      ) {
         continue;
       }
 
@@ -844,7 +906,11 @@ export class MessageRouter {
     requestingUserName?: string;
   }): void {
     const expiresAt = Date.now() + INLINE_ACTION_GUARD_TTL_MS;
-    const key = this.makeInlineActionGuardKey(params.channelType, params.chatId, params.messageId);
+    const key = this.makeInlineActionGuardKey(
+      params.channelType,
+      params.chatId,
+      params.messageId,
+    );
     const entry = {
       ...params,
       expiresAt,
@@ -871,7 +937,11 @@ export class MessageRouter {
     contextType: "dm" | "group";
   }): void {
     const expiresAt = Date.now() + FEEDBACK_GUARD_TTL_MS;
-    const key = this.makeInlineActionGuardKey(params.channelType, params.chatId, params.messageId);
+    const key = this.makeInlineActionGuardKey(
+      params.channelType,
+      params.chatId,
+      params.messageId,
+    );
     this.pendingFeedbackRequests.set(key, { ...params, expiresAt });
 
     // Best-effort cleanup.
@@ -951,7 +1021,9 @@ export class MessageRouter {
           ? ctx.lastChannelUserName
           : undefined;
     const lastChannelMessageId =
-      typeof ctx?.lastChannelMessageId === "string" ? ctx.lastChannelMessageId : undefined;
+      typeof ctx?.lastChannelMessageId === "string"
+        ? ctx.lastChannelMessageId
+        : undefined;
     return { requestingUserId, requestingUserName, lastChannelMessageId };
   }
 
@@ -981,7 +1053,8 @@ export class MessageRouter {
     const lower = normalized.toLowerCase();
     const candidates = this.agentRoleRepo.findActive();
     const exactByName = candidates.find(
-      (r) => r.name.toLowerCase() === lower || r.displayName.toLowerCase() === lower,
+      (r) =>
+        r.name.toLowerCase() === lower || r.displayName.toLowerCase() === lower,
     );
     if (exactByName) {
       return { role: exactByName, matches: [] };
@@ -1034,7 +1107,8 @@ export class MessageRouter {
         const channel = this.channelRepo.findById(session.channelId);
         if (!channel) return undefined;
         const adapter =
-          this.getAdapterByChannelId(channel.id) || this.adapters.get(channel.type as ChannelType);
+          this.getAdapterByChannelId(channel.id) ||
+          this.adapters.get(channel.type as ChannelType);
         if (!adapter) return undefined;
 
         const { requestingUserId, requestingUserName, lastChannelMessageId } =
@@ -1083,7 +1157,11 @@ export class MessageRouter {
     channelId?: string,
   ): Promise<string> {
     this.cleanupIdempotencyCache();
-    const cacheKey = this.getIdempotencyCacheKey(channelType, message, channelId);
+    const cacheKey = this.getIdempotencyCacheKey(
+      channelType,
+      message,
+      channelId,
+    );
     if (cacheKey) {
       const existing = this.sentIdempotencyKeys.get(cacheKey);
       if (existing) {
@@ -1096,7 +1174,9 @@ export class MessageRouter {
       : this.adapters.get(channelType);
     if (!adapter) {
       const suffix = channelId ? ` (channel ${channelId})` : "";
-      throw new Error(`No adapter registered for channel type: ${channelType}${suffix}`);
+      throw new Error(
+        `No adapter registered for channel type: ${channelType}${suffix}`,
+      );
     }
 
     if (adapter.status !== "connected") {
@@ -1105,12 +1185,17 @@ export class MessageRouter {
 
     const messageId = await adapter.sendMessage(message);
     if (cacheKey) {
-      this.sentIdempotencyKeys.set(cacheKey, { messageId, sentAtMs: Date.now() });
+      this.sentIdempotencyKeys.set(cacheKey, {
+        messageId,
+        sentAtMs: Date.now(),
+      });
     }
 
     // Best-effort logging: never fail delivery because persistence failed.
     try {
-      const channel = channelId ? this.channelRepo.findById(channelId) : this.channelRepo.findByType(channelType);
+      const channel = channelId
+        ? this.channelRepo.findById(channelId)
+        : this.channelRepo.findByType(channelType);
       if (channel) {
         this.messageRepo.create({
           channelId: channel.id,
@@ -1130,7 +1215,10 @@ export class MessageRouter {
         });
       }
     } catch (logError) {
-      console.warn(`[Router] Failed to log outgoing message (${channelType}):`, logError);
+      console.warn(
+        `[Router] Failed to log outgoing message (${channelType}):`,
+        logError,
+      );
     }
 
     return messageId;
@@ -1160,9 +1248,12 @@ export class MessageRouter {
     channelId?: string,
   ): string | null {
     const idempotencyKey =
-      typeof message.idempotencyKey === "string" ? message.idempotencyKey.trim() : "";
+      typeof message.idempotencyKey === "string"
+        ? message.idempotencyKey.trim()
+        : "";
     if (!idempotencyKey) return null;
-    const chatId = typeof message.chatId === "string" ? message.chatId.trim() : "";
+    const chatId =
+      typeof message.chatId === "string" ? message.chatId.trim() : "";
     const destination = channelId ? `${channelId}:${chatId}` : chatId;
     return `${channelType}:${destination}:${idempotencyKey}`;
   }
@@ -1179,7 +1270,11 @@ export class MessageRouter {
   private toDbAttachments(
     attachments?: MessageAttachment[],
   ): Array<{ type: string; url?: string; fileName?: string }> | undefined {
-    if (!attachments || !Array.isArray(attachments) || attachments.length === 0) {
+    if (
+      !attachments ||
+      !Array.isArray(attachments) ||
+      attachments.length === 0
+    ) {
       return undefined;
     }
 
@@ -1188,14 +1283,19 @@ export class MessageRouter {
         const type = typeof att?.type === "string" ? att.type : "";
         if (!type) return null;
         const url = typeof att?.url === "string" ? att.url : undefined;
-        const fileName = typeof att?.fileName === "string" ? att.fileName : undefined;
+        const fileName =
+          typeof att?.fileName === "string" ? att.fileName : undefined;
         return {
           type,
           ...(url ? { url } : {}),
           ...(fileName ? { fileName } : {}),
         };
       })
-      .filter(Boolean) as Array<{ type: string; url?: string; fileName?: string }>;
+      .filter(Boolean) as Array<{
+      type: string;
+      url?: string;
+      fileName?: string;
+    }>;
 
     return safe.length > 0 ? safe : undefined;
   }
@@ -1204,8 +1304,12 @@ export class MessageRouter {
     channelType: ChannelType,
     message: IncomingMessage,
     workspace: Workspace,
-  ): Promise<Array<{ type: string; relPath: string; absPath: string; mimeType?: string }>> {
-    const attachments = Array.isArray(message.attachments) ? message.attachments : [];
+  ): Promise<
+    Array<{ type: string; relPath: string; absPath: string; mimeType?: string }>
+  > {
+    const attachments = Array.isArray(message.attachments)
+      ? message.attachments
+      : [];
     if (attachments.length === 0) return [];
 
     const now = new Date();
@@ -1227,17 +1331,27 @@ export class MessageRouter {
     try {
       await fs.promises.mkdir(baseDirAbs, { recursive: true });
     } catch (error) {
-      console.warn("[Router] Failed to create attachment directory:", baseDirAbs, error);
+      console.warn(
+        "[Router] Failed to create attachment directory:",
+        baseDirAbs,
+        error,
+      );
       return [];
     }
 
     const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024; // 25MB per attachment
-    const saved: Array<{ type: string; relPath: string; absPath: string; mimeType?: string }> = [];
+    const saved: Array<{
+      type: string;
+      relPath: string;
+      absPath: string;
+      mimeType?: string;
+    }> = [];
 
     for (let i = 0; i < attachments.length; i++) {
       const att = attachments[i];
       const type = typeof att?.type === "string" ? att.type : "file";
-      const mimeType = typeof att?.mimeType === "string" ? att.mimeType : undefined;
+      const mimeType =
+        typeof att?.mimeType === "string" ? att.mimeType : undefined;
       const ext =
         path.extname(att?.fileName || "") ||
         path.extname(att?.url || "") ||
@@ -1261,13 +1375,20 @@ export class MessageRouter {
       if (fs.existsSync(destAbs)) {
         const stem = path.basename(fileName, path.extname(fileName));
         const suffix = `${Date.now()}-${i + 1}`;
-        destAbs = path.join(baseDirAbs, `${stem}-${suffix}${path.extname(fileName)}`);
+        destAbs = path.join(
+          baseDirAbs,
+          `${stem}-${suffix}${path.extname(fileName)}`,
+        );
       }
 
       try {
         if (att?.data && Buffer.isBuffer(att.data)) {
           if (att.data.length > MAX_ATTACHMENT_BYTES) {
-            console.warn("[Router] Skipping attachment (too large):", att.data.length, "bytes");
+            console.warn(
+              "[Router] Skipping attachment (too large):",
+              att.data.length,
+              "bytes",
+            );
             continue;
           }
           await fs.promises.writeFile(destAbs, att.data);
@@ -1284,7 +1405,9 @@ export class MessageRouter {
         if (!url) continue;
 
         // Local file path
-        const localPath = url.startsWith("file://") ? url.replace("file://", "") : url;
+        const localPath = url.startsWith("file://")
+          ? url.replace("file://", "")
+          : url;
         if (path.isAbsolute(localPath) && fs.existsSync(localPath)) {
           await fs.promises.copyFile(localPath, destAbs);
           saved.push({
@@ -1341,7 +1464,8 @@ export class MessageRouter {
               type,
               absPath: destAbs,
               relPath: toPosixRelPath(workspace.path, destAbs),
-              mimeType: mimeType || res.headers.get("content-type") || undefined,
+              mimeType:
+                mimeType || res.headers.get("content-type") || undefined,
             });
           } finally {
             clearTimeout(timeout);
@@ -1367,10 +1491,16 @@ export class MessageRouter {
       params.message.attachments.some((a) => a?.type === "audio");
     if (!hasAudio) return;
 
-    const transcript = extractVoiceTranscriptFromMessageText(params.message.text);
+    const transcript = extractVoiceTranscriptFromMessageText(
+      params.message.text,
+    );
     if (!transcript) return;
 
-    const prioritiesPath = path.join(params.workspace.path, ".cowork", "PRIORITIES.md");
+    const prioritiesPath = path.join(
+      params.workspace.path,
+      ".cowork",
+      "PRIORITIES.md",
+    );
     if (!fs.existsSync(prioritiesPath)) return;
 
     // Extract structured priorities from the transcript via the configured LLM (best-effort).
@@ -1378,14 +1508,19 @@ export class MessageRouter {
     let extractedDecisions: string[] = [];
     let extractedActionItems: string[] = [];
     let extractedContextShifts: string[] = [];
+    let telemetryProviderType = "";
+    let telemetryModelId = "";
     try {
       const provider = LLMProviderFactory.createProvider();
+      telemetryProviderType = provider.type;
       const settings = LLMProviderFactory.getSettings();
       const providerType = LLMProviderFactory.getSelectedProvider();
-      const azureDeployment = settings.azure?.deployment || settings.azure?.deployments?.[0];
+      const azureDeployment =
+        settings.azure?.deployment || settings.azure?.deployments?.[0];
       const azureAnthropicDeployment =
-        settings.azureAnthropic?.deployment || settings.azureAnthropic?.deployments?.[0];
-      const modelId = LLMProviderFactory.getModelId(
+        settings.azureAnthropic?.deployment ||
+        settings.azureAnthropic?.deployments?.[0];
+      telemetryModelId = LLMProviderFactory.getModelId(
         settings.modelKey,
         providerType,
         settings.ollama?.model,
@@ -1417,7 +1552,7 @@ export class MessageRouter {
       let resp;
       try {
         resp = await provider.createMessage({
-          model: modelId,
+          model: telemetryModelId,
           maxTokens: 600,
           system,
           messages: [
@@ -1433,9 +1568,9 @@ export class MessageRouter {
             workspaceId: params.workspace.id,
             sourceKind: "gateway_voice_priorities",
             sourceId: params.message.messageId,
-            providerType: provider.type,
-            modelKey: modelId,
-            modelId,
+            providerType: telemetryProviderType,
+            modelKey: telemetryModelId,
+            modelId: telemetryModelId,
           },
           resp.usage,
         );
@@ -1448,20 +1583,31 @@ export class MessageRouter {
         .map((c: Any) => c.text)
         .join("\n");
 
-      const values = extractJsonValues(text, { maxResults: 1, allowRepair: true });
+      const values = extractJsonValues(text, {
+        maxResults: 1,
+        allowRepair: true,
+      });
       const obj = values[0] as Any;
       if (obj && typeof obj === "object") {
         if (Array.isArray(obj.priorities)) {
-          extractedPriorities = obj.priorities.filter((p: Any) => typeof p === "string");
+          extractedPriorities = obj.priorities.filter(
+            (p: Any) => typeof p === "string",
+          );
         }
         if (Array.isArray(obj.decisions)) {
-          extractedDecisions = obj.decisions.filter((p: Any) => typeof p === "string");
+          extractedDecisions = obj.decisions.filter(
+            (p: Any) => typeof p === "string",
+          );
         }
         if (Array.isArray(obj.action_items)) {
-          extractedActionItems = obj.action_items.filter((p: Any) => typeof p === "string");
+          extractedActionItems = obj.action_items.filter(
+            (p: Any) => typeof p === "string",
+          );
         }
         if (Array.isArray(obj.context_shifts)) {
-          extractedContextShifts = obj.context_shifts.filter((p: Any) => typeof p === "string");
+          extractedContextShifts = obj.context_shifts.filter(
+            (p: Any) => typeof p === "string",
+          );
         }
       }
     } catch (error) {
@@ -1470,6 +1616,9 @@ export class MessageRouter {
           workspaceId: params.workspace.id,
           sourceKind: "gateway_voice_priorities",
           sourceId: params.message.messageId,
+          providerType: telemetryProviderType,
+          modelKey: telemetryModelId,
+          modelId: telemetryModelId,
         },
         error,
       );
@@ -1500,7 +1649,12 @@ export class MessageRouter {
         formatLocalTimestamp(new Date()),
       );
       if (next !== current) {
-        writeKitFileWithSnapshot(prioritiesPath, next, "agent", "router:voice_priorities_update");
+        writeKitFileWithSnapshot(
+          prioritiesPath,
+          next,
+          "agent",
+          "router:voice_priorities_update",
+        );
       }
     } catch (error) {
       console.warn("[Router] Failed to update PRIORITIES.md:", error);
@@ -1510,7 +1664,10 @@ export class MessageRouter {
   /**
    * Handle an incoming message
    */
-  private async handleMessage(adapter: ChannelAdapter, message: IncomingMessage): Promise<void> {
+  private async handleMessage(
+    adapter: ChannelAdapter,
+    message: IncomingMessage,
+  ): Promise<void> {
     const channelType = adapter.type;
     const channel = this.getChannelForAdapter(adapter);
 
@@ -1521,11 +1678,16 @@ export class MessageRouter {
 
     const channelConfig = (channel.config || {}) as Any;
     const ambientMode = channelConfig.ambientMode === true;
-    const silentUnauthorized = channelConfig.silentUnauthorized === true || ambientMode;
-    message.text = this.normalizeIncomingTextForRouting(adapter.type, message.text);
+    const silentUnauthorized =
+      channelConfig.silentUnauthorized === true || ambientMode;
+    message.text = this.normalizeIncomingTextForRouting(
+      adapter.type,
+      message.text,
+    );
     const textTrimmed = (message.text || "").trim();
     const ambientIngestOnly =
-      ambientMode && !(textTrimmed.startsWith("/") || this.looksLikePairingCode(textTrimmed));
+      ambientMode &&
+      !(textTrimmed.startsWith("/") || this.looksLikePairingCode(textTrimmed));
     const ingestOnly = message.ingestOnly === true || ambientIngestOnly;
 
     // Security check first (avoid doing extra work like transcription for unauthorized users)
@@ -1546,7 +1708,8 @@ export class MessageRouter {
       channelMessageId: message.messageId,
       chatId: message.chatId,
       userId: securityResult.user?.id,
-      direction: message.direction === "outgoing_user" ? "outgoing_user" : "incoming",
+      direction:
+        message.direction === "outgoing_user" ? "outgoing_user" : "incoming",
       content: message.text,
       attachments: this.toDbAttachments(message.attachments),
       timestamp: message.timestamp.getTime(),
@@ -1694,10 +1857,16 @@ export class MessageRouter {
     const pendingFeedback = ctx?.pendingFeedback as Any;
 
     if (pendingFeedback && typeof pendingFeedback === "object") {
-      const kind = typeof pendingFeedback.kind === "string" ? pendingFeedback.kind : "";
-      const taskId = typeof pendingFeedback.taskId === "string" ? pendingFeedback.taskId : "";
+      const kind =
+        typeof pendingFeedback.kind === "string" ? pendingFeedback.kind : "";
+      const taskId =
+        typeof pendingFeedback.taskId === "string"
+          ? pendingFeedback.taskId
+          : "";
       const createdAt =
-        typeof pendingFeedback.createdAt === "number" ? pendingFeedback.createdAt : 0;
+        typeof pendingFeedback.createdAt === "number"
+          ? pendingFeedback.createdAt
+          : 0;
       const requestingUserId =
         typeof pendingFeedback.requestingUserId === "string"
           ? pendingFeedback.requestingUserId
@@ -1705,12 +1874,16 @@ export class MessageRouter {
       const ageMs = Date.now() - createdAt;
 
       if (!kind || !taskId || ageMs > PENDING_FEEDBACK_TTL_MS) {
-        this.sessionManager.updateSessionContext(sessionId, { pendingFeedback: undefined });
+        this.sessionManager.updateSessionContext(sessionId, {
+          pendingFeedback: undefined,
+        });
       } else if (requestingUserId && requestingUserId !== message.userId) {
         // In group chats, only the user who initiated the feedback flow can continue it.
         // For DMs, this is always the same user.
       } else if (kind === "reject_reason") {
-        this.sessionManager.updateSessionContext(sessionId, { pendingFeedback: undefined });
+        this.sessionManager.updateSessionContext(sessionId, {
+          pendingFeedback: undefined,
+        });
 
         const reason = text.trim();
         this.logUserFeedback(taskId, {
@@ -1732,7 +1905,9 @@ export class MessageRouter {
         });
         return;
       } else if (kind === "edit") {
-        this.sessionManager.updateSessionContext(sessionId, { pendingFeedback: undefined });
+        this.sessionManager.updateSessionContext(sessionId, {
+          pendingFeedback: undefined,
+        });
 
         const instructions = text.trim();
         if (instructions.toLowerCase() === "skip") {
@@ -1773,22 +1948,32 @@ export class MessageRouter {
       typeof pendingSelection.type === "string"
     ) {
       const createdAt =
-        typeof pendingSelection.createdAt === "number" ? pendingSelection.createdAt : 0;
+        typeof pendingSelection.createdAt === "number"
+          ? pendingSelection.createdAt
+          : 0;
       const ageMs = Date.now() - createdAt;
 
       if (ageMs > PENDING_SELECTION_TTL_MS) {
         // Expired - clear and proceed normally.
-        this.sessionManager.updateSessionContext(sessionId, { pendingSelection: undefined });
+        this.sessionManager.updateSessionContext(sessionId, {
+          pendingSelection: undefined,
+        });
       } else {
         // Only treat as a selection if the user reply looks like a selection (not a full task).
-        const looksLikeSelection = /^[0-9]+$/.test(text) || (!/\s/.test(text) && text.length <= 48);
+        const looksLikeSelection =
+          /^[0-9]+$/.test(text) || (!/\s/.test(text) && text.length <= 48);
         if (!looksLikeSelection) {
           // User likely sent a real task; clear pending selection and continue.
-          this.sessionManager.updateSessionContext(sessionId, { pendingSelection: undefined });
+          this.sessionManager.updateSessionContext(sessionId, {
+            pendingSelection: undefined,
+          });
         } else if (pendingSelection.type === "workspace") {
           const workspaces = this.workspaceRepo
             .findAll()
-            .filter((workspace) => !workspace.isTemp && !isTempWorkspaceId(workspace.id));
+            .filter(
+              (workspace) =>
+                !workspace.isTemp && !isTempWorkspaceId(workspace.id),
+            );
           const isNumeric = /^[0-9]+$/.test(text);
           const num = parseInt(text, 10);
           let workspace: Workspace | undefined;
@@ -1807,7 +1992,8 @@ export class MessageRouter {
             const lowered = text.toLowerCase();
             workspace = workspaces.find(
               (ws) =>
-                ws.name.toLowerCase() === lowered || ws.name.toLowerCase().startsWith(lowered),
+                ws.name.toLowerCase() === lowered ||
+                ws.name.toLowerCase().startsWith(lowered),
             );
           }
 
@@ -1817,10 +2003,15 @@ export class MessageRouter {
               try {
                 this.workspaceRepo.updateLastUsedAt(workspace.id);
               } catch (error) {
-                console.warn("Failed to update workspace last used time:", error);
+                console.warn(
+                  "Failed to update workspace last used time:",
+                  error,
+                );
               }
             }
-            this.sessionManager.updateSessionContext(sessionId, { pendingSelection: undefined });
+            this.sessionManager.updateSessionContext(sessionId, {
+              pendingSelection: undefined,
+            });
             const selectedText = this.getUiCopy("workspaceSelected", {
               workspaceName: workspace.name,
             });
@@ -1834,7 +2025,9 @@ export class MessageRouter {
           }
 
           // Not a valid selection; treat the next message as a normal task prompt.
-          this.sessionManager.updateSessionContext(sessionId, { pendingSelection: undefined });
+          this.sessionManager.updateSessionContext(sessionId, {
+            pendingSelection: undefined,
+          });
         } else if (pendingSelection.type === "provider") {
           const selector = text.toLowerCase();
           const providerMap: Record<string, LLMProviderType> = {
@@ -1873,9 +2066,13 @@ export class MessageRouter {
             }
 
             // Otherwise, treat as normal task prompt.
-            this.sessionManager.updateSessionContext(sessionId, { pendingSelection: undefined });
+            this.sessionManager.updateSessionContext(sessionId, {
+              pendingSelection: undefined,
+            });
           } else {
-            this.sessionManager.updateSessionContext(sessionId, { pendingSelection: undefined });
+            this.sessionManager.updateSessionContext(sessionId, {
+              pendingSelection: undefined,
+            });
             await this.handleProviderCommand(adapter, message, [text]);
             return;
           }
@@ -1890,7 +2087,9 @@ export class MessageRouter {
       // Check if this looks like workspace selection (number or short name)
       const workspaces = this.workspaceRepo
         .findAll()
-        .filter((workspace) => !workspace.isTemp && !isTempWorkspaceId(workspace.id));
+        .filter(
+          (workspace) => !workspace.isTemp && !isTempWorkspaceId(workspace.id),
+        );
       if (workspaces.length > 0) {
         // Try to match by number
         const num = parseInt(text, 10);
@@ -1923,8 +2122,14 @@ export class MessageRouter {
             ws.name.toLowerCase().startsWith(text.toLowerCase()),
         );
         if (matchedWorkspace) {
-          this.sessionManager.setSessionWorkspace(sessionId, matchedWorkspace.id);
-          if (!matchedWorkspace.isTemp && !isTempWorkspaceId(matchedWorkspace.id)) {
+          this.sessionManager.setSessionWorkspace(
+            sessionId,
+            matchedWorkspace.id,
+          );
+          if (
+            !matchedWorkspace.isTemp &&
+            !isTempWorkspaceId(matchedWorkspace.id)
+          ) {
             try {
               this.workspaceRepo.updateLastUsedAt(matchedWorkspace.id);
             } catch (error) {
@@ -1962,7 +2167,8 @@ export class MessageRouter {
           channelType: adapter.type,
           sessionId,
           message,
-          contextType: securityContext?.contextType ?? (message.isGroup ? "group" : "dm"),
+          contextType:
+            securityContext?.contextType ?? (message.isGroup ? "group" : "dm"),
           taskId: freshSession?.taskId ?? null,
         });
 
@@ -1990,10 +2196,16 @@ export class MessageRouter {
                 try {
                   this.workspaceRepo.updateLastUsedAt(nextWs.id);
                 } catch (error) {
-                  console.warn("Failed to update workspace last used time:", error);
+                  console.warn(
+                    "Failed to update workspace last used time:",
+                    error,
+                  );
                 }
               }
-              if (typeof ruleResult.text === "string" && ruleResult.text.trim().length > 0) {
+              if (
+                typeof ruleResult.text === "string" &&
+                ruleResult.text.trim().length > 0
+              ) {
                 message.text = ruleResult.text;
               }
             }
@@ -2003,12 +2215,17 @@ export class MessageRouter {
             if (!securityContext) securityContext = {};
             securityContext.agentRoleId = ruleResult.agentRoleId;
             if (ruleResult.workspaceId) {
-              const nextWs = this.workspaceRepo.findById(ruleResult.workspaceId);
+              const nextWs = this.workspaceRepo.findById(
+                ruleResult.workspaceId,
+              );
               if (nextWs) {
                 this.sessionManager.setSessionWorkspace(sessionId, nextWs.id);
               }
             }
-            if (typeof ruleResult.text === "string" && ruleResult.text.trim().length > 0) {
+            if (
+              typeof ruleResult.text === "string" &&
+              ruleResult.text.trim().length > 0
+            ) {
               message.text = ruleResult.text;
             }
           }
@@ -2021,7 +2238,9 @@ export class MessageRouter {
     // Research chat routing: when message is from a designated research chat (Telegram/WhatsApp),
     // route to research agent and inject the research prompt.
     const sess = this.sessionRepo.findById(sessionId);
-    const channel = sess?.channelId ? this.channelRepo.findById(sess.channelId) : null;
+    const channel = sess?.channelId
+      ? this.channelRepo.findById(sess.channelId)
+      : null;
     const channelConfig = (channel?.config || {}) as Record<string, unknown>;
     const researchResult = applyResearchChatRouting({
       channelType: adapter.type,
@@ -2043,7 +2262,12 @@ export class MessageRouter {
     }
 
     // Regular message - send to desktop app for task processing
-    await this.forwardToDesktopApp(adapter, message, sessionId, securityContext);
+    await this.forwardToDesktopApp(
+      adapter,
+      message,
+      sessionId,
+      securityContext,
+    );
   }
 
   /**
@@ -2075,11 +2299,23 @@ export class MessageRouter {
         break;
 
       case "/brief":
-        await this.handleBriefCommand(adapter, message, sessionId, args, securityContext);
+        await this.handleBriefCommand(
+          adapter,
+          message,
+          sessionId,
+          args,
+          securityContext,
+        );
         break;
 
       case "/inbox":
-        await this.handleInboxCommand(adapter, message, sessionId, args, securityContext);
+        await this.handleInboxCommand(
+          adapter,
+          message,
+          sessionId,
+          args,
+          securityContext,
+        );
         break;
 
       case "/simplify":
@@ -2105,16 +2341,34 @@ export class MessageRouter {
         break;
 
       case "/schedule":
-        await this.handleScheduleCommand(adapter, message, sessionId, args, securityContext);
+        await this.handleScheduleCommand(
+          adapter,
+          message,
+          sessionId,
+          args,
+          securityContext,
+        );
         break;
 
       case "/digest":
-        await this.handleDigestCommand(adapter, message, sessionId, args, securityContext);
+        await this.handleDigestCommand(
+          adapter,
+          message,
+          sessionId,
+          args,
+          securityContext,
+        );
         break;
 
       case "/followups":
       case "/commitments":
-        await this.handleFollowupsCommand(adapter, message, sessionId, args, securityContext);
+        await this.handleFollowupsCommand(
+          adapter,
+          message,
+          sessionId,
+          args,
+          securityContext,
+        );
         break;
 
       case "/workspaces":
@@ -2201,7 +2455,13 @@ export class MessageRouter {
         break;
 
       case "/feedback":
-        await this.handleFeedbackCommand(adapter, message, sessionId, args, securityContext);
+        await this.handleFeedbackCommand(
+          adapter,
+          message,
+          sessionId,
+          args,
+          securityContext,
+        );
         break;
 
       case "/queue":
@@ -2209,7 +2469,12 @@ export class MessageRouter {
         break;
 
       case "/removeworkspace":
-        await this.handleRemoveWorkspaceCommand(adapter, message, sessionId, args);
+        await this.handleRemoveWorkspaceCommand(
+          adapter,
+          message,
+          sessionId,
+          args,
+        );
         break;
 
       case "/retry":
@@ -2335,8 +2600,12 @@ export class MessageRouter {
       return;
     }
 
-    if (message.isGroup && !this.isSessionTaskController(session, message.userId)) {
-      const requesterName = this.resolveTaskRequesterFromSessionContext(session).requestingUserName;
+    if (
+      message.isGroup &&
+      !this.isSessionTaskController(session, message.userId)
+    ) {
+      const requesterName =
+        this.resolveTaskRequesterFromSessionContext(session).requestingUserName;
       const who = requesterName ? `*${requesterName}*` : "the task owner";
       await adapter.sendMessage({
         chatId: message.chatId,
@@ -2442,8 +2711,12 @@ export class MessageRouter {
       return;
     }
 
-    if (message.isGroup && !this.isSessionTaskController(session, message.userId)) {
-      const requesterName = this.resolveTaskRequesterFromSessionContext(session).requestingUserName;
+    if (
+      message.isGroup &&
+      !this.isSessionTaskController(session, message.userId)
+    ) {
+      const requesterName =
+        this.resolveTaskRequesterFromSessionContext(session).requestingUserName;
       const who = requesterName ? `*${requesterName}*` : "the task owner";
       await adapter.sendMessage({
         chatId: message.chatId,
@@ -2455,7 +2728,11 @@ export class MessageRouter {
     }
 
     if (task.status !== "paused") {
-      if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
+      if (
+        task.status === "completed" ||
+        task.status === "failed" ||
+        task.status === "cancelled"
+      ) {
         await adapter.sendMessage({
           chatId: message.chatId,
           text: `🛑 This task is already ${task.status}. Send a new message to start a fresh request.`,
@@ -2582,8 +2859,11 @@ export class MessageRouter {
       }
     })();
 
-    const title = task.title.length > 72 ? `${task.title.substring(0, 72)}...` : task.title;
-    const isFinished = ["completed", "failed", "cancelled"].includes(task.status);
+    const title =
+      task.title.length > 72 ? `${task.title.substring(0, 72)}...` : task.title;
+    const isFinished = ["completed", "failed", "cancelled"].includes(
+      task.status,
+    );
 
     const messageText =
       "🧭 Task Snapshot\n\n" +
@@ -2666,7 +2946,9 @@ export class MessageRouter {
         chatId: message.chatId,
         parseMode: "markdown",
         replyTo: message.messageId,
-        text: `I didn't recognize **${input}**.\n\n` + "Use one of: `all`, `mention`, `commands`.",
+        text:
+          `I didn't recognize **${input}**.\n\n` +
+          "Use one of: `all`, `mention`, `commands`.",
       });
       return;
     }
@@ -2678,7 +2960,9 @@ export class MessageRouter {
     this.channelRepo.update(channel.id, { config: nextConfig });
 
     if (adapter.updateConfig) {
-      this.applyWhatsAppConfigPatch(adapter, channel, { groupRoutingMode: mode });
+      this.applyWhatsAppConfigPatch(adapter, channel, {
+        groupRoutingMode: mode,
+      });
     }
 
     const nextMode = this.formatWhatsAppGroupRoutingMode(mode);
@@ -2692,7 +2976,12 @@ export class MessageRouter {
 
   private resolveWhatsAppGroupMode(
     value: string,
-  ): "all" | "mentionsOnly" | "mentionsOrCommands" | "commandsOnly" | undefined {
+  ):
+    | "all"
+    | "mentionsOnly"
+    | "mentionsOrCommands"
+    | "commandsOnly"
+    | undefined {
     const normalized = value
       .trim()
       .toLowerCase()
@@ -2792,8 +3081,10 @@ export class MessageRouter {
     }
 
     let next: boolean | null = null;
-    if (["on", "true", "enable", "enabled", "yes", "y"].includes(input)) next = true;
-    if (["off", "false", "disable", "disabled", "no", "n"].includes(input)) next = false;
+    if (["on", "true", "enable", "enabled", "yes", "y"].includes(input))
+      next = true;
+    if (["off", "false", "disable", "disabled", "no", "n"].includes(input))
+      next = false;
 
     if (next === null) {
       await adapter.sendMessage({
@@ -2805,7 +3096,9 @@ export class MessageRouter {
       return;
     }
 
-    this.applyWhatsAppConfigPatch(adapter, channel, { trustedGroupMemoryOptIn: next });
+    this.applyWhatsAppConfigPatch(adapter, channel, {
+      trustedGroupMemoryOptIn: next,
+    });
 
     await adapter.sendMessage({
       chatId: message.chatId,
@@ -2817,7 +3110,8 @@ export class MessageRouter {
 
   private formatWhatsAppGroupRoutingMode(mode: string): string {
     const normalized =
-      this.resolveWhatsAppGroupMode(mode) || this.resolveWhatsAppGroupMode("mentionsorcommands");
+      this.resolveWhatsAppGroupMode(mode) ||
+      this.resolveWhatsAppGroupMode("mentionsorcommands");
     switch (normalized) {
       case "all":
         return "all";
@@ -2895,7 +3189,10 @@ export class MessageRouter {
       selfChatMode: nextMode,
     });
 
-    const next = typeof nextConfig.selfChatMode === "boolean" ? nextConfig.selfChatMode : false;
+    const next =
+      typeof nextConfig.selfChatMode === "boolean"
+        ? nextConfig.selfChatMode
+        : false;
     await adapter.sendMessage({
       chatId: message.chatId,
       parseMode: "markdown",
@@ -2931,7 +3228,9 @@ export class MessageRouter {
 
     const channelConfig = (channel.config || {}) as Record<string, unknown>;
     const current =
-      typeof channelConfig.ambientMode === "boolean" ? channelConfig.ambientMode : false;
+      typeof channelConfig.ambientMode === "boolean"
+        ? channelConfig.ambientMode
+        : false;
 
     if (args.length === 0) {
       await adapter.sendMessage({
@@ -3003,7 +3302,8 @@ export class MessageRouter {
     const selfChatEnabled =
       typeof channelConfig.selfChatMode === "boolean"
         ? channelConfig.selfChatMode
-        : (adapter as unknown as { isSelfChatMode?: boolean }).isSelfChatMode === true;
+        : (adapter as unknown as { isSelfChatMode?: boolean })
+            .isSelfChatMode === true;
 
     if (args.length === 0) {
       await adapter.sendMessage({
@@ -3033,11 +3333,14 @@ export class MessageRouter {
       return;
     }
 
-    this.applyWhatsAppConfigPatch(adapter, channel, { ingestNonSelfChatsInSelfChatMode: nextMode });
+    this.applyWhatsAppConfigPatch(adapter, channel, {
+      ingestNonSelfChatsInSelfChatMode: nextMode,
+    });
 
     let note = "";
     if (nextMode && !selfChatEnabled) {
-      note = "\n\n⚠️ This only affects incoming messages while self-chat is enabled.";
+      note =
+        "\n\n⚠️ This only affects incoming messages while self-chat is enabled.";
     }
 
     await adapter.sendMessage({
@@ -3075,7 +3378,8 @@ export class MessageRouter {
 
     const currentRaw =
       channel.config &&
-      typeof (channel.config as Record<string, unknown>).responsePrefix === "string"
+      typeof (channel.config as Record<string, unknown>).responsePrefix ===
+        "string"
         ? String((channel.config as Record<string, unknown>).responsePrefix)
         : undefined;
     const current = currentRaw === "" ? "off" : (currentRaw ?? "🤖");
@@ -3109,7 +3413,11 @@ export class MessageRouter {
 
     const normalized = rawValue.toLowerCase();
     let nextValue: string;
-    if (["off", "none", "disable", "disabled", "clear", "remove"].includes(normalized)) {
+    if (
+      ["off", "none", "disable", "disabled", "clear", "remove"].includes(
+        normalized,
+      )
+    ) {
       nextValue = "";
     } else if (["default", "reset", "restore"].includes(normalized)) {
       nextValue = "🤖";
@@ -3117,7 +3425,9 @@ export class MessageRouter {
       nextValue = rawValue;
     }
 
-    this.applyWhatsAppConfigPatch(adapter, channel, { responsePrefix: nextValue });
+    this.applyWhatsAppConfigPatch(adapter, channel, {
+      responsePrefix: nextValue,
+    });
 
     const displayed = nextValue === "" ? "off" : nextValue;
     await adapter.sendMessage({
@@ -3181,7 +3491,9 @@ export class MessageRouter {
     const allowlistText =
       currentNumbers.length === 0
         ? "No restriction (all numbers can interact)."
-        : currentNumbers.map((value, index) => `${index + 1}. \`${value}\``).join("\n");
+        : currentNumbers
+            .map((value, index) => `${index + 1}. \`${value}\``)
+            .join("\n");
 
     await adapter.sendMessage({
       chatId: message.chatId,
@@ -3225,7 +3537,9 @@ export class MessageRouter {
 
     if (args.length === 0) {
       const usage =
-        action === "add" ? "Usage: `/allow +14155551234`" : "Usage: `/disallow +14155551234`";
+        action === "add"
+          ? "Usage: `/allow +14155551234`"
+          : "Usage: `/disallow +14155551234`";
       await adapter.sendMessage({
         chatId: message.chatId,
         parseMode: "markdown",
@@ -3291,10 +3605,16 @@ export class MessageRouter {
 
   private parseBooleanCommandValue(value: string): boolean | undefined {
     const normalized = value.trim().toLowerCase();
-    if (["on", "enable", "enabled", "true", "1", "yes", "y"].includes(normalized)) {
+    if (
+      ["on", "enable", "enabled", "true", "1", "yes", "y"].includes(normalized)
+    ) {
       return true;
     }
-    if (["off", "disable", "disabled", "false", "0", "no", "n"].includes(normalized)) {
+    if (
+      ["off", "disable", "disabled", "false", "0", "no", "n"].includes(
+        normalized,
+      )
+    ) {
       return false;
     }
     return undefined;
@@ -3303,7 +3623,9 @@ export class MessageRouter {
   private parseWhatsAppNumbers(args: string[]): string[] {
     const raw = args.join(" ");
     const groups = raw.match(/(?:\+?\d[\d\s().-]{3,}\d)/g);
-    const normalized = (groups && groups.length > 0 ? groups : raw.split(/[\s,]+/))
+    const normalized = (
+      groups && groups.length > 0 ? groups : raw.split(/[\s,]+/)
+    )
       .map((item) => item.replace(/\D+/g, "").trim())
       .filter((item): item is string => item.length >= 5);
 
@@ -3364,7 +3686,8 @@ export class MessageRouter {
       }
 
       const roleRows = roles.map((role, index) => {
-        const isActive = role.id === selectedRoleId ? " (active for this chat)" : "";
+        const isActive =
+          role.id === selectedRoleId ? " (active for this chat)" : "";
         return `${index + 1}. ${role.icon} ${role.name} — ${role.displayName}${isActive}`;
       });
 
@@ -3392,8 +3715,15 @@ export class MessageRouter {
       return;
     }
 
-    if (action === "clear" || action === "reset" || action === "default" || action === "off") {
-      this.sessionManager.updateSessionContext(sessionId, { preferredAgentRoleId: null });
+    if (
+      action === "clear" ||
+      action === "reset" ||
+      action === "default" ||
+      action === "off"
+    ) {
+      this.sessionManager.updateSessionContext(sessionId, {
+        preferredAgentRoleId: null,
+      });
       await adapter.sendMessage({
         chatId: message.chatId,
         text: "✅ Cleared agent preference for this chat. New tasks will use channel/router defaults.",
@@ -3421,9 +3751,13 @@ export class MessageRouter {
       if (matches.length > 0) {
         const suggestionRows = matches
           .slice(0, 5)
-          .map((match, index) => `${index + 1}. ${match.name} (${match.displayName})`)
+          .map(
+            (match, index) =>
+              `${index + 1}. ${match.name} (${match.displayName})`,
+          )
           .join("\n");
-        const extra = matches.length > 5 ? `\n…and ${matches.length - 5} more` : "";
+        const extra =
+          matches.length > 5 ? `\n…and ${matches.length - 5} more` : "";
         await adapter.sendMessage({
           chatId: message.chatId,
           text:
@@ -3440,7 +3774,9 @@ export class MessageRouter {
       return;
     }
 
-    this.sessionManager.updateSessionContext(sessionId, { preferredAgentRoleId: role.id });
+    this.sessionManager.updateSessionContext(sessionId, {
+      preferredAgentRoleId: role.id,
+    });
     await adapter.sendMessage({
       chatId: message.chatId,
       text: `✅ Saved preference for this chat: ${role.icon} ${role.name} (${role.displayName})`,
@@ -3495,7 +3831,8 @@ export class MessageRouter {
     args: string[],
     securityContext?: MessageSecurityContext,
   ): Promise<void> {
-    const contextType = securityContext?.contextType ?? (message.isGroup ? "group" : "dm");
+    const contextType =
+      securityContext?.contextType ?? (message.isGroup ? "group" : "dm");
     if (contextType === "group") {
       await adapter.sendMessage({
         chatId: message.chatId,
@@ -3508,10 +3845,19 @@ export class MessageRouter {
 
     const subcommand = (args[0] || "").trim().toLowerCase();
     if (subcommand === "schedule") {
-      await this.handleBriefScheduleCommand(adapter, message, sessionId, args.slice(1));
+      await this.handleBriefScheduleCommand(
+        adapter,
+        message,
+        sessionId,
+        args.slice(1),
+      );
       return;
     }
-    if (subcommand === "unschedule" || subcommand === "stop" || subcommand === "off") {
+    if (
+      subcommand === "unschedule" ||
+      subcommand === "stop" ||
+      subcommand === "off"
+    ) {
       await this.handleBriefUnscheduleCommand(adapter, message, args.slice(1));
       return;
     }
@@ -3525,14 +3871,18 @@ export class MessageRouter {
     if (!allowedModes.has(mode)) {
       await adapter.sendMessage({
         chatId: message.chatId,
-        text: "Usage: `/brief [morning|today|tomorrow|week]`\n\n" + "Example: `/brief morning`",
+        text:
+          "Usage: `/brief [morning|today|tomorrow|week]`\n\n" +
+          "Example: `/brief morning`",
         parseMode: "markdown",
         replyTo: message.messageId,
       });
       return;
     }
 
-    const prompt = buildBriefPrompt(mode as "morning" | "today" | "tomorrow" | "week");
+    const prompt = buildBriefPrompt(
+      mode as "morning" | "today" | "tomorrow" | "week",
+    );
 
     const synthetic: IncomingMessage = {
       ...message,
@@ -3540,7 +3890,12 @@ export class MessageRouter {
       text: prompt,
     };
 
-    await this.forwardToDesktopApp(adapter, synthetic, sessionId, securityContext);
+    await this.forwardToDesktopApp(
+      adapter,
+      synthetic,
+      sessionId,
+      securityContext,
+    );
   }
 
   private async handleInboxCommand(
@@ -3550,7 +3905,8 @@ export class MessageRouter {
     args: string[],
     securityContext?: MessageSecurityContext,
   ): Promise<void> {
-    const contextType = securityContext?.contextType ?? (message.isGroup ? "group" : "dm");
+    const contextType =
+      securityContext?.contextType ?? (message.isGroup ? "group" : "dm");
     if (contextType === "group") {
       await adapter.sendMessage({
         chatId: message.chatId,
@@ -3617,7 +3973,12 @@ export class MessageRouter {
       text: prompt,
     };
 
-    await this.forwardToDesktopApp(adapter, synthetic, sessionId, securityContext);
+    await this.forwardToDesktopApp(
+      adapter,
+      synthetic,
+      sessionId,
+      securityContext,
+    );
   }
 
   private getSkillSlashUsage(command: "/simplify" | "/batch"): string {
@@ -3640,7 +4001,9 @@ export class MessageRouter {
     );
   }
 
-  private serializeParsedSkillSlashCommand(parsed: ParsedSkillSlashCommand): string {
+  private serializeParsedSkillSlashCommand(
+    parsed: ParsedSkillSlashCommand,
+  ): string {
     const parts: string[] = [`/${parsed.command}`];
     if (parsed.objective) {
       parts.push(parsed.objective);
@@ -3674,7 +4037,9 @@ export class MessageRouter {
     const parsed = parseLeadingSkillSlashCommand(raw);
     if (!parsed.matched || !parsed.parsed || parsed.error) {
       const usage = this.getSkillSlashUsage(command);
-      const errorPrefix = parsed.error ? `Invalid ${command} command: ${parsed.error}\n\n` : "";
+      const errorPrefix = parsed.error
+        ? `Invalid ${command} command: ${parsed.error}\n\n`
+        : "";
       await adapter.sendMessage({
         chatId: message.chatId,
         parseMode: "markdown",
@@ -3689,7 +4054,12 @@ export class MessageRouter {
       ...message,
       text: normalized,
     };
-    await this.forwardToDesktopApp(adapter, synthetic, sessionId, securityContext);
+    await this.forwardToDesktopApp(
+      adapter,
+      synthetic,
+      sessionId,
+      securityContext,
+    );
   }
 
   /**
@@ -3737,14 +4107,18 @@ export class MessageRouter {
     const dmOnlyChannels: ChannelType[] = ["email", "imessage", "bluebubbles"];
     const inferredIsGroup =
       message.isGroup ??
-      (dmOnlyChannels.includes(adapter.type) ? false : message.chatId !== message.userId);
+      (dmOnlyChannels.includes(adapter.type)
+        ? false
+        : message.chatId !== message.userId);
 
-    const contextType = securityContext?.contextType ?? (inferredIsGroup ? "group" : "dm");
+    const contextType =
+      securityContext?.contextType ?? (inferredIsGroup ? "group" : "dm");
     const gatewayContext = contextType === "group" ? "group" : "private";
 
     const baseRestrictions =
-      securityContext?.deniedTools?.filter((t) => typeof t === "string" && t.trim().length > 0) ??
-      [];
+      securityContext?.deniedTools?.filter(
+        (t) => typeof t === "string" && t.trim().length > 0,
+      ) ?? [];
     const toolRestrictions = this.buildTaskToolRestrictions(adapter.type, [
       ...baseRestrictions,
       "*",
@@ -3897,10 +4271,15 @@ export class MessageRouter {
       }
     }
 
-    const raw = this.messageRepo.findByChatId(channel.id, message.chatId, fetchLimit);
+    const raw = this.messageRepo.findByChatId(
+      channel.id,
+      message.chatId,
+      fetchLimit,
+    );
     const agentName = this.getMessageContext().agentName || "Assistant";
 
-    const inferredIsGroup = message.isGroup ?? message.chatId !== message.userId;
+    const inferredIsGroup =
+      message.isGroup ?? message.chatId !== message.userId;
     const rendered = formatChatTranscriptForPrompt(raw, {
       lookupUser: (id) => this.userRepo.findById(id),
       agentName,
@@ -4028,7 +4407,11 @@ export class MessageRouter {
       }
     }
 
-    const raw = this.messageRepo.findByChatId(channel.id, message.chatId, fetchLimit);
+    const raw = this.messageRepo.findByChatId(
+      channel.id,
+      message.chatId,
+      fetchLimit,
+    );
 
     const rendered = formatChatTranscriptForPrompt(raw, {
       lookupUser: (id) => this.userRepo.findById(id),
@@ -4108,7 +4491,12 @@ export class MessageRouter {
       return;
     }
 
-    const allowedModes = new Set(["morning", "today", "tomorrow", "week"] as const);
+    const allowedModes = new Set([
+      "morning",
+      "today",
+      "tomorrow",
+      "week",
+    ] as const);
     let mode: "morning" | "today" | "tomorrow" | "week" = "today";
     let rest = [...args];
 
@@ -4168,7 +4556,10 @@ export class MessageRouter {
         });
         return;
       }
-      schedule = { kind: "cron", expr: `${time.minute} ${time.hour} * * ${dow}` };
+      schedule = {
+        kind: "cron",
+        expr: `${time.minute} ${time.hour} * * ${dow}`,
+      };
     } else if (scheduleKind === "every") {
       const interval = (rest[1] || "").trim();
       const everyMs = interval ? parseIntervalToMs(interval) : null;
@@ -4205,7 +4596,9 @@ export class MessageRouter {
     const description = `${BRIEF_CRON_TAG} mode=${mode}`;
 
     // Prefer updating an existing schedule for this chat+mode.
-    const existingJobs = (await cronService.list({ includeDisabled: true })).filter(
+    const existingJobs = (
+      await cronService.list({ includeDisabled: true })
+    ).filter(
       (job) =>
         typeof job.description === "string" &&
         job.description.includes(BRIEF_CRON_TAG) &&
@@ -4306,7 +4699,9 @@ export class MessageRouter {
 
     const lines = jobs.map((job, idx) => {
       const enabled = job.enabled ? "ON" : "OFF";
-      const next = job.state.nextRunAtMs ? new Date(job.state.nextRunAtMs).toLocaleString() : "n/a";
+      const next = job.state.nextRunAtMs
+        ? new Date(job.state.nextRunAtMs).toLocaleString()
+        : "n/a";
       return `${idx + 1}. **${job.name}** (${enabled})\nSchedule: ${describeSchedule(job.schedule)}\nNext: ${next}`;
     });
 
@@ -4348,7 +4743,8 @@ export class MessageRouter {
         if (!selector) return true;
         // If selector is a mode name, filter by that mode.
         return (
-          job.description?.includes(`mode=${selector}`) || job.name.toLowerCase().includes(selector)
+          job.description?.includes(`mode=${selector}`) ||
+          job.name.toLowerCase().includes(selector)
         );
       });
 
@@ -4401,11 +4797,21 @@ export class MessageRouter {
       return;
     }
     if (sub === "off" || sub === "disable" || sub === "stop") {
-      await this.handleScheduleToggleCommand(adapter, message, false, args.slice(1));
+      await this.handleScheduleToggleCommand(
+        adapter,
+        message,
+        false,
+        args.slice(1),
+      );
       return;
     }
     if (sub === "on" || sub === "enable" || sub === "start") {
-      await this.handleScheduleToggleCommand(adapter, message, true, args.slice(1));
+      await this.handleScheduleToggleCommand(
+        adapter,
+        message,
+        true,
+        args.slice(1),
+      );
       return;
     }
     if (sub === "delete" || sub === "remove" || sub === "rm") {
@@ -4478,7 +4884,10 @@ export class MessageRouter {
         });
         return;
       }
-      schedule = { kind: "cron", expr: `${time.minute} ${time.hour} * * ${dow}` };
+      schedule = {
+        kind: "cron",
+        expr: `${time.minute} ${time.hour} * * ${dow}`,
+      };
       promptParts = rest.slice(2);
     } else if (scheduleKind === "every") {
       const interval = (rest[0] || "").trim();
@@ -4497,8 +4906,10 @@ export class MessageRouter {
       // Accept "YYYY-MM-DD HH:MM" (two tokens), ISO string (one token), or unix ms (one token).
       const a = (rest[0] || "").trim();
       const b = (rest[1] || "").trim();
-      const candidate = a && b && /^\d{4}-\d{2}-\d{2}$/.test(a) ? `${a} ${b}` : a;
-      const consumed = candidate.includes(" ") && candidate === `${a} ${b}` ? 2 : 1;
+      const candidate =
+        a && b && /^\d{4}-\d{2}-\d{2}$/.test(a) ? `${a} ${b}` : a;
+      const consumed =
+        candidate.includes(" ") && candidate === `${a} ${b}` ? 2 : 1;
 
       const ms = (() => {
         if (/^\d{12,}$/.test(candidate)) {
@@ -4529,7 +4940,12 @@ export class MessageRouter {
       return;
     }
 
-    const deliverFlags = new Set(["--if-result", "--only-if-result", "--quiet", "--silent"]);
+    const deliverFlags = new Set([
+      "--if-result",
+      "--only-if-result",
+      "--quiet",
+      "--silent",
+    ]);
     const sourceChatFlags = new Set(["--source-chat", "--chat"]);
     const sourceChannelFlags = new Set(["--source-channel", "--channel"]);
     const channelTypes: Set<string> = new Set([
@@ -4626,12 +5042,16 @@ export class MessageRouter {
     const session = this.sessionRepo.findById(sessionId);
     const sessionWorkspaceId = session?.workspaceId;
 
-    const inferredIsGroup = message.isGroup ?? message.chatId !== message.userId;
-    const contextType = securityContext?.contextType ?? (inferredIsGroup ? "group" : "dm");
+    const inferredIsGroup =
+      message.isGroup ?? message.chatId !== message.userId;
+    const contextType =
+      securityContext?.contextType ?? (inferredIsGroup ? "group" : "dm");
     const gatewayContext = contextType === "group" ? "group" : "private";
     const toolRestrictions = this.buildTaskToolRestrictions(
       adapter.type,
-      securityContext?.deniedTools?.filter((t) => typeof t === "string" && t.trim().length > 0),
+      securityContext?.deniedTools?.filter(
+        (t) => typeof t === "string" && t.trim().length > 0,
+      ),
     );
 
     const taskAgentConfig = {
@@ -4649,14 +5069,20 @@ export class MessageRouter {
     };
 
     const chatContext = sourceChatId
-      ? { channelType: sourceChannelType ?? adapter.type, channelId: sourceChatId }
+      ? {
+          channelType: sourceChannelType ?? adapter.type,
+          channelId: sourceChatId,
+        }
       : undefined;
 
-    const name = prompt.length > 48 ? `${prompt.slice(0, 48).trim()}...` : prompt;
+    const name =
+      prompt.length > 48 ? `${prompt.slice(0, 48).trim()}...` : prompt;
     const description = `${SCHEDULE_CRON_TAG} channel=${adapter.type} chat=${message.chatId}`;
 
     // Update existing job with same name for this chat (best-effort), otherwise create.
-    const existingJobs = (await cronService.list({ includeDisabled: true })).filter(
+    const existingJobs = (
+      await cronService.list({ includeDisabled: true })
+    ).filter(
       (job) =>
         typeof job.description === "string" &&
         job.description.includes(SCHEDULE_CRON_TAG) &&
@@ -4725,7 +5151,10 @@ export class MessageRouter {
     });
   }
 
-  private async listScheduledJobsForChat(adapter: ChannelAdapter, chatId: string) {
+  private async listScheduledJobsForChat(
+    adapter: ChannelAdapter,
+    chatId: string,
+  ) {
     const cronService = getCronService();
     if (!cronService) return [];
     const jobs = await cronService.list({ includeDisabled: true });
@@ -4758,7 +5187,9 @@ export class MessageRouter {
 
     const lines = jobs.map((job, idx) => {
       const enabled = job.enabled ? "ON" : "OFF";
-      const next = job.state.nextRunAtMs ? new Date(job.state.nextRunAtMs).toLocaleString() : "n/a";
+      const next = job.state.nextRunAtMs
+        ? new Date(job.state.nextRunAtMs).toLocaleString()
+        : "n/a";
       return `${idx + 1}. **${job.name}** (${enabled})\nSchedule: ${describeSchedule(job.schedule)}\nNext: ${next}`;
     });
 
@@ -4777,10 +5208,19 @@ export class MessageRouter {
   ): Promise<{ jobs: Any[]; job: Any | null; error?: string }> {
     const jobs = await this.listScheduledJobsForChat(adapter, message.chatId);
     if (jobs.length === 0)
-      return { jobs, job: null, error: "No scheduled tasks found for this chat." };
+      return {
+        jobs,
+        job: null,
+        error: "No scheduled tasks found for this chat.",
+      };
 
     const selector = (selectorRaw || "").trim();
-    if (!selector) return { jobs, job: null, error: "Please provide a selector (#, name, or id)." };
+    if (!selector)
+      return {
+        jobs,
+        job: null,
+        error: "Please provide a selector (#, name, or id).",
+      };
 
     // Numeric index
     if (/^\d+$/.test(selector)) {
@@ -4788,7 +5228,11 @@ export class MessageRouter {
       if (!isNaN(n) && n >= 1 && n <= jobs.length) {
         return { jobs, job: jobs[n - 1] };
       }
-      return { jobs, job: null, error: `Index out of range. Use 1-${jobs.length}.` };
+      return {
+        jobs,
+        job: null,
+        error: `Index out of range. Use 1-${jobs.length}.`,
+      };
     }
 
     // Exact ID
@@ -4797,7 +5241,9 @@ export class MessageRouter {
 
     // Name match
     const lowered = selector.toLowerCase();
-    const exactName = jobs.find((j) => String(j.name || "").toLowerCase() === lowered);
+    const exactName = jobs.find(
+      (j) => String(j.name || "").toLowerCase() === lowered,
+    );
     if (exactName) return { jobs, job: exactName };
 
     const partial = jobs.find((j) =>
@@ -4807,7 +5253,11 @@ export class MessageRouter {
     );
     if (partial) return { jobs, job: partial };
 
-    return { jobs, job: null, error: "No matching scheduled task found. Use `/schedule list`." };
+    return {
+      jobs,
+      job: null,
+      error: "No matching scheduled task found. Use `/schedule list`.",
+    };
   }
 
   private async handleScheduleToggleCommand(
@@ -4820,7 +5270,11 @@ export class MessageRouter {
     if (!cronService) return;
 
     const selector = (args[0] || "").trim();
-    const resolved = await this.resolveScheduledJobSelector(adapter, message, selector);
+    const resolved = await this.resolveScheduledJobSelector(
+      adapter,
+      message,
+      selector,
+    );
     if (!resolved.job) {
       await adapter.sendMessage({
         chatId: message.chatId,
@@ -4858,7 +5312,11 @@ export class MessageRouter {
     if (!cronService) return;
 
     const selector = (args[0] || "").trim();
-    const resolved = await this.resolveScheduledJobSelector(adapter, message, selector);
+    const resolved = await this.resolveScheduledJobSelector(
+      adapter,
+      message,
+      selector,
+    );
     if (!resolved.job) {
       await adapter.sendMessage({
         chatId: message.chatId,
@@ -4896,7 +5354,9 @@ export class MessageRouter {
   ): Promise<void> {
     const workspaces = this.workspaceRepo
       .findAll()
-      .filter((workspace) => !workspace.isTemp && !isTempWorkspaceId(workspace.id));
+      .filter(
+        (workspace) => !workspace.isTemp && !isTempWorkspaceId(workspace.id),
+      );
 
     if (workspaces.length === 0) {
       await adapter.sendMessage({
@@ -4986,7 +5446,8 @@ export class MessageRouter {
       if (session?.workspaceId) {
         const workspace = this.workspaceRepo.findById(session.workspaceId);
         if (workspace) {
-          const isTempWorkspace = workspace.isTemp || isTempWorkspaceId(workspace.id);
+          const isTempWorkspace =
+            workspace.isTemp || isTempWorkspaceId(workspace.id);
           const displayName = isTempWorkspace
             ? "Temporary Workspace (work in a folder for persistence)"
             : workspace.name;
@@ -5011,7 +5472,9 @@ export class MessageRouter {
 
     const workspaces = this.workspaceRepo
       .findAll()
-      .filter((workspace) => !workspace.isTemp && !isTempWorkspaceId(workspace.id));
+      .filter(
+        (workspace) => !workspace.isTemp && !isTempWorkspaceId(workspace.id),
+      );
     const selector = args.join(" ");
     let workspace;
 
@@ -5021,7 +5484,9 @@ export class MessageRouter {
       workspace = workspaces[num - 1];
     } else {
       // Try to find by name (case-insensitive)
-      workspace = workspaces.find((ws) => ws.name.toLowerCase() === selector.toLowerCase());
+      workspace = workspaces.find(
+        (ws) => ws.name.toLowerCase() === selector.toLowerCase(),
+      );
     }
 
     if (!workspace) {
@@ -5210,7 +5675,8 @@ export class MessageRouter {
 
       case "azure": {
         const deployments = (settings.azure?.deployments || []).filter(Boolean);
-        currentModel = settings.azure?.deployment || deployments[0] || "deployment-name";
+        currentModel =
+          settings.azure?.deployment || deployments[0] || "deployment-name";
         models = deployments.map((deployment) => ({
           key: deployment,
           displayName: deployment,
@@ -5237,13 +5703,18 @@ export class MessageRouter {
       }
 
       case "openrouter": {
-        currentModel = settings.openrouter?.model || "anthropic/claude-3.5-sonnet";
-        const cachedOpenRouter = LLMProviderFactory.getCachedModels("openrouter");
+        currentModel =
+          settings.openrouter?.model || "anthropic/claude-3.5-sonnet";
+        const cachedOpenRouter =
+          LLMProviderFactory.getCachedModels("openrouter");
         if (cachedOpenRouter && cachedOpenRouter.length > 0) {
           models = cachedOpenRouter.slice(0, 10); // Limit to 10 for readability
         } else {
           models = [
-            { key: "anthropic/claude-3.5-sonnet", displayName: "Claude 3.5 Sonnet" },
+            {
+              key: "anthropic/claude-3.5-sonnet",
+              displayName: "Claude 3.5 Sonnet",
+            },
             { key: "openai/gpt-4o", displayName: "GPT-4o" },
             { key: "google/gemini-pro", displayName: "Gemini Pro" },
           ];
@@ -5273,7 +5744,9 @@ export class MessageRouter {
 
     // Current configuration
     text += "*Current:*\n";
-    const currentProvider = status.providers.find((p) => p.type === providerType);
+    const currentProvider = status.providers.find(
+      (p) => p.type === providerType,
+    );
     text += `• Provider: ${currentProvider?.name || providerType}\n`;
 
     if (providerType === "ollama") {
@@ -5301,7 +5774,8 @@ export class MessageRouter {
         const currentOllamaModel = settings.ollama?.model || "llama3.2";
 
         if (ollamaModels.length === 0) {
-          text += "⚠️ No models found. Run `ollama pull <model>` to download.\n";
+          text +=
+            "⚠️ No models found. Run `ollama pull <model>` to download.\n";
         } else {
           ollamaModels.slice(0, 10).forEach((model, index) => {
             const isActive = model.name === currentOllamaModel ? " ✓" : "";
@@ -5345,7 +5819,9 @@ export class MessageRouter {
     const status = LLMProviderFactory.getConfigStatus();
     const settings = LLMProviderFactory.loadSettings();
     const providerType = status.currentProvider;
-    const currentProviderInfo = status.providers.find((p) => p.type === providerType);
+    const currentProviderInfo = status.providers.find(
+      (p) => p.type === providerType,
+    );
 
     // Get provider-specific models and current model
     let models: Array<{ key: string; displayName: string }> = [];
@@ -5392,13 +5868,18 @@ export class MessageRouter {
       }
 
       case "openrouter": {
-        currentModel = settings.openrouter?.model || "anthropic/claude-3.5-sonnet";
-        const cachedOpenRouter = LLMProviderFactory.getCachedModels("openrouter");
+        currentModel =
+          settings.openrouter?.model || "anthropic/claude-3.5-sonnet";
+        const cachedOpenRouter =
+          LLMProviderFactory.getCachedModels("openrouter");
         if (cachedOpenRouter && cachedOpenRouter.length > 0) {
           models = cachedOpenRouter.slice(0, 10);
         } else {
           models = [
-            { key: "anthropic/claude-3.5-sonnet", displayName: "Claude 3.5 Sonnet" },
+            {
+              key: "anthropic/claude-3.5-sonnet",
+              displayName: "Claude 3.5 Sonnet",
+            },
             { key: "openai/gpt-4o", displayName: "GPT-4o" },
             { key: "google/gemini-pro", displayName: "Gemini Pro" },
           ];
@@ -5487,7 +5968,10 @@ export class MessageRouter {
         return;
       }
 
-      const newSettings = LLMProviderFactory.applyModelSelection(settings, result.model!);
+      const newSettings = LLMProviderFactory.applyModelSelection(
+        settings,
+        result.model!,
+      );
 
       LLMProviderFactory.saveSettings(newSettings);
       // Note: do NOT call clearCache() here — saveSettings() already updates the cache.
@@ -5511,7 +5995,10 @@ export class MessageRouter {
       return;
     }
 
-    const newSettings = LLMProviderFactory.applyModelSelection(settings, result.model!.key);
+    const newSettings = LLMProviderFactory.applyModelSelection(
+      settings,
+      result.model!.key,
+    );
 
     LLMProviderFactory.saveSettings(newSettings);
     // Note: do NOT call clearCache() here — saveSettings() already updates the cache.
@@ -5536,7 +6023,9 @@ export class MessageRouter {
 
     // If no args, show current provider and available options
     if (args.length === 0) {
-      const currentProvider = status.providers.find((p) => p.type === status.currentProvider);
+      const currentProvider = status.providers.find(
+        (p) => p.type === status.currentProvider,
+      );
 
       let text = "🔌 *Current Provider*\n\n";
       text += `• Provider: ${currentProvider?.name || status.currentProvider}\n`;
@@ -5545,12 +6034,14 @@ export class MessageRouter {
       if (status.currentProvider === "ollama") {
         text += `• Model: ${settings.ollama?.model || "gpt-oss:20b"}\n\n`;
       } else {
-        const currentModel = status.models.find((m) => m.key === status.currentModel);
+        const currentModel = status.models.find(
+          (m) => m.key === status.currentModel,
+        );
         text += `• Model: ${currentModel?.displayName || status.currentModel}\n\n`;
       }
 
       text += "*Available Providers:*\n";
-      text += "1. anthropic - Anthropic API (direct)\n";
+      text += "1. anthropic - Claude (direct)\n";
       text += "2. openai - OpenAI/ChatGPT\n";
       text += "3. azure - Azure OpenAI\n";
       text += "4. gemini - Google Gemini\n";
@@ -5617,8 +6108,12 @@ export class MessageRouter {
 
     // Get provider display info
     const updatedStatus = LLMProviderFactory.getConfigStatus();
-    const providerInfo = updatedStatus.providers.find((p) => p.type === targetProvider);
-    const model = updatedStatus.models.find((entry) => entry.key === updatedStatus.currentModel);
+    const providerInfo = updatedStatus.providers.find(
+      (p) => p.type === targetProvider,
+    );
+    const model = updatedStatus.models.find(
+      (entry) => entry.key === updatedStatus.currentModel,
+    );
     const modelInfo = model?.displayName || updatedStatus.currentModel;
 
     await adapter.sendMessage({
@@ -5669,9 +6164,19 @@ export class MessageRouter {
     const action = args[0].toLowerCase();
     let newShellPermission: boolean;
 
-    if (action === "on" || action === "enable" || action === "1" || action === "true") {
+    if (
+      action === "on" ||
+      action === "enable" ||
+      action === "1" ||
+      action === "true"
+    ) {
       newShellPermission = true;
-    } else if (action === "off" || action === "disable" || action === "0" || action === "false") {
+    } else if (
+      action === "off" ||
+      action === "disable" ||
+      action === "0" ||
+      action === "false"
+    ) {
       newShellPermission = false;
     } else {
       await adapter.sendMessage({
@@ -5710,7 +6215,8 @@ export class MessageRouter {
     selector: string,
     originalArgs: string[],
   ): Promise<{ success: boolean; model?: string; error?: string }> {
-    let ollamaModels: Array<{ name: string; size: number; modified: string }> = [];
+    let ollamaModels: Array<{ name: string; size: number; modified: string }> =
+      [];
     try {
       ollamaModels = await LLMProviderFactory.getOllamaModels();
     } catch {
@@ -5736,7 +6242,9 @@ export class MessageRouter {
     } else {
       // Try to find by name (exact or partial match)
       const match = ollamaModels.find(
-        (m) => m.name.toLowerCase() === selector || m.name.toLowerCase().includes(selector),
+        (m) =>
+          m.name.toLowerCase() === selector ||
+          m.name.toLowerCase().includes(selector),
       );
       if (match) {
         selectedModel = match.name;
@@ -5749,7 +6257,9 @@ export class MessageRouter {
         .map((m, i) => `${i + 1}. ${m.name}`)
         .join("\n");
       const moreText =
-        ollamaModels.length > 5 ? `\n   ... and ${ollamaModels.length - 5} more` : "";
+        ollamaModels.length > 5
+          ? `\n   ... and ${ollamaModels.length - 5} more`
+          : "";
       return {
         success: false,
         error: `❌ Model not found: "${originalArgs.join(" ")}"\n\n*Available Ollama models:*\n${modelList}${moreText}\n\nUse \`/model <name>\` or \`/model <number>\``,
@@ -5765,7 +6275,11 @@ export class MessageRouter {
   private selectClaudeModel(
     selector: string,
     models: Array<{ key: string; displayName: string }>,
-  ): { success: boolean; model?: { key: string; displayName: string }; error?: string } {
+  ): {
+    success: boolean;
+    model?: { key: string; displayName: string };
+    error?: string;
+  } {
     let selectedModel: { key: string; displayName: string } | undefined;
 
     // Try to find model by number
@@ -5811,7 +6325,11 @@ export class MessageRouter {
     const channel = this.getChannelForAdapter(adapter);
     if (!channel) return;
 
-    const result = await this.securityManager.verifyPairingCode(channel, message.userId, code);
+    const result = await this.securityManager.verifyPairingCode(
+      channel,
+      message.userId,
+      code,
+    );
 
     if (result.success) {
       await adapter.sendMessage({
@@ -5881,11 +6399,18 @@ export class MessageRouter {
     const dmOnlyChannels: ChannelType[] = ["email", "imessage", "bluebubbles"];
     const inferredIsGroup =
       message.isGroup ??
-      (dmOnlyChannels.includes(adapter.type) ? false : message.chatId !== message.userId);
-    const contextType = securityContext?.contextType ?? (inferredIsGroup ? "group" : "dm");
+      (dmOnlyChannels.includes(adapter.type)
+        ? false
+        : message.chatId !== message.userId);
+    const contextType =
+      securityContext?.contextType ?? (inferredIsGroup ? "group" : "dm");
 
     // Persist inbound attachments into the workspace and append references to the message text.
-    const savedAttachments = await this.persistInboundAttachments(adapter.type, message, workspace);
+    const savedAttachments = await this.persistInboundAttachments(
+      adapter.type,
+      message,
+      workspace,
+    );
     if (savedAttachments.length > 0) {
       const lines: string[] = [];
       lines.push("Attachments saved to workspace:");
@@ -5897,7 +6422,9 @@ export class MessageRouter {
         : undefined;
 
       const block = [lines.join("\n"), hint].filter(Boolean).join("\n");
-      message.text = message.text?.trim() ? `${message.text.trim()}\n\n${block}` : block;
+      message.text = message.text?.trim()
+        ? `${message.text.trim()}\n\n${block}`
+        : block;
 
       // If this is a follow-up to an existing task, register attachments as artifacts for UI visibility.
       if (this.agentDaemon && session?.taskId) {
@@ -5917,7 +6444,11 @@ export class MessageRouter {
 
     // Voice note -> structured priorities (best-effort) before the agent sees the message.
     try {
-      await this.maybeUpdatePrioritiesFromVoiceMessage({ message, workspace, contextType });
+      await this.maybeUpdatePrioritiesFromVoiceMessage({
+        message,
+        workspace,
+        contextType,
+      });
     } catch {
       // ignore
     }
@@ -5944,9 +6475,13 @@ export class MessageRouter {
                 replyTo: message.messageId,
               });
 
-              const requester = this.resolveTaskRequesterFromSessionContext(session!);
-              const requestingUserId = requester.requestingUserId ?? message.userId;
-              const requestingUserName = requester.requestingUserName ?? message.userName;
+              const requester = this.resolveTaskRequesterFromSessionContext(
+                session!,
+              );
+              const requestingUserId =
+                requester.requestingUserId ?? message.userId;
+              const requestingUserName =
+                requester.requestingUserName ?? message.userName;
 
               // Re-register task for response tracking (may have been removed after initial completion)
               this.pendingTaskResponses.set(session!.taskId!, {
@@ -5959,7 +6494,10 @@ export class MessageRouter {
                 lastChannelMessageId: message.messageId,
               });
 
-              await this.agentDaemon.sendMessage(session!.taskId!, message.text);
+              await this.agentDaemon.sendMessage(
+                session!.taskId!,
+                message.text,
+              );
             } catch (error) {
               console.error("Error sending follow-up message:", error);
               await adapter.sendMessage({
@@ -5987,18 +6525,24 @@ export class MessageRouter {
 
     // Create task
     const taskTitle =
-      message.text.length > 50 ? message.text.substring(0, 50) + "..." : message.text;
+      message.text.length > 50
+        ? message.text.substring(0, 50) + "..."
+        : message.text;
 
     const gatewayContext = contextType === "group" ? "group" : "private";
     const toolRestrictions = this.buildTaskToolRestrictions(
       adapter.type,
-      securityContext?.deniedTools?.filter((t) => typeof t === "string" && t.trim().length > 0),
+      securityContext?.deniedTools?.filter(
+        (t) => typeof t === "string" && t.trim().length > 0,
+      ),
     );
 
     // Resolve agent role: router rule > session preference > channel default
     const routedChannel = this.getChannelForAdapter(adapter);
-    const trustedGroupMemoryOptIn = routedChannel?.config?.trustedGroupMemoryOptIn === true;
-    const allowSharedContextMemory = gatewayContext !== "private" && trustedGroupMemoryOptIn;
+    const trustedGroupMemoryOptIn =
+      routedChannel?.config?.trustedGroupMemoryOptIn === true;
+    const allowSharedContextMemory =
+      gatewayContext !== "private" && trustedGroupMemoryOptIn;
     const resolvedAgentRoleId =
       securityContext?.agentRoleId ||
       this.getSessionPreferredAgentRoleId(session) ||
@@ -6029,7 +6573,9 @@ export class MessageRouter {
 
     // Apply agent role assignment when routing determines one.
     if (resolvedAgentRoleId) {
-      this.taskRepo.update(task.id, { assignedAgentRoleId: resolvedAgentRoleId } as Any);
+      this.taskRepo.update(task.id, {
+        assignedAgentRoleId: resolvedAgentRoleId,
+      } as Any);
       (task as Any).assignedAgentRoleId = resolvedAgentRoleId;
     }
 
@@ -6040,9 +6586,12 @@ export class MessageRouter {
       taskRequesterUserName: message.userName,
     });
 
-    const sessionChannelId = session?.channelId || this.getChannelIdForAdapter(adapter);
+    const sessionChannelId =
+      session?.channelId || this.getChannelIdForAdapter(adapter);
     if (!sessionChannelId) {
-      throw new Error(`Unable to resolve channel id for ${adapter.type} task routing`);
+      throw new Error(
+        `Unable to resolve channel id for ${adapter.type} task routing`,
+      );
     }
 
     // Track this task for response handling
@@ -6127,7 +6676,11 @@ export class MessageRouter {
    * Send task update to channel
    * Uses draft streaming for Telegram to show real-time progress
    */
-  async sendTaskUpdate(taskId: string, text: string, isStreaming = false): Promise<void> {
+  async sendTaskUpdate(
+    taskId: string,
+    text: string,
+    isStreaming = false,
+  ): Promise<void> {
     const pending = this.pendingTaskResponses.get(taskId);
     if (!pending) {
       // This is expected for tasks started from the UI (not via Telegram)
@@ -6135,8 +6688,13 @@ export class MessageRouter {
     }
 
     try {
-      const sendNow = async (pendingEntry: typeof pending, rawText: string): Promise<void> => {
-        const isTextOnlyChannel = this.isTextOnlyChannel(pendingEntry.adapter.type);
+      const sendNow = async (
+        pendingEntry: typeof pending,
+        rawText: string,
+      ): Promise<void> => {
+        const isTextOnlyChannel = this.isTextOnlyChannel(
+          pendingEntry.adapter.type,
+        );
         const msgCtx = this.getMessageContext();
         const normalizedText = isTextOnlyChannel
           ? this.normalizeSimpleChannelMessage(rawText, msgCtx)
@@ -6146,20 +6704,28 @@ export class MessageRouter {
         if (isTextOnlyChannel) {
           const chunks = this.splitMessage(normalizedText, 4000);
           for (const chunk of chunks) {
-            await this.sendMessage(pendingEntry.adapter.type, {
-              chatId: pendingEntry.chatId,
-              text: chunk,
-              parseMode: "markdown",
-            }, pendingEntry.channelId);
+            await this.sendMessage(
+              pendingEntry.adapter.type,
+              {
+                chatId: pendingEntry.chatId,
+                text: chunk,
+                parseMode: "markdown",
+              },
+              pendingEntry.channelId,
+            );
           }
           return;
         }
 
-        await this.sendMessage(pendingEntry.adapter.type, {
-          chatId: pendingEntry.chatId,
-          text: normalizedText,
-          parseMode: "markdown",
-        }, pendingEntry.channelId);
+        await this.sendMessage(
+          pendingEntry.adapter.type,
+          {
+            chatId: pendingEntry.chatId,
+            text: normalizedText,
+            parseMode: "markdown",
+          },
+          pendingEntry.channelId,
+        );
       };
 
       const trimmed = (text || "").trim();
@@ -6167,7 +6733,10 @@ export class MessageRouter {
         return;
       }
 
-      if (this.isTextOnlyChannel(pending.adapter.type) && this.isSimpleChannelToolNoise(trimmed)) {
+      if (
+        this.isTextOnlyChannel(pending.adapter.type) &&
+        this.isSimpleChannelToolNoise(trimmed)
+      ) {
         console.log(
           `[MessageRouter] Suppressed noisy simple-channel update for task ${taskId}: ${trimmed.slice(0, 120)}`,
         );
@@ -6268,7 +6837,10 @@ export class MessageRouter {
    * This is primarily used for follow-up replies which end with follow_up_completed
    * instead of task_completed.
    */
-  async finalizeDraftStreamForTask(taskId: string, finalText: string): Promise<void> {
+  async finalizeDraftStreamForTask(
+    taskId: string,
+    finalText: string,
+  ): Promise<void> {
     const pending = this.pendingTaskResponses.get(taskId);
     if (!pending) return;
     if (!(pending.adapter instanceof TelegramAdapter)) return;
@@ -6278,7 +6850,10 @@ export class MessageRouter {
     if (!trimmed) return;
 
     try {
-      const finalizedMessageId = await pending.adapter.finalizeDraftStream(pending.chatId, trimmed);
+      const finalizedMessageId = await pending.adapter.finalizeDraftStream(
+        pending.chatId,
+        trimmed,
+      );
       this.telegramDraftStreamTouchedTasks.delete(taskId);
 
       try {
@@ -6294,10 +6869,16 @@ export class MessageRouter {
           });
         }
       } catch (logError) {
-        console.warn("[Router] Failed to log outgoing Telegram message:", logError);
+        console.warn(
+          "[Router] Failed to log outgoing Telegram message:",
+          logError,
+        );
       }
     } catch (error) {
-      console.error("[Router] Failed to finalize Telegram draft stream:", error);
+      console.error(
+        "[Router] Failed to finalize Telegram draft stream:",
+        error,
+      );
       // Keep the touched marker so a later attempt can still finalize.
     }
   }
@@ -6358,12 +6939,15 @@ export class MessageRouter {
       const task = this.taskRepo.findById(taskId);
       const taskGatewayContext = task?.agentConfig?.gatewayContext;
       const contextType: "dm" | "group" =
-        taskGatewayContext === "group" || taskGatewayContext === "public" ? "group" : "dm";
+        taskGatewayContext === "group" || taskGatewayContext === "public"
+          ? "group"
+          : "dm";
       let completionMessageId: string | null = null;
 
       // WhatsApp/iMessage-optimized completion message (no follow-up hint)
       const isSimpleMessaging =
-        pending.adapter.type === "whatsapp" || pending.adapter.type === "imessage";
+        pending.adapter.type === "whatsapp" ||
+        pending.adapter.type === "imessage";
       const msgCtx = this.getMessageContext();
       const message = getCompletionMessage(msgCtx, result, !isSimpleMessaging);
       const normalizedMessage =
@@ -6395,12 +6979,18 @@ export class MessageRouter {
             });
           }
         } catch (logError) {
-          console.warn("[Router] Failed to log outgoing Telegram message:", logError);
+          console.warn(
+            "[Router] Failed to log outgoing Telegram message:",
+            logError,
+          );
         }
 
         // Update reaction from 👀 to ✅ on the original message
         if (pending.originalMessageId) {
-          await pending.adapter.sendCompletionReaction(pending.chatId, pending.originalMessageId);
+          await pending.adapter.sendCompletionReaction(
+            pending.chatId,
+            pending.originalMessageId,
+          );
         }
       } else {
         // Split long messages (Telegram has 4096 char limit, WhatsApp/iMessage ~65k but keep it reasonable)
@@ -6487,7 +7077,10 @@ export class MessageRouter {
         });
         return;
       } catch (error) {
-        console.warn("[Router] Failed to attach feedback keyboard to completion message:", error);
+        console.warn(
+          "[Router] Failed to attach feedback keyboard to completion message:",
+          error,
+        );
       }
     }
 
@@ -6574,7 +7167,9 @@ export class MessageRouter {
             await adapter.sendDocument(chatId, artifact.path, `📎 ${fileName}`);
             console.log(`Sent document: ${fileName}`);
           } else {
-            console.log(`Adapter does not support sending ${ext} files, skipping: ${fileName}`);
+            console.log(
+              `Adapter does not support sending ${ext} files, skipping: ${fileName}`,
+            );
           }
         } catch (err) {
           console.error(`Failed to send artifact ${artifact.path}:`, err);
@@ -6602,12 +7197,22 @@ export class MessageRouter {
 
         // Remove ACK reaction on failure
         if (pending.originalMessageId) {
-          await pending.adapter.removeAckReaction(pending.chatId, pending.originalMessageId);
+          await pending.adapter.removeAckReaction(
+            pending.chatId,
+            pending.originalMessageId,
+          );
         }
       }
 
-      const message = getChannelMessage("taskFailed", this.getMessageContext(), { error });
-      await this.sendMessage(pending.adapter.type, { chatId: pending.chatId, text: message });
+      const message = getChannelMessage(
+        "taskFailed",
+        this.getMessageContext(),
+        { error },
+      );
+      await this.sendMessage(pending.adapter.type, {
+        chatId: pending.chatId,
+        text: message,
+      });
 
       // Only unlink the session if it is actually linked to this task.
       // Some one-shot command tasks intentionally do not attach to the chat session.
@@ -6647,7 +7252,10 @@ export class MessageRouter {
 
         // Remove ACK reaction on cancellation
         if (pending.originalMessageId) {
-          await pending.adapter.removeAckReaction(pending.chatId, pending.originalMessageId);
+          await pending.adapter.removeAckReaction(
+            pending.chatId,
+            pending.originalMessageId,
+          );
         }
       }
 
@@ -6655,7 +7263,10 @@ export class MessageRouter {
       const message = reason ? `${base}\n\nReason: ${reason}` : base;
       const normalizedMessage =
         pending.adapter.type === "whatsapp"
-          ? this.normalizeSimpleChannelMessage(message, this.getMessageContext())
+          ? this.normalizeSimpleChannelMessage(
+              message,
+              this.getMessageContext(),
+            )
           : message;
 
       await this.sendMessage(pending.adapter.type, {
@@ -6688,7 +7299,9 @@ export class MessageRouter {
     const task = this.taskRepo.findById(taskId);
     const taskGatewayContext = task?.agentConfig?.gatewayContext;
     const contextType: "dm" | "group" =
-      taskGatewayContext === "group" || taskGatewayContext === "public" ? "group" : "dm";
+      taskGatewayContext === "group" || taskGatewayContext === "public"
+        ? "group"
+        : "dm";
     const isRoutedFromChild = route.routedTaskId !== taskId;
     const taskTitle = task?.title;
 
@@ -6737,8 +7350,12 @@ export class MessageRouter {
     message += `⏳ _Expires in 5 minutes_`;
 
     // WhatsApp/iMessage don't support inline keyboards - use text commands
-    if (route.adapter.type === "whatsapp" || route.adapter.type === "imessage") {
-      const shortId = typeof approval.id === "string" ? approval.id.slice(0, 8) : "unknown";
+    if (
+      route.adapter.type === "whatsapp" ||
+      route.adapter.type === "imessage"
+    ) {
+      const shortId =
+        typeof approval.id === "string" ? approval.id.slice(0, 8) : "unknown";
       message += `\n\nID: \`${shortId}\``;
       message += `\n\n━━━━━━━━━━━━━━━\nReply */approve ${shortId}* or */deny ${shortId}*`;
 
@@ -6755,8 +7372,14 @@ export class MessageRouter {
       // Create inline keyboard with Approve/Deny buttons for Telegram/Discord
       const keyboard: InlineKeyboardButton[][] = [
         [
-          { text: this.getUiCopy("approvalButtonApprove"), callbackData: "approve:" + approval.id },
-          { text: this.getUiCopy("approvalButtonDeny"), callbackData: "deny:" + approval.id },
+          {
+            text: this.getUiCopy("approvalButtonApprove"),
+            callbackData: "approve:" + approval.id,
+          },
+          {
+            text: this.getUiCopy("approvalButtonDeny"),
+            callbackData: "deny:" + approval.id,
+          },
         ],
       ];
 
@@ -6782,7 +7405,13 @@ export class MessageRouter {
     sessionId: string,
     args: string[],
   ): Promise<void> {
-    await this.handleApprovalTextCommand(adapter, message, sessionId, args, true);
+    await this.handleApprovalTextCommand(
+      adapter,
+      message,
+      sessionId,
+      args,
+      true,
+    );
   }
 
   /**
@@ -6794,7 +7423,13 @@ export class MessageRouter {
     sessionId: string,
     args: string[],
   ): Promise<void> {
-    await this.handleApprovalTextCommand(adapter, message, sessionId, args, false);
+    await this.handleApprovalTextCommand(
+      adapter,
+      message,
+      sessionId,
+      args,
+      false,
+    );
   }
 
   private async sendFollowupToTaskFromGateway(opts: {
@@ -6869,10 +7504,14 @@ export class MessageRouter {
       return;
     }
 
-    const contextType = securityContext?.contextType ?? (message.isGroup ? "group" : "dm");
+    const contextType =
+      securityContext?.contextType ?? (message.isGroup ? "group" : "dm");
     if (contextType === "group") {
       const requester = this.resolveTaskRequesterFromSessionContext(session!);
-      if (requester.requestingUserId && requester.requestingUserId !== message.userId) {
+      if (
+        requester.requestingUserId &&
+        requester.requestingUserId !== message.userId
+      ) {
         const who = requester.requestingUserName
           ? `*${requester.requestingUserName}*`
           : "the original requester";
@@ -6887,10 +7526,18 @@ export class MessageRouter {
     }
 
     const actionRaw = (args[0] || "").trim().toLowerCase();
-    const action = actionRaw === "good" ? "approve" : actionRaw === "bad" ? "reject" : actionRaw;
+    const action =
+      actionRaw === "good"
+        ? "approve"
+        : actionRaw === "bad"
+          ? "reject"
+          : actionRaw;
     const rest = args.slice(1).join(" ").trim();
 
-    if (!action || !["approve", "reject", "edit", "next", "another"].includes(action)) {
+    if (
+      !action ||
+      !["approve", "reject", "edit", "next", "another"].includes(action)
+    ) {
       await adapter.sendMessage({
         chatId: message.chatId,
         text:
@@ -6998,7 +7645,9 @@ export class MessageRouter {
     });
   }
 
-  private formatPendingApprovalChoices(approvals: Array<[string, { approval: Any }]>): string {
+  private formatPendingApprovalChoices(
+    approvals: Array<[string, { approval: Any }]>,
+  ): string {
     return approvals
       .map(([id, data], index) => {
         const shortId = id.slice(0, 8);
@@ -7006,7 +7655,10 @@ export class MessageRouter {
           typeof data.approval?.description === "string"
             ? data.approval.description
             : "Approval required";
-        const trimmed = description.length > 80 ? description.slice(0, 77) + "..." : description;
+        const trimmed =
+          description.length > 80
+            ? description.slice(0, 77) + "..."
+            : description;
         return `${index + 1}. \`${shortId}\` - ${trimmed}`;
       })
       .join("\n");
@@ -7064,7 +7716,9 @@ export class MessageRouter {
         selected = candidates[idx - 1];
       } else {
         const prefix = selector.toLowerCase();
-        const matches = candidates.filter(([id]) => id.toLowerCase().startsWith(prefix));
+        const matches = candidates.filter(([id]) =>
+          id.toLowerCase().startsWith(prefix),
+        );
         if (matches.length === 1) {
           selected = matches[0];
         } else if (matches.length === 0) {
@@ -7121,7 +7775,10 @@ export class MessageRouter {
     }
 
     try {
-      const status = await this.agentDaemon.respondToApproval(approvalId, approved);
+      const status = await this.agentDaemon.respondToApproval(
+        approvalId,
+        approved,
+      );
       if (status === "in_progress") {
         await adapter.sendMessage({
           chatId: message.chatId,
@@ -7137,7 +7794,9 @@ export class MessageRouter {
       if (status === "handled") {
         await adapter.sendMessage({
           chatId: message.chatId,
-          text: approved ? this.getUiCopy("approvalApproved") : this.getUiCopy("approvalDenied"),
+          text: approved
+            ? this.getUiCopy("approvalApproved")
+            : this.getUiCopy("approvalDenied"),
           replyTo: message.messageId,
         });
         return;
@@ -7405,7 +8064,9 @@ ${status.queuedCount > 0 ? `Queued task IDs: ${status.queuedTaskIds.join(", ")}`
 
     const workspaceName = args.join(" ");
     const workspaces = this.workspaceRepo.findAll();
-    const workspace = workspaces.find((w) => w.name.toLowerCase() === workspaceName.toLowerCase());
+    const workspace = workspaces.find(
+      (w) => w.name.toLowerCase() === workspaceName.toLowerCase(),
+    );
 
     if (!workspace) {
       await adapter.sendMessage({
@@ -7427,7 +8088,9 @@ ${status.queuedCount > 0 ? `Queued task IDs: ${status.queuedTaskIds.join(", ")}`
 
     await adapter.sendMessage({
       chatId: message.chatId,
-      text: this.getUiCopy("workspaceRemoved", { workspaceName: workspace.name }),
+      text: this.getUiCopy("workspaceRemoved", {
+        workspaceName: workspace.name,
+      }),
     });
   }
 
@@ -7453,7 +8116,8 @@ ${status.queuedCount > 0 ? `Queued task IDs: ${status.queuedTaskIds.join(", ")}`
     const lastFailedTask = tasks
       .filter((t: Task) => t.status === "failed" || t.status === "cancelled")
       .sort(
-        (a: Task, b: Task) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+        (a: Task, b: Task) =>
+          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
       )[0];
 
     if (!lastFailedTask) {
@@ -7499,7 +8163,10 @@ ${status.queuedCount > 0 ? `Queued task IDs: ${status.queuedTaskIds.join(", ")}`
 
     const tasks = this.taskRepo.findByWorkspace(session!.workspaceId!);
     const recentTasks = tasks
-      .sort((a: Task, b: Task) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .sort(
+        (a: Task, b: Task) =>
+          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+      )
       .slice(0, 10);
 
     if (recentTasks.length === 0) {
@@ -7522,7 +8189,8 @@ ${status.queuedCount > 0 ? `Queued task IDs: ${status.queuedTaskIds.join(", ")}`
       .map((t: Task, i: number) => {
         const emoji = statusEmoji[t.status] || "❓";
         const date = new Date(t.createdAt).toLocaleDateString();
-        const title = t.title.length > 40 ? t.title.substring(0, 40) + "..." : t.title;
+        const title =
+          t.title.length > 40 ? t.title.substring(0, 40) + "..." : t.title;
         return `${i + 1}. ${emoji} ${title}\n   ${date} • ${t.status}`;
       })
       .join("\n\n");
@@ -7584,7 +8252,7 @@ ${status.queuedCount > 0 ? `Queued task IDs: ${status.queuedTaskIds.join(", ")}`
         text,
         parseMode: "markdown",
       });
-    } catch  {
+    } catch {
       await adapter.sendMessage({
         chatId: message.chatId,
         text: this.getUiCopy("skillsLoadFailed"),
@@ -7638,7 +8306,7 @@ ${status.queuedCount > 0 ? `Queued task IDs: ${status.queuedTaskIds.join(", ")}`
         }),
         parseMode: "markdown",
       });
-    } catch  {
+    } catch {
       await adapter.sendMessage({
         chatId: message.chatId,
         text: this.getUiCopy("skillsLoadFailed"),
@@ -7705,7 +8373,9 @@ ${status.queuedCount > 0 ? `Queued task IDs: ${status.queuedTaskIds.join(", ")}`
     keyboard.push(row1);
     keyboard.push(row2);
 
-    const currentProviderInfo = status.providers.find((p) => p.type === current);
+    const currentProviderInfo = status.providers.find(
+      (p) => p.type === current,
+    );
 
     // WhatsApp/iMessage don't support inline keyboards - use text-based selection
     if (adapter.type === "whatsapp" || adapter.type === "imessage") {
@@ -7797,13 +8467,17 @@ ${status.queuedCount > 0 ? `Queued task IDs: ${status.queuedTaskIds.join(", ")}`
       text += `🧩 Group routing mode: ${this.formatWhatsAppGroupRoutingMode(rawMode)}\n`;
 
       const selfChatMode =
-        typeof channelConfig.selfChatMode === "boolean" ? channelConfig.selfChatMode : undefined;
+        typeof channelConfig.selfChatMode === "boolean"
+          ? channelConfig.selfChatMode
+          : undefined;
       if (selfChatMode !== undefined) {
         text += `📱 Self-chat mode: ${selfChatMode ? "✅" : "❌"}\n`;
       }
 
       const ambientMode =
-        typeof channelConfig.ambientMode === "boolean" ? channelConfig.ambientMode : undefined;
+        typeof channelConfig.ambientMode === "boolean"
+          ? channelConfig.ambientMode
+          : undefined;
       if (ambientMode !== undefined) {
         text += `🌐 Ambient mode: ${ambientMode ? "✅" : "❌"}\n`;
       }
@@ -7817,9 +8491,13 @@ ${status.queuedCount > 0 ? `Queued task IDs: ${status.queuedTaskIds.join(", ")}`
       }
 
       const responsePrefix =
-        typeof channelConfig.responsePrefix === "string" ? channelConfig.responsePrefix : undefined;
+        typeof channelConfig.responsePrefix === "string"
+          ? channelConfig.responsePrefix
+          : undefined;
       const responsePrefixDisplay =
-        responsePrefix === "" || responsePrefix === undefined ? "off" : `\`${responsePrefix}\``;
+        responsePrefix === "" || responsePrefix === undefined
+          ? "off"
+          : `\`${responsePrefix}\``;
       text += `🏷️ Response prefix: ${responsePrefixDisplay}\n`;
 
       const allowedNumbers = this.getWhatsAppAllowedNumbers(channelConfig);
@@ -7911,7 +8589,9 @@ Node.js: \`${nodeVersion}\`
         const workspace = this.workspaceRepo.findById(session.workspaceId);
         await adapter.sendMessage({
           chatId: message.chatId,
-          text: this.getUiCopy("welcomeBack", { workspaceName: workspace?.name || "Unknown" }),
+          text: this.getUiCopy("welcomeBack", {
+            workspaceName: workspace?.name || "Unknown",
+          }),
           parseMode: "markdown",
         });
       } else if (workspaces.length === 0) {
@@ -7926,7 +8606,9 @@ Node.js: \`${nodeVersion}\`
         this.sessionManager.setSessionWorkspace(sessionId, workspace.id);
         await adapter.sendMessage({
           chatId: message.chatId,
-          text: this.getUiCopy("welcomeSingleWorkspace", { workspaceName: workspace.name }),
+          text: this.getUiCopy("welcomeSingleWorkspace", {
+            workspaceName: workspace.name,
+          }),
           parseMode: "markdown",
         });
       } else {
@@ -7934,7 +8616,9 @@ Node.js: \`${nodeVersion}\`
         const workspaceList = workspaces
           .map((ws, index) => `${index + 1}. *${ws.name}*`)
           .join("\n");
-        const text = this.getUiCopy("welcomeSelectWorkspace", { workspaceList });
+        const text = this.getUiCopy("welcomeSelectWorkspace", {
+          workspaceList,
+        });
 
         await adapter.sendMessage({
           chatId: message.chatId,
@@ -7973,7 +8657,10 @@ Node.js: \`${nodeVersion}\`
   /**
    * Handle callback query from inline keyboard button press
    */
-  private async handleCallbackQuery(adapter: ChannelAdapter, query: CallbackQuery): Promise<void> {
+  private async handleCallbackQuery(
+    adapter: ChannelAdapter,
+    query: CallbackQuery,
+  ): Promise<void> {
     const { data, chatId } = query;
 
     // Parse callback data (format: action:param)
@@ -7982,7 +8669,10 @@ Node.js: \`${nodeVersion}\`
 
     try {
       let callbackAnswered = false;
-      const answer = async (text?: string, showAlert?: boolean): Promise<void> => {
+      const answer = async (
+        text?: string,
+        showAlert?: boolean,
+      ): Promise<void> => {
         if (callbackAnswered) return;
         callbackAnswered = true;
         if (adapter.answerCallbackQuery) {
@@ -8007,7 +8697,10 @@ Node.js: \`${nodeVersion}\`
         text: "",
         timestamp: new Date(),
       };
-      const securityResult = await this.securityManager.checkAccess(channel, syntheticMessage);
+      const securityResult = await this.securityManager.checkAccess(
+        channel,
+        syntheticMessage,
+      );
       if (!securityResult.allowed) {
         await answer("Not authorized.", true);
         if (securityResult.pairingRequired) {
@@ -8033,8 +8726,13 @@ Node.js: \`${nodeVersion}\`
 
       // Guard certain inline actions (workspace/provider/model selectors) so only the
       // initiating user can press buttons, and so old keyboards don't keep working.
-      const guardKey = this.makeInlineActionGuardKey(adapter.type, query.chatId, query.messageId);
-      const guardable = action === "workspace" || action === "provider" || action === "model";
+      const guardKey = this.makeInlineActionGuardKey(
+        adapter.type,
+        query.chatId,
+        query.messageId,
+      );
+      const guardable =
+        action === "workspace" || action === "provider" || action === "model";
       if (guardable) {
         const guard = this.pendingInlineActionGuards.get(guardKey);
         const expiredText =
@@ -8087,11 +8785,23 @@ Node.js: \`${nodeVersion}\`
           break;
 
         case "approve":
-          await this.handleApprovalCallback(adapter, query, session.id, param, true);
+          await this.handleApprovalCallback(
+            adapter,
+            query,
+            session.id,
+            param,
+            true,
+          );
           break;
 
         case "deny":
-          await this.handleApprovalCallback(adapter, query, session.id, param, false);
+          await this.handleApprovalCallback(
+            adapter,
+            query,
+            session.id,
+            param,
+            false,
+          );
           break;
 
         case "feedback":
@@ -8201,7 +8911,10 @@ Node.js: \`${nodeVersion}\`
     const status = LLMProviderFactory.getConfigStatus();
     const modelInfo = status.models.find((m) => m.key === modelKey);
     const displayName = modelInfo?.displayName || modelKey;
-    const newSettings = LLMProviderFactory.applyModelSelection(settings, modelKey);
+    const newSettings = LLMProviderFactory.applyModelSelection(
+      settings,
+      modelKey,
+    );
 
     LLMProviderFactory.saveSettings(newSettings);
     // Note: do NOT call clearCache() here — saveSettings() already updates the cache.
@@ -8285,7 +8998,10 @@ Node.js: \`${nodeVersion}\`
     }
 
     try {
-      const status = await this.agentDaemon.respondToApproval(approvalId, approved);
+      const status = await this.agentDaemon.respondToApproval(
+        approvalId,
+        approved,
+      );
       if (status === "in_progress") {
         await adapter.sendMessage({
           chatId: query.chatId,
@@ -8304,13 +9020,19 @@ Node.js: \`${nodeVersion}\`
       } else if (status === "duplicate") {
         statusText = "✅ That approval was already handled.";
       } else if (status === "not_found") {
-        statusText = "⌛ This approval request has expired or was already handled.";
+        statusText =
+          "⌛ This approval request has expired or was already handled.";
       } else {
         statusText = this.getUiCopy("approvalFailed");
       }
 
       if (adapter.editMessageWithKeyboard) {
-        await adapter.editMessageWithKeyboard(query.chatId, query.messageId, statusText, []);
+        await adapter.editMessageWithKeyboard(
+          query.chatId,
+          query.messageId,
+          statusText,
+          [],
+        );
       } else {
         await adapter.sendMessage({
           chatId: query.chatId,
@@ -8332,7 +9054,11 @@ Node.js: \`${nodeVersion}\`
     sessionId: string,
     param: string,
   ): Promise<void> {
-    const key = this.makeInlineActionGuardKey(adapter.type, query.chatId, query.messageId);
+    const key = this.makeInlineActionGuardKey(
+      adapter.type,
+      query.chatId,
+      query.messageId,
+    );
     const req = this.pendingFeedbackRequests.get(key);
 
     if (!req || req.sessionId !== sessionId || req.chatId !== query.chatId) {
@@ -8360,7 +9086,9 @@ Node.js: \`${nodeVersion}\`
       req.requestingUserId &&
       req.requestingUserId !== query.userId
     ) {
-      const who = req.requestingUserName ? `*${req.requestingUserName}*` : "the original requester";
+      const who = req.requestingUserName
+        ? `*${req.requestingUserName}*`
+        : "the original requester";
       await adapter.sendMessage({
         chatId: query.chatId,
         text: `⚠️ Only ${who} can submit feedback for this task in a group chat.`,
@@ -8375,7 +9103,12 @@ Node.js: \`${nodeVersion}\`
     // Remove keyboard to prevent double-taps; text remains unchanged.
     if (adapter.editMessageWithKeyboard) {
       try {
-        await adapter.editMessageWithKeyboard(query.chatId, query.messageId, undefined, []);
+        await adapter.editMessageWithKeyboard(
+          query.chatId,
+          query.messageId,
+          undefined,
+          [],
+        );
       } catch {
         // ignore
       }
@@ -8443,7 +9176,8 @@ Node.js: \`${nodeVersion}\`
         userName: query.userName,
       });
 
-      const followupChannelId = req.channelId || this.getChannelIdForAdapter(adapter);
+      const followupChannelId =
+        req.channelId || this.getChannelIdForAdapter(adapter);
       if (!followupChannelId) {
         await adapter.sendMessage({
           chatId: req.chatId,
