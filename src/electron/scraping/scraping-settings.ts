@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import { createLogger } from "../utils/logger";
 import { getUserDataDir } from "../utils/user-data-dir";
 
 export interface ScrapingSettings {
@@ -37,6 +38,37 @@ export const DEFAULT_SCRAPING_SETTINGS: ScrapingSettings = {
 };
 
 const SETTINGS_FILE = "scraping-settings.json";
+const scrapingLogger = createLogger("ScrapingSettings");
+const SAFE_PYTHON_COMMANDS = new Set(["python3", "python", "py"]);
+const SAFE_PYTHON_BASENAME = /^python(?:\d+(?:\.\d+)*)?(?:\.exe)?$|^py(?:\.exe)?$/i;
+
+export function resolveSafePythonPath(value: unknown): string {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  if (!trimmed) {
+    return DEFAULT_SCRAPING_SETTINGS.pythonPath;
+  }
+
+  if (SAFE_PYTHON_COMMANDS.has(trimmed)) {
+    return trimmed;
+  }
+
+  if (!path.isAbsolute(trimmed)) {
+    scrapingLogger.warn("Ignoring unsafe non-absolute Python path override.", {
+      attemptedPath: trimmed,
+    });
+    return DEFAULT_SCRAPING_SETTINGS.pythonPath;
+  }
+
+  const basename = path.basename(trimmed);
+  if (!SAFE_PYTHON_BASENAME.test(basename)) {
+    scrapingLogger.warn("Ignoring non-Python executable path in scraping settings.", {
+      attemptedPath: trimmed,
+    });
+    return DEFAULT_SCRAPING_SETTINGS.pythonPath;
+  }
+
+  return trimmed;
+}
 
 export class ScrapingSettingsManager {
   private static cachedSettings: ScrapingSettings | null = null;
@@ -57,11 +89,12 @@ export class ScrapingSettingsManager {
             ...DEFAULT_SCRAPING_SETTINGS.rateLimiting,
             ...stored.rateLimiting,
           },
+          pythonPath: resolveSafePythonPath(stored.pythonPath),
         } as ScrapingSettings;
         return { ...this.cachedSettings };
       }
     } catch (error) {
-      console.warn("[ScrapingSettings] Failed to load settings:", error);
+      scrapingLogger.warn("Failed to load settings:", error);
     }
 
     this.cachedSettings = { ...DEFAULT_SCRAPING_SETTINGS };
@@ -71,10 +104,14 @@ export class ScrapingSettingsManager {
   static saveSettings(settings: ScrapingSettings): void {
     try {
       const filePath = path.join(getUserDataDir(), SETTINGS_FILE);
-      fs.writeFileSync(filePath, JSON.stringify(settings, null, 2), "utf-8");
-      this.cachedSettings = { ...settings };
+      const normalized = {
+        ...settings,
+        pythonPath: resolveSafePythonPath(settings.pythonPath),
+      };
+      fs.writeFileSync(filePath, JSON.stringify(normalized, null, 2), "utf-8");
+      this.cachedSettings = { ...normalized };
     } catch (error) {
-      console.error("[ScrapingSettings] Failed to save settings:", error);
+      scrapingLogger.error("Failed to save settings:", error);
       throw error;
     }
   }
