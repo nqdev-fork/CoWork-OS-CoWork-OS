@@ -21,7 +21,7 @@ Cowork now supports more than ACP discovery-only plumbing:
 **OpenClaw + acpx** is a coding-agent stack where:
 
 - **acpx** is a headless CLI for the [Agent Client Protocol (ACP)](https://agentclientprotocol.com)
-- Orchestrators talk to coding agents (Codex, Claude Code, Pi, Gemini) over a **structured protocol** instead of PTY scraping
+- Orchestrators talk to coding agents (Codex, Pi, Gemini, and similar tools) over a **structured protocol** instead of PTY scraping
 - acpx provides: persistent sessions, prompt queueing, typed output (thinking, tool calls, diffs), crash reconnect, and a single command surface for multiple agents
 
 **Cowork OS** already has:
