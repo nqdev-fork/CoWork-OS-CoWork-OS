@@ -15,6 +15,12 @@ hero:
       text: Features
       link: /features
     - theme: alt
+      text: Core Automation
+      link: /core-automation
+    - theme: alt
+      text: 24/7 Learning Guide
+      link: /continual-learning-in-cowork
+    - theme: alt
       text: Session Runtime
       link: /session-runtime
     - theme: alt
@@ -67,10 +73,12 @@ features:
     details: Local-first email triage with AI classification, action-needed and commitment queues, draft review, and resync-safe background sync.
   - title: Managed Devices
     details: Connect local and remote CoWork nodes, inspect device summaries, browse remote workspaces, and launch tasks against selected machines from one Devices tab.
+  - title: Core Automation
+    details: Memory, Heartbeat, and Subconscious now form a strict always-on core owned by automation profiles, with Mission Control as the cockpit and Digital Twins kept optional.
   - title: Automations
-    details: Task Queue, Subconscious, Scheduled Tasks, Webhooks, connector-backed Event Triggers, and Daily Briefing now live under one Automations operating surface.
+    details: The automations surface now separates core automation from trigger ingress, device routing, schedules, webhooks, and optional twin features.
   - title: Heartbeat V3
-    details: Default two-lane background automation with cheap Pulse checks, selective Dispatch escalation, signal compression, and truthful Mission Control state.
+    details: Default two-lane background automation with cheap Pulse checks, selective Dispatch escalation, signal compression, automation-profile ownership, and truthful Mission Control state.
   - title: 137 Built-in Skills
     details: Document creation, web research, code generation, image analysis, and more. Extensible via custom skills, ClawHub installs, external skill imports, and optional read-only external skill directories, with staged scanning and warning/quarantine handling for managed imports.
   - title: Additive Skill Routing
@@ -88,5 +96,5 @@ features:
   - title: Best-Fit Operational Workflows
     details: Purpose-built packs for Support Ops, IT Ops, and Sales Ops — governed outcome delivery for the workflows where AI assistance has the clearest ROI. See the Best-Fit Workflows guide.
   - title: Zero-Human Company Ops
-    details: Venture operator workspace kits, a dedicated Companies control surface, persistent operator twins, strategic planner issue generation, and Mission Control monitoring for founder-directed autonomous company loops.
+    details: Venture operator workspace kits, a dedicated Companies control surface, operator personas plus automation profiles, strategic planner issue generation, and Mission Control monitoring for founder-directed company loops.
 ---
