@@ -2,6 +2,14 @@ import type Database from "better-sqlite3";
 import { ipcMain, BrowserWindow } from "electron";
 import {
   IPC_CHANNELS,
+  CoreEvalCase,
+  CoreFailureCluster,
+  CoreFailureRecord,
+  CoreHarnessExperiment,
+  CoreLearningsEntry,
+  CoreTrace,
+  CoreMemoryCandidate,
+  CoreMemoryDistillRun,
   HeartbeatConfig,
   CompanyCommandCenterSummary,
   CompanyEvidenceRef,
@@ -13,6 +21,8 @@ import {
 } from "../../shared/types";
 import type { Issue } from "../../shared/types";
 import { AgentRoleRepository } from "../agents/AgentRoleRepository";
+import { AutomationProfileRepository } from "../agents/AutomationProfileRepository";
+import { HeartbeatRunRepository } from "../agents/HeartbeatRunRepository";
 import {
   TaskSubscriptionRepository,
   SubscriptionReason,
@@ -27,8 +37,44 @@ import { createLogger } from "../utils/logger";
 import { ControlPlaneCoreService } from "../control-plane/ControlPlaneCoreService";
 import { StrategicPlannerService } from "../control-plane/StrategicPlannerService";
 import { AgentCompaniesService } from "../control-plane/AgentCompaniesService";
+import { SubconsciousRunRepository } from "../subconscious/SubconsciousRepositories";
+import { CoreMemoryCandidateRepository } from "../core/CoreMemoryCandidateRepository";
+import { CoreMemoryDistillRunRepository } from "../core/CoreMemoryDistillRunRepository";
+import { CoreTraceRepository } from "../core/CoreTraceRepository";
+import { CoreTraceService } from "../core/CoreTraceService";
+import { CoreMemoryDistiller } from "../core/CoreMemoryDistiller";
+import { CoreFailureRecordRepository } from "../core/CoreFailureRecordRepository";
+import { CoreFailureClusterRepository } from "../core/CoreFailureClusterRepository";
+import { CoreFailureMiningService } from "../core/CoreFailureMiningService";
+import { CoreFailureClusterService } from "../core/CoreFailureClusterService";
+import { CoreEvalCaseService } from "../core/CoreEvalCaseService";
+import { CoreHarnessExperimentService } from "../core/CoreHarnessExperimentService";
+import { CoreHarnessExperimentRunner } from "../core/CoreHarnessExperimentRunner";
+import { CoreLearningsService } from "../core/CoreLearningsService";
+import {
+  AutomationProfileAttachRequestSchema,
+  AutomationProfileCreateRequestSchema,
+  AutomationProfileUpdateRequestSchema,
+  CoreEvalCaseListRequestSchema,
+  CoreEvalCaseReviewSchema,
+  CoreExperimentListRequestSchema,
+  CoreExperimentReviewSchema,
+  CoreExperimentRunSchema,
+  CoreFailureClusterListRequestSchema,
+  CoreFailureClusterReviewSchema,
+  CoreFailureRecordListRequestSchema,
+  HeartbeatConfigSchema,
+  CoreLearningsListRequestSchema,
+  CoreMemoryCandidateListRequestSchema,
+  CoreMemoryCandidateReviewSchema,
+  CoreMemoryDistillRunNowSchema,
+  CoreTraceListRequestSchema,
+  StandupDeliveryRequestSchema,
+  StringIdSchema,
+} from "../utils/validation";
 
 const logger = createLogger("MissionControl");
+type Any = any;
 
 // Get main window for event broadcasting
 let mainWindowGetter: (() => BrowserWindow | null) | null = null;
@@ -158,6 +204,14 @@ export interface MissionControlDeps {
   heartbeatService: HeartbeatService;
   getPlannerService: () => StrategicPlannerService | null;
   getMainWindow: () => BrowserWindow | null;
+  coreTraceService: CoreTraceService;
+  coreMemoryDistiller: CoreMemoryDistiller;
+  coreFailureMiningService: CoreFailureMiningService;
+  coreFailureClusterService: CoreFailureClusterService;
+  coreEvalCaseService: CoreEvalCaseService;
+  coreHarnessExperimentService: CoreHarnessExperimentService;
+  coreHarnessExperimentRunner: CoreHarnessExperimentRunner;
+  coreLearningsService: CoreLearningsService;
 }
 
 /**
@@ -168,6 +222,14 @@ export function setupMissionControlHandlers(deps: MissionControlDeps): void {
 
   const { db, agentRoleRepo, taskSubscriptionRepo, standupService, heartbeatService } = deps;
   const core = new ControlPlaneCoreService(db);
+  const automationProfileRepo = new AutomationProfileRepository(db);
+  const heartbeatRunRepo = new HeartbeatRunRepository(db);
+  const subconsciousRunRepo = new SubconsciousRunRepository(db);
+  const coreTraceRepo = new CoreTraceRepository(db);
+  const coreFailureRecordRepo = new CoreFailureRecordRepository(db);
+  const coreFailureClusterRepo = new CoreFailureClusterRepository(db);
+  const coreMemoryCandidateRepo = new CoreMemoryCandidateRepository(db);
+  const coreMemoryDistillRunRepo = new CoreMemoryDistillRunRepository(db);
   const agentCompanies = new AgentCompaniesService(db, core, agentRoleRepo);
   const taskRepo = new TaskRepository(db);
   const activityRepo = new ActivityRepository(db);
@@ -203,16 +265,21 @@ export function setupMissionControlHandlers(deps: MissionControlDeps): void {
 
   ipcMain.handle(
     IPC_CHANNELS.HEARTBEAT_UPDATE_CONFIG,
-    async (_, agentRoleId: string, config: HeartbeatConfig) => {
+    async (_, agentRoleId: string, config: unknown) => {
       checkRateLimit(IPC_CHANNELS.HEARTBEAT_UPDATE_CONFIG);
       const validated = validateInput(UUIDSchema, agentRoleId, "agent role ID");
-      const result = agentRoleRepo.updateHeartbeatConfig(validated, config);
+      const validatedConfig = validateInput(
+        HeartbeatConfigSchema,
+        config,
+        "heartbeat configuration",
+      );
+      const result = agentRoleRepo.updateHeartbeatConfig(validated, validatedConfig);
       if (result) {
-        heartbeatService.updateAgentConfig(validated, config);
+        heartbeatService.updateAgentConfig(validated, validatedConfig);
         getMainWindow()?.webContents.send(IPC_CHANNELS.HEARTBEAT_EVENT, {
           type: "config_updated",
           agentRoleId: validated,
-          config,
+          config: validatedConfig,
         });
       }
       return result;
@@ -239,6 +306,316 @@ export function setupMissionControlHandlers(deps: MissionControlDeps): void {
   ipcMain.handle(IPC_CHANNELS.HEARTBEAT_GET_ALL_STATUS, async () => {
     return heartbeatService.getAllStatus();
   });
+
+  ipcMain.handle(IPC_CHANNELS.AUTOMATION_PROFILE_LIST, async () => {
+    return automationProfileRepo.listAll();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AUTOMATION_PROFILE_GET, async (_, id: string) => {
+    const validated = validateInput(UUIDSchema, id, "automation profile ID");
+    return automationProfileRepo.findById(validated);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AUTOMATION_PROFILE_CREATE, async (_, request) => {
+    checkRateLimit(IPC_CHANNELS.AUTOMATION_PROFILE_CREATE);
+    const validatedRequest = validateInput(
+      AutomationProfileCreateRequestSchema,
+      request,
+      "automation profile create request",
+    );
+    const agentRoleId = validatedRequest.agentRoleId;
+    const role = agentRoleRepo.findById(agentRoleId);
+    if (!role) {
+      throw new Error("Agent role not found");
+    }
+    if (role.roleKind === "persona_template") {
+      throw new Error("Digital Twin roles cannot own core automation profiles");
+    }
+    return automationProfileRepo.createOrReplace({
+      agentRoleId,
+      enabled: validatedRequest.enabled,
+      cadenceMinutes: validatedRequest.cadenceMinutes,
+      staggerOffsetMinutes: validatedRequest.staggerOffsetMinutes,
+      dispatchCooldownMinutes: validatedRequest.dispatchCooldownMinutes,
+      maxDispatchesPerDay: validatedRequest.maxDispatchesPerDay,
+      profile: validatedRequest.profile,
+      activeHours: validatedRequest.activeHours,
+    });
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AUTOMATION_PROFILE_UPDATE, async (_, request) => {
+    checkRateLimit(IPC_CHANNELS.AUTOMATION_PROFILE_UPDATE);
+    const validatedRequest = validateInput(
+      AutomationProfileUpdateRequestSchema,
+      request,
+      "automation profile update request",
+    );
+    const id = validatedRequest.id;
+    return automationProfileRepo.update({
+      id,
+      enabled: validatedRequest.enabled,
+      cadenceMinutes: validatedRequest.cadenceMinutes,
+      staggerOffsetMinutes: validatedRequest.staggerOffsetMinutes,
+      dispatchCooldownMinutes: validatedRequest.dispatchCooldownMinutes,
+      maxDispatchesPerDay: validatedRequest.maxDispatchesPerDay,
+      profile: validatedRequest.profile,
+      activeHours: validatedRequest.activeHours,
+    });
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AUTOMATION_PROFILE_DELETE, async (_, id: string) => {
+    checkRateLimit(IPC_CHANNELS.AUTOMATION_PROFILE_DELETE);
+    const validated = validateInput(UUIDSchema, id, "automation profile ID");
+    automationProfileRepo.deleteById(validated);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AUTOMATION_PROFILE_ATTACH, async (_, agentRoleId: string, request?: Record<string, unknown>) => {
+    checkRateLimit(IPC_CHANNELS.AUTOMATION_PROFILE_ATTACH);
+    const validatedRoleId = validateInput(UUIDSchema, agentRoleId, "agent role ID");
+    const validatedRequest = validateInput(
+      AutomationProfileAttachRequestSchema,
+      request ?? {},
+      "automation profile attach request",
+    );
+    const role = agentRoleRepo.findById(validatedRoleId);
+    if (!role) {
+      throw new Error("Agent role not found");
+    }
+    if (role.roleKind === "persona_template") {
+      throw new Error("Digital Twin roles cannot own core automation profiles");
+    }
+    return automationProfileRepo.createOrReplace({
+      agentRoleId: validatedRoleId,
+      enabled: validatedRequest.enabled ?? true,
+      cadenceMinutes: validatedRequest.cadenceMinutes,
+      staggerOffsetMinutes: validatedRequest.staggerOffsetMinutes,
+      dispatchCooldownMinutes: validatedRequest.dispatchCooldownMinutes,
+      maxDispatchesPerDay: validatedRequest.maxDispatchesPerDay,
+      profile: validatedRequest.profile,
+      activeHours: validatedRequest.activeHours,
+    });
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AUTOMATION_PROFILE_DETACH, async (_, agentRoleId: string) => {
+    checkRateLimit(IPC_CHANNELS.AUTOMATION_PROFILE_DETACH);
+    const validatedRoleId = validateInput(UUIDSchema, agentRoleId, "agent role ID");
+    automationProfileRepo.deleteByAgentRoleId(validatedRoleId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AUTOMATION_PROFILE_LIST_HEARTBEAT_RUNS, async (_, payload: { profileId: string; limit?: number }) => {
+    const profileId = validateInput(UUIDSchema, payload?.profileId, "automation profile ID");
+    const profile = automationProfileRepo.findById(profileId);
+    if (!profile) {
+      throw new Error("Automation profile not found");
+    }
+    const all = heartbeatRunRepo.listRecentDispatches(profile.agentRoleId, 0);
+    return typeof payload?.limit === "number" ? all.slice(0, payload.limit) : all;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AUTOMATION_PROFILE_LIST_SUBCONSCIOUS_RUNS, async (_, payload: { profileId: string; limit?: number }) => {
+    const profileId = validateInput(UUIDSchema, payload?.profileId, "automation profile ID");
+    const profile = automationProfileRepo.findById(profileId);
+    if (!profile) {
+      throw new Error("Automation profile not found");
+    }
+    return subconsciousRunRepo.list({
+      targetKey: `agent_role:${profile.agentRoleId}`,
+      limit: typeof payload?.limit === "number" ? payload.limit : 20,
+    });
+  });
+
+  ipcMain.handle(IPC_CHANNELS.CORE_TRACE_LIST, async (_, request?: unknown): Promise<CoreTrace[]> => {
+    const validated = request
+      ? validateInput(CoreTraceListRequestSchema, request, "core trace list request")
+      : {};
+    return coreTraceRepo.list(validated);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.CORE_TRACE_GET, async (_, id: string) => {
+    const validated = validateInput(StringIdSchema, id, "core trace ID");
+    return deps.coreTraceService.getTrace(validated);
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.CORE_TRACE_LIST_BY_PROFILE,
+    async (_, payload: { profileId: string; limit?: number }): Promise<CoreTrace[]> => {
+      const profileId = validateInput(UUIDSchema, payload?.profileId, "automation profile ID");
+      const limit = typeof payload?.limit === "number" ? payload.limit : 50;
+      return deps.coreTraceService.listByProfile(profileId, limit);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.CORE_FAILURE_LIST,
+    async (_, request?: unknown): Promise<CoreFailureRecord[]> => {
+      const validated = request
+        ? validateInput(
+            CoreFailureRecordListRequestSchema,
+            request,
+            "core failure record list request",
+          )
+        : {};
+      if (validated.traceId) {
+        deps.coreFailureMiningService.mineTrace(validated.traceId);
+      }
+      return coreFailureRecordRepo.list(validated);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.CORE_FAILURE_CLUSTER_LIST,
+    async (_, request?: unknown): Promise<CoreFailureCluster[]> => {
+      const validated = request
+        ? validateInput(
+            CoreFailureClusterListRequestSchema,
+            request,
+            "core failure cluster list request",
+          )
+        : {};
+      deps.coreFailureClusterService.clusterFailures(validated.profileId, validated.workspaceId);
+      return coreFailureClusterRepo.list(validated);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.CORE_FAILURE_CLUSTER_REVIEW,
+    async (_, request: unknown): Promise<CoreFailureCluster | undefined> => {
+      const validated = validateInput(
+        CoreFailureClusterReviewSchema,
+        request,
+        "core failure cluster review request",
+      );
+      return coreFailureClusterRepo.update(validated.id, {
+        status: validated.status,
+        rootCauseSummary: validated.rootCauseSummary,
+        updatedAt: Date.now(),
+      });
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.CORE_EVAL_CASE_LIST,
+    async (_, request?: unknown): Promise<CoreEvalCase[]> => {
+      const validated = request
+        ? validateInput(CoreEvalCaseListRequestSchema, request, "core eval case list request")
+        : {};
+      return deps.coreEvalCaseService.listEvalCases(validated);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.CORE_EVAL_CASE_REVIEW,
+    async (_, request: unknown): Promise<CoreEvalCase | undefined> => {
+      const validated = validateInput(
+        CoreEvalCaseReviewSchema,
+        request,
+        "core eval case review request",
+      );
+      return deps.coreEvalCaseService.reviewEvalCase(validated);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.CORE_EXPERIMENT_LIST,
+    async (_, request?: unknown): Promise<CoreHarnessExperiment[]> => {
+      const validated = request
+        ? validateInput(
+            CoreExperimentListRequestSchema,
+            request,
+            "core experiment list request",
+          )
+        : {};
+      return deps.coreHarnessExperimentService.listExperiments(validated);
+    },
+  );
+
+  ipcMain.handle(IPC_CHANNELS.CORE_EXPERIMENT_RUN, async (_, request: unknown) => {
+    checkRateLimit(IPC_CHANNELS.CORE_EXPERIMENT_RUN);
+    const validated = validateInput(
+      CoreExperimentRunSchema,
+      request,
+      "core experiment run request",
+    );
+    return deps.coreHarnessExperimentRunner.run(validated);
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.CORE_EXPERIMENT_REVIEW,
+    async (_, request: unknown): Promise<CoreHarnessExperiment | undefined> => {
+      checkRateLimit(IPC_CHANNELS.CORE_EXPERIMENT_REVIEW);
+      const validated = validateInput(
+        CoreExperimentReviewSchema,
+        request,
+        "core experiment review request",
+      );
+      return deps.coreHarnessExperimentRunner.review(validated);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.CORE_LEARNINGS_LIST,
+    async (_, request?: unknown): Promise<CoreLearningsEntry[]> => {
+      const validated = request
+        ? validateInput(
+            CoreLearningsListRequestSchema,
+            request,
+            "core learnings list request",
+          )
+        : {};
+      return deps.coreLearningsService.list(validated);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.CORE_MEMORY_LIST_CANDIDATES,
+    async (_, request?: unknown): Promise<CoreMemoryCandidate[]> => {
+      const validated = request
+        ? validateInput(
+            CoreMemoryCandidateListRequestSchema,
+            request,
+            "core memory candidate list request",
+          )
+        : {};
+      return coreMemoryCandidateRepo.list(validated);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.CORE_MEMORY_REVIEW_CANDIDATE,
+    async (_, request: unknown): Promise<CoreMemoryCandidate | undefined> => {
+      const validated = validateInput(
+        CoreMemoryCandidateReviewSchema,
+        request,
+        "core memory candidate review request",
+      );
+      return coreMemoryCandidateRepo.review(validated);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.CORE_MEMORY_LIST_DISTILL_RUNS,
+    async (_, payload: { profileId: string; workspaceId?: string; limit?: number }): Promise<CoreMemoryDistillRun[]> => {
+      const profileId = validateInput(UUIDSchema, payload?.profileId, "automation profile ID");
+      const workspaceId =
+        typeof payload?.workspaceId === "string" && payload.workspaceId.trim().length > 0
+          ? validateInput(UUIDSchema, payload.workspaceId, "workspace ID")
+          : undefined;
+      const limit = typeof payload?.limit === "number" ? payload.limit : undefined;
+      return coreMemoryDistillRunRepo.list({ profileId, workspaceId, limit });
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.CORE_MEMORY_RUN_DISTILL_NOW,
+    async (_, request: unknown): Promise<CoreMemoryDistillRun> => {
+      const validated = validateInput(
+        CoreMemoryDistillRunNowSchema,
+        request,
+        "core memory distill run request",
+      );
+      return deps.coreMemoryDistiller.runOffline(validated);
+    },
+  );
 
   // Forward heartbeat events to renderer
   heartbeatService.on("heartbeat", (event) => {
@@ -333,12 +710,19 @@ export function setupMissionControlHandlers(deps: MissionControlDeps): void {
     IPC_CHANNELS.STANDUP_DELIVER,
     async (_, reportId: string, channelType: string, channelId: string) => {
       checkRateLimit(IPC_CHANNELS.STANDUP_DELIVER);
-      const validatedReportId = validateInput(UUIDSchema, reportId, "report ID");
-      const report = standupService.findById(validatedReportId);
+      const delivery = validateInput(
+        StandupDeliveryRequestSchema,
+        { reportId, channelType, channelId },
+        "standup delivery request",
+      );
+      const report = standupService.findById(delivery.reportId);
       if (!report) {
         throw new Error("Standup report not found");
       }
-      await standupService.deliverReport(report, { channelType, channelId });
+      await standupService.deliverReport(report, {
+        channelType: delivery.channelType,
+        channelId: delivery.channelId,
+      });
       return { success: true };
     },
   );
