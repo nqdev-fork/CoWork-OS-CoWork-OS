@@ -16,8 +16,8 @@ function formatTimestamp(value?: number): string {
   return new Date(value).toLocaleString();
 }
 
-function renderList(items: string[]): string {
-  return items.length ? items.join(", ") : "None";
+function formatOutcome(value?: string): string {
+  return value ? value.replace(/_/g, " ") : "none";
 }
 
 const mdPlugins = [remarkGfm, remarkBreaks];
@@ -217,7 +217,9 @@ export function SubconsciousSettingsPanel(props?: {
         <div className="sc-status-card">
           <div className="sc-status-label">Global Brain</div>
           <div className="sc-status-value">{brain?.status || "idle"}</div>
-          <div className="sc-status-meta">Cadence: every {settings.cadenceMinutes} minute(s)</div>
+          <div className="sc-status-meta">
+            Cadence: every {settings.cadenceMinutes} minute(s) | {settings.autonomyMode.replace(/_/g, " ")}
+          </div>
         </div>
         <div className="sc-status-card">
           <div className="sc-status-label">Targets</div>
@@ -225,9 +227,9 @@ export function SubconsciousSettingsPanel(props?: {
           <div className="sc-status-meta">Active runs: {brain?.activeRunCount || 0}</div>
         </div>
         <div className="sc-status-card">
-          <div className="sc-status-label">Latest Run</div>
+          <div className="sc-status-label">Latest Run / Dream</div>
           <div className="sc-status-value" style={{ fontSize: 16 }}>{formatTimestamp(brain?.lastRunAt)}</div>
-          <div className="sc-status-meta">Target kinds: {renderList(settings.enabledTargetKinds)}</div>
+          <div className="sc-status-meta">Dream: {formatTimestamp(brain?.lastDreamAt)}</div>
         </div>
       </div>
 
@@ -269,6 +271,33 @@ export function SubconsciousSettingsPanel(props?: {
             />
             <span>Auto-dispatch winners</span>
           </label>
+          <label className="sc-checkbox">
+            <input
+              type="checkbox"
+              checked={settings.journalingEnabled}
+              disabled={busy}
+              onChange={(event) => void saveSettings({ journalingEnabled: event.target.checked })}
+            />
+            <span>Daily journaling</span>
+          </label>
+          <label className="sc-checkbox">
+            <input
+              type="checkbox"
+              checked={settings.dreamsEnabled}
+              disabled={busy}
+              onChange={(event) => void saveSettings({ dreamsEnabled: event.target.checked })}
+            />
+            <span>Dream distillation</span>
+          </label>
+          <label className="sc-checkbox">
+            <input
+              type="checkbox"
+              checked={settings.catchUpOnRestart}
+              disabled={busy}
+              onChange={(event) => void saveSettings({ catchUpOnRestart: event.target.checked })}
+            />
+            <span>Catch up on restart</span>
+          </label>
           <label className="sc-input-group">
             <span className="sc-input-label">Cadence (minutes)</span>
             <input
@@ -280,6 +309,19 @@ export function SubconsciousSettingsPanel(props?: {
                 setSettings((current) => ({ ...current, cadenceMinutes: Number(event.target.value || 15) }))
               }
               onBlur={() => void saveSettings({ cadenceMinutes: settings.cadenceMinutes })}
+            />
+          </label>
+          <label className="sc-input-group">
+            <span className="sc-input-label">Dream cadence (hours)</span>
+            <input
+              type="number"
+              min={1}
+              value={settings.dreamCadenceHours}
+              disabled={busy}
+              onChange={(event) =>
+                setSettings((current) => ({ ...current, dreamCadenceHours: Number(event.target.value || 24) }))
+              }
+              onBlur={() => void saveSettings({ dreamCadenceHours: settings.dreamCadenceHours })}
             />
           </label>
           <label className="sc-input-group">
@@ -309,6 +351,18 @@ export function SubconsciousSettingsPanel(props?: {
               onBlur={() => void saveSettings({ artifactRetentionDays: settings.artifactRetentionDays })}
             />
           </label>
+          <label className="sc-input-group">
+            <span className="sc-input-label">Autonomy mode</span>
+            <select
+              value={settings.autonomyMode}
+              disabled={busy}
+              onChange={(event) => void saveSettings({ autonomyMode: event.target.value as SubconsciousSettings["autonomyMode"] })}
+            >
+              <option value="recommendation_first">recommendation first</option>
+              <option value="balanced_autopilot">balanced autopilot</option>
+              <option value="strong_autonomy">strong autonomy</option>
+            </select>
+          </label>
         </div>
         <div className="sc-target-kinds">
           <div className="sc-target-kinds-label">Enabled target kinds</div>
@@ -334,6 +388,57 @@ export function SubconsciousSettingsPanel(props?: {
                 </label>
               );
             })}
+          </div>
+        </div>
+        <div className="sc-target-kinds">
+          <div className="sc-target-kinds-label">Durable target kinds</div>
+          <div className="sc-target-kinds-row">
+            {SUBCONSCIOUS_TARGET_KINDS.map((kind) => {
+              const isActive = settings.durableTargetKinds.includes(kind);
+              return (
+                <label key={`durable-${kind}`} className={`sc-kind-chip${isActive ? " active" : ""}`}>
+                  <input
+                    type="checkbox"
+                    checked={isActive}
+                    disabled={busy}
+                    onChange={(event) => {
+                      const nextKinds = event.target.checked
+                        ? [...new Set([...settings.durableTargetKinds, kind])]
+                        : settings.durableTargetKinds.filter((entry) => entry !== kind);
+                      void saveSettings({ durableTargetKinds: nextKinds });
+                    }}
+                  />
+                  <span>{kind}</span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+        <div className="sc-target-kinds">
+          <div className="sc-target-kinds-label">Notification intents</div>
+          <div className="sc-target-kinds-row">
+            {[
+              ["inputNeeded", "input needed"],
+              ["importantActionTaken", "important action"],
+              ["completedWhileAway", "completed while away"],
+            ].map(([key, label]) => (
+              <label key={key} className="sc-kind-chip active">
+                <input
+                  type="checkbox"
+                  checked={settings.notificationPolicy[key as keyof SubconsciousSettings["notificationPolicy"]] as boolean}
+                  disabled={busy}
+                  onChange={(event) =>
+                    void saveSettings({
+                      notificationPolicy: {
+                        ...settings.notificationPolicy,
+                        [key]: event.target.checked,
+                      },
+                    })
+                  }
+                />
+                <span>{label}</span>
+              </label>
+            ))}
           </div>
         </div>
       </div>
@@ -386,7 +491,7 @@ export function SubconsciousSettingsPanel(props?: {
                   </span>
                 </div>
                 <div className="sc-target-meta">
-                  {target.target.kind} | backlog {target.backlogCount} | winner {target.lastWinner || "none"}
+                  {target.target.kind} | {target.persistence} | backlog {target.backlogCount} | outcome {formatOutcome(target.lastMeaningfulOutcome)}
                 </div>
               </button>
             ))}
@@ -405,9 +510,23 @@ export function SubconsciousSettingsPanel(props?: {
                 <div className="sc-detail-header">
                   <div className="sc-detail-name">{detail.target.target.label}</div>
                   <div className="sc-detail-meta">
-                    {detail.target.target.kind} | health {detail.target.health} | last run {formatTimestamp(detail.target.lastRunAt)}
+                    {detail.target.target.kind} | {detail.target.persistence} | health {detail.target.health} | last run {formatTimestamp(detail.target.lastRunAt)} | outcome {formatOutcome(detail.target.lastMeaningfulOutcome)}
                   </div>
                 </div>
+                <label className="sc-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={settings.trustedTargetKeys.includes(detail.target.key)}
+                    disabled={busy}
+                    onChange={(event) => {
+                      const next = event.target.checked
+                        ? [...new Set([...settings.trustedTargetKeys, detail.target.key])]
+                        : settings.trustedTargetKeys.filter((key) => key !== detail.target.key);
+                      void saveSettings({ trustedTargetKeys: next });
+                    }}
+                  />
+                  <span>Trusted for autonomous dispatch</span>
+                </label>
                 <div>
                   <div className="sc-detail-section-title">Latest evidence</div>
                   <ul className="sc-detail-list">
@@ -451,6 +570,22 @@ export function SubconsciousSettingsPanel(props?: {
                     <div className="sc-detail-empty">No winner yet.</div>
                   )}
                 </div>
+                <div>
+                  <div className="sc-detail-section-title">Operator Timeline</div>
+                  {detail.journal.length ? (
+                    <ul className="sc-detail-list">
+                      {detail.journal.slice(0, 8).map((entry) => (
+                        <li key={entry.id}>
+                          <Md
+                            text={`**${entry.kind}** · ${formatTimestamp(entry.createdAt)} · ${entry.summary}${entry.details ? ` — ${entry.details}` : ""}`}
+                          />
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="sc-detail-empty">No journal entries yet.</div>
+                  )}
+                </div>
               </div>
             ) : (
               <div className="sc-detail-empty">Select a target to inspect its reflective history.</div>
@@ -473,6 +608,23 @@ export function SubconsciousSettingsPanel(props?: {
               )}
             </div>
 
+            <div className="sc-card">
+              <div className="sc-card-title">Memory Index</div>
+              {detail?.memory.length ? (
+                <ul className="sc-detail-list">
+                  {detail.memory.slice(0, 8).map((item) => (
+                    <li key={item.id}>
+                      <Md text={`**${item.bucket}**: ${item.summary}${item.stale ? " _(stale)_" : ""}`} />
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="sc-detail-empty">No distilled memories yet.</div>
+              )}
+            </div>
+          </div>
+
+          <div className="sc-bottom-grid">
             <div className="sc-card">
               <div className="sc-card-title">Dispatch History</div>
               {detail?.dispatchHistory.length ? (
@@ -497,6 +649,21 @@ export function SubconsciousSettingsPanel(props?: {
                 </ul>
               ) : (
                 <div className="sc-detail-empty">No dispatches yet.</div>
+              )}
+            </div>
+
+            <div className="sc-card">
+              <div className="sc-card-title">Dreams</div>
+              {detail?.dreams.length ? (
+                <ul className="sc-detail-list">
+                  {detail.dreams.slice(0, 5).map((dream) => (
+                    <li key={dream.id}>
+                      <Md text={`**${formatTimestamp(dream.createdAt)}**: ${dream.digest.join(" | ")}`} />
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="sc-detail-empty">No dream distillations yet.</div>
               )}
             </div>
           </div>
