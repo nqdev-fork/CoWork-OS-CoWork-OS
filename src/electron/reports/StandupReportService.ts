@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { v4 as uuidv4 } from "uuid";
-import { StandupReport, Task, BoardColumn } from "../../shared/types";
+import { StandupReport, Task, BoardColumn, type ChannelType } from "../../shared/types";
 
 /**
  * Query for standup reports
@@ -16,7 +16,7 @@ export interface StandupListQuery {
  * Channel configuration for report delivery
  */
 export interface DeliveryConfig {
-  channelType: string; // telegram, discord, slack, etc.
+  channelType: ChannelType;
   channelId: string;
 }
 
