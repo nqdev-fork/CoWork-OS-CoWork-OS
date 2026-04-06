@@ -3378,6 +3378,438 @@ export interface HeartbeatPolicyInput {
   proactiveTasks?: ProactiveTaskDefinition[];
 }
 
+export interface AutomationProfile {
+  id: string;
+  agentRoleId: string;
+  enabled: boolean;
+  cadenceMinutes: number;
+  staggerOffsetMinutes: number;
+  dispatchCooldownMinutes: number;
+  maxDispatchesPerDay: number;
+  profile: HeartbeatProfile;
+  activeHours?: HeartbeatActiveHours | null;
+  heartbeatStatus: HeartbeatStatus;
+  lastHeartbeatAt?: number;
+  lastPulseAt?: number;
+  lastDispatchAt?: number;
+  lastPulseResult?: HeartbeatPulseResultKind;
+  lastDispatchKind?: HeartbeatDispatchKind;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CreateAutomationProfileRequest {
+  agentRoleId: string;
+  enabled?: boolean;
+  cadenceMinutes?: number;
+  staggerOffsetMinutes?: number;
+  dispatchCooldownMinutes?: number;
+  maxDispatchesPerDay?: number;
+  profile?: HeartbeatProfile;
+  activeHours?: HeartbeatActiveHours | null;
+}
+
+export interface UpdateAutomationProfileRequest {
+  id: string;
+  enabled?: boolean;
+  cadenceMinutes?: number;
+  staggerOffsetMinutes?: number;
+  dispatchCooldownMinutes?: number;
+  maxDispatchesPerDay?: number;
+  profile?: HeartbeatProfile;
+  activeHours?: HeartbeatActiveHours | null;
+}
+
+export type CoreTraceSourceSurface =
+  | "heartbeat"
+  | "subconscious"
+  | "memory"
+  | "trigger"
+  | "device";
+
+export type CoreTraceKind =
+  | "pulse_cycle"
+  | "subconscious_cycle"
+  | "memory_update"
+  | "dream_distill"
+  | "harness_experiment"
+  | "regression_eval";
+
+export type CoreTraceStatus =
+  | "running"
+  | "completed"
+  | "failed"
+  | "skipped";
+
+export type CoreTracePhase =
+  | "start"
+  | "evidence"
+  | "failure_mining"
+  | "gating"
+  | "decision"
+  | "dispatch"
+  | "memory"
+  | "eval"
+  | "gate"
+  | "promotion"
+  | "complete"
+  | "error";
+
+export type CoreMemoryScopeKind =
+  | "global"
+  | "workspace"
+  | "automation_profile"
+  | "code_workspace"
+  | "pull_request";
+
+export type CoreMemoryCandidateType =
+  | "preference"
+  | "constraint"
+  | "pattern"
+  | "project_state"
+  | "watch_item"
+  | "open_loop"
+  | "invalidates_prior";
+
+export type CoreMemoryCandidateStatus =
+  | "proposed"
+  | "accepted"
+  | "rejected"
+  | "merged";
+
+export interface CoreTrace {
+  id: string;
+  profileId: string;
+  workspaceId?: string;
+  targetKey?: string;
+  sourceSurface: CoreTraceSourceSurface;
+  traceKind: CoreTraceKind;
+  status: CoreTraceStatus;
+  taskId?: string;
+  heartbeatRunId?: string;
+  subconsciousRunId?: string;
+  summary?: string;
+  error?: string;
+  startedAt: number;
+  completedAt?: number;
+  createdAt: number;
+}
+
+export interface CoreTraceEvent {
+  id: string;
+  traceId: string;
+  phase: CoreTracePhase;
+  eventType: string;
+  summary: string;
+  details?: Record<string, unknown>;
+  createdAt: number;
+}
+
+export interface CoreMemoryCandidate {
+  id: string;
+  traceId: string;
+  profileId: string;
+  workspaceId?: string;
+  scopeKind: CoreMemoryScopeKind;
+  scopeRef: string;
+  candidateType: CoreMemoryCandidateType;
+  summary: string;
+  details?: string;
+  confidence: number;
+  noveltyScore: number;
+  stabilityScore: number;
+  status: CoreMemoryCandidateStatus;
+  resolution?: string;
+  sourceRunId?: string;
+  createdAt: number;
+  resolvedAt?: number;
+}
+
+export interface CoreMemoryDistillRun {
+  id: string;
+  profileId: string;
+  workspaceId?: string;
+  mode: "hot_path" | "offline";
+  sourceTraceCount: number;
+  candidateCount: number;
+  acceptedCount: number;
+  prunedCount: number;
+  status: "running" | "completed" | "failed" | "skipped";
+  summary?: Record<string, unknown>;
+  error?: string;
+  startedAt: number;
+  completedAt?: number;
+}
+
+export interface CoreMemoryScopeState {
+  scopeKind: CoreMemoryScopeKind;
+  scopeRef: string;
+  lastTraceAt?: number;
+  lastDistillAt?: number;
+  lastPruneAt?: number;
+  stabilityVersion: number;
+  updatedAt: number;
+}
+
+export interface ListCoreTracesRequest {
+  profileId?: string;
+  workspaceId?: string;
+  targetKey?: string;
+  traceKind?: CoreTraceKind;
+  status?: CoreTraceStatus;
+  limit?: number;
+}
+
+export interface GetCoreTraceResult {
+  trace: CoreTrace;
+  events: CoreTraceEvent[];
+  candidates: CoreMemoryCandidate[];
+}
+
+export interface ListCoreMemoryCandidatesRequest {
+  profileId?: string;
+  workspaceId?: string;
+  traceId?: string;
+  scopeKind?: CoreMemoryScopeKind;
+  status?: CoreMemoryCandidateStatus;
+  limit?: number;
+}
+
+export interface ReviewCoreMemoryCandidateRequest {
+  id: string;
+  status: Extract<CoreMemoryCandidateStatus, "accepted" | "rejected" | "merged">;
+  resolution?: string;
+}
+
+export interface ListCoreMemoryDistillRunsRequest {
+  profileId: string;
+  workspaceId?: string;
+  limit?: number;
+}
+
+export interface RunCoreMemoryDistillNowRequest {
+  profileId: string;
+  workspaceId?: string;
+}
+
+export type CoreFailureCategory =
+  | "wake_timing"
+  | "dispatch_overreach"
+  | "dispatch_underreach"
+  | "memory_noise"
+  | "memory_staleness"
+  | "subconscious_duplication"
+  | "subconscious_low_signal"
+  | "routing_mismatch"
+  | "workspace_context_gap"
+  | "cooldown_policy_mismatch"
+  | "budget_policy_mismatch"
+  | "unknown";
+
+export type CoreFailureSeverity = "low" | "medium" | "high" | "critical";
+
+export type CoreFailureRecordStatus =
+  | "open"
+  | "clustered"
+  | "resolved"
+  | "archived";
+
+export type CoreFailureClusterStatus =
+  | "open"
+  | "stable"
+  | "evaluating"
+  | "resolved"
+  | "dismissed";
+
+export type CoreEvalCaseStatus =
+  | "draft"
+  | "active"
+  | "failing"
+  | "archived";
+
+export type CoreExperimentChangeKind =
+  | "automation_profile"
+  | "subconscious_settings"
+  | "memory_policy";
+
+export type CoreExperimentStatus =
+  | "proposed"
+  | "running"
+  | "passed_gate"
+  | "failed_gate"
+  | "promoted"
+  | "rejected";
+
+export interface CoreFailureRecord {
+  id: string;
+  traceId: string;
+  profileId: string;
+  workspaceId?: string;
+  targetKey?: string;
+  category: CoreFailureCategory;
+  severity: CoreFailureSeverity;
+  fingerprint: string;
+  summary: string;
+  details?: string;
+  status: CoreFailureRecordStatus;
+  sourceSurface: CoreTraceSourceSurface;
+  taskId?: string;
+  createdAt: number;
+  resolvedAt?: number;
+}
+
+export interface CoreFailureCluster {
+  id: string;
+  profileId: string;
+  workspaceId?: string;
+  category: CoreFailureCategory;
+  fingerprint: string;
+  rootCauseSummary: string;
+  status: CoreFailureClusterStatus;
+  recurrenceCount: number;
+  linkedEvalCaseId?: string;
+  linkedExperimentId?: string;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CoreEvalCase {
+  id: string;
+  profileId: string;
+  workspaceId?: string;
+  clusterId: string;
+  title: string;
+  spec: Record<string, unknown>;
+  status: CoreEvalCaseStatus;
+  passCount: number;
+  failCount: number;
+  lastRunAt?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CoreHarnessExperiment {
+  id: string;
+  profileId: string;
+  workspaceId?: string;
+  clusterId: string;
+  changeKind: CoreExperimentChangeKind;
+  proposal: Record<string, unknown>;
+  status: CoreExperimentStatus;
+  summary?: string;
+  promotedAt?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CoreHarnessExperimentRun {
+  id: string;
+  experimentId: string;
+  status: "queued" | "running" | "passed" | "failed";
+  baseline?: Record<string, unknown>;
+  outcome?: Record<string, unknown>;
+  gateResultId?: string;
+  summary?: string;
+  createdAt: number;
+  startedAt?: number;
+  completedAt?: number;
+}
+
+export interface CoreRegressionGateResult {
+  id: string;
+  experimentRunId: string;
+  passed: boolean;
+  targetImproved: boolean;
+  regressionsDetected: string[];
+  summary: string;
+  details?: Record<string, unknown>;
+  createdAt: number;
+}
+
+export interface CoreLearningsEntry {
+  id: string;
+  profileId: string;
+  workspaceId?: string;
+  kind:
+    | "failure_cluster"
+    | "eval_case"
+    | "experiment"
+    | "promotion"
+    | "gate_rejection";
+  summary: string;
+  details?: string;
+  relatedClusterId?: string;
+  relatedExperimentId?: string;
+  createdAt: number;
+}
+
+export interface ListCoreFailureRecordsRequest {
+  profileId?: string;
+  workspaceId?: string;
+  traceId?: string;
+  category?: CoreFailureCategory;
+  status?: CoreFailureRecordStatus;
+  limit?: number;
+}
+
+export interface ListCoreFailureClustersRequest {
+  profileId?: string;
+  workspaceId?: string;
+  category?: CoreFailureCategory;
+  status?: CoreFailureClusterStatus;
+  limit?: number;
+}
+
+export interface ReviewCoreFailureClusterRequest {
+  id: string;
+  status: Extract<CoreFailureClusterStatus, "stable" | "resolved" | "dismissed">;
+  rootCauseSummary?: string;
+}
+
+export interface ListCoreEvalCasesRequest {
+  profileId?: string;
+  workspaceId?: string;
+  clusterId?: string;
+  status?: CoreEvalCaseStatus;
+  limit?: number;
+}
+
+export interface ReviewCoreEvalCaseRequest {
+  id: string;
+  status: Extract<CoreEvalCaseStatus, "active" | "archived" | "failing">;
+}
+
+export interface ListCoreExperimentsRequest {
+  profileId?: string;
+  workspaceId?: string;
+  clusterId?: string;
+  status?: CoreExperimentStatus;
+  limit?: number;
+}
+
+export interface RunCoreExperimentRequest {
+  experimentId?: string;
+  clusterId?: string;
+  profileId?: string;
+  workspaceId?: string;
+  autoPromote?: boolean;
+}
+
+export interface ReviewCoreExperimentRequest {
+  id: string;
+  action: "promote" | "reject";
+}
+
+export interface ListCoreLearningsRequest {
+  profileId?: string;
+  workspaceId?: string;
+  relatedClusterId?: string;
+  relatedExperimentId?: string;
+  limit?: number;
+}
+
 /**
  * Agent role defines a specialized agent with specific capabilities and configuration
  */
@@ -3463,7 +3895,7 @@ export interface CreateAgentRoleRequest {
   dispatchCooldownMinutes?: number;
   maxDispatchesPerDay?: number;
   heartbeatProfile?: HeartbeatProfile;
-  activeHours?: HeartbeatActiveHours;
+  activeHours?: HeartbeatActiveHours | null;
   monthlyBudgetCost?: number;
   operatorMandate?: string;
   allowedLoopTypes?: CompanyLoopType[];
@@ -3498,15 +3930,6 @@ export interface UpdateAgentRoleRequest {
   // Automation fields
   autonomyLevel?: AgentAutonomyLevel;
   soul?: string;
-  heartbeatPolicy?: HeartbeatPolicyInput;
-  heartbeatEnabled?: boolean;
-  heartbeatIntervalMinutes?: number;
-  heartbeatStaggerOffset?: number;
-  pulseEveryMinutes?: number;
-  dispatchCooldownMinutes?: number;
-  maxDispatchesPerDay?: number;
-  heartbeatProfile?: HeartbeatProfile;
-  activeHours?: HeartbeatActiveHours | null;
   autoPausedAt?: number | null;
   operatorMandate?: string;
   allowedLoopTypes?: CompanyLoopType[];
@@ -3962,6 +4385,21 @@ export interface PersonaTemplateSkillRef {
   required: boolean;
 }
 
+export interface PersonaTemplateHeartbeatConfig {
+  enabled: boolean;
+  intervalMinutes: number;
+  staggerOffset?: number;
+  dispatchCooldownMinutes?: number;
+  maxDispatchesPerDay?: number;
+  profile?: HeartbeatProfile;
+  activeHours?: HeartbeatActiveHours | null;
+}
+
+export interface PersonaTemplateCognitiveOffloadConfig {
+  primaryCategories: CognitiveOffloadCategory[];
+  proactiveTasks: ProactiveTaskDefinition[];
+}
+
 /**
  * Category for persona template gallery grouping
  */
@@ -3994,16 +4432,8 @@ export interface PersonaTemplate {
     soul: string; // JSON string for role-persona
   };
 
-  heartbeat: {
-    enabled: boolean;
-    intervalMinutes: number;
-    staggerOffset: number;
-  };
-
-  cognitiveOffload: {
-    primaryCategories: CognitiveOffloadCategory[];
-    proactiveTasks: ProactiveTaskDefinition[];
-  };
+  heartbeat?: PersonaTemplateHeartbeatConfig;
+  cognitiveOffload?: PersonaTemplateCognitiveOffloadConfig;
 
   skills: PersonaTemplateSkillRef[];
 
@@ -4034,8 +4464,6 @@ export interface ActivatePersonaTemplateRequest {
     color?: string;
     modelKey?: string;
     providerType?: LLMProviderType;
-    heartbeatIntervalMinutes?: number;
-    enabledProactiveTasks?: string[];
   };
 }
 
@@ -4295,6 +4723,11 @@ export interface HeartbeatConfig {
   maxDispatchesPerDay?: number;
   heartbeatProfile?: HeartbeatProfile;
   activeHours?: HeartbeatActiveHours | null;
+}
+
+export interface AutomationProfileRunQuery {
+  profileId: string;
+  limit?: number;
 }
 
 /**
@@ -4945,6 +5378,31 @@ export const IPC_CHANNELS = {
   HEARTBEAT_GET_STATUS: "heartbeat:getStatus",
   HEARTBEAT_GET_ALL_STATUS: "heartbeat:getAllStatus",
   HEARTBEAT_EVENT: "heartbeat:event",
+  AUTOMATION_PROFILE_LIST: "automationProfile:list",
+  AUTOMATION_PROFILE_GET: "automationProfile:get",
+  AUTOMATION_PROFILE_CREATE: "automationProfile:create",
+  AUTOMATION_PROFILE_UPDATE: "automationProfile:update",
+  AUTOMATION_PROFILE_DELETE: "automationProfile:delete",
+  AUTOMATION_PROFILE_ATTACH: "automationProfile:attach",
+  AUTOMATION_PROFILE_DETACH: "automationProfile:detach",
+  AUTOMATION_PROFILE_LIST_HEARTBEAT_RUNS: "automationProfile:listHeartbeatRuns",
+  AUTOMATION_PROFILE_LIST_SUBCONSCIOUS_RUNS: "automationProfile:listSubconsciousRuns",
+  CORE_TRACE_LIST: "coreTrace:list",
+  CORE_TRACE_GET: "coreTrace:get",
+  CORE_TRACE_LIST_BY_PROFILE: "coreTrace:listByProfile",
+  CORE_FAILURE_LIST: "coreFailure:list",
+  CORE_FAILURE_CLUSTER_LIST: "coreFailure:listClusters",
+  CORE_FAILURE_CLUSTER_REVIEW: "coreFailure:reviewCluster",
+  CORE_EVAL_CASE_LIST: "coreEval:listCases",
+  CORE_EVAL_CASE_REVIEW: "coreEval:reviewCase",
+  CORE_EXPERIMENT_LIST: "coreExperiment:list",
+  CORE_EXPERIMENT_RUN: "coreExperiment:run",
+  CORE_EXPERIMENT_REVIEW: "coreExperiment:review",
+  CORE_LEARNINGS_LIST: "coreLearnings:list",
+  CORE_MEMORY_LIST_CANDIDATES: "coreMemory:listCandidates",
+  CORE_MEMORY_REVIEW_CANDIDATE: "coreMemory:reviewCandidate",
+  CORE_MEMORY_LIST_DISTILL_RUNS: "coreMemory:listDistillRuns",
+  CORE_MEMORY_RUN_DISTILL_NOW: "coreMemory:runDistillNow",
 
   // Mission Control - Task Subscriptions
   SUBSCRIPTION_LIST: "subscription:list",
