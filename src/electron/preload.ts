@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer } from "electron";
 import * as fs from "fs";
 import * as os from "os";
 import { randomBytes } from "crypto";
+import { IPC_CHANNELS as SHARED_IPC_CHANNELS } from "../shared/types";
 import type {
   AgentTeam,
   AgentTeamItem,
@@ -29,6 +30,15 @@ import type {
   CreateAgentTeamMemberRequest,
   CreateAgentTeamRequest,
   CreateAgentTeamRunRequest,
+  CoreEvalCase,
+  CoreFailureCluster,
+  CoreFailureRecord,
+  CoreHarnessExperiment,
+  CoreLearningsEntry,
+  CoreMemoryCandidate,
+  CoreMemoryDistillRun,
+  CoreTrace,
+  GetCoreTraceResult,
   ImageAttachment,
   LLMProviderType,
   MemoryFeaturesSettings,
@@ -321,11 +331,12 @@ function validateSendMessageAttachments(images?: ImageAttachment[]): ImageAttach
   }
 }
 
-// IMPORTANT: These string values must stay in sync with IPC_CHANNELS in src/shared/types.ts.
-// The preload cannot import from the main process, so this is a manual mirror.
-// When adding a new channel, update BOTH files.
-// IPC Channel names - inlined to avoid require() issues in sandboxed preload
-const IPC_CHANNELS = {
+const IPC_CHANNELS = SHARED_IPC_CHANNELS;
+/*
+ * Legacy mirrored channel list retained temporarily to minimize churn in this
+ * large file while runtime now sources channel names from shared/types.
+ */
+const LEGACY_IPC_CHANNELS_MIRROR = {
   TASK_CREATE: "task:create",
   TASK_GET: "task:get",
   TASK_LIST: "task:list",
@@ -1042,6 +1053,31 @@ const IPC_CHANNELS = {
   HEARTBEAT_GET_STATUS: "heartbeat:getStatus",
   HEARTBEAT_GET_ALL_STATUS: "heartbeat:getAllStatus",
   HEARTBEAT_EVENT: "heartbeat:event",
+  AUTOMATION_PROFILE_LIST: "automationProfile:list",
+  AUTOMATION_PROFILE_GET: "automationProfile:get",
+  AUTOMATION_PROFILE_CREATE: "automationProfile:create",
+  AUTOMATION_PROFILE_UPDATE: "automationProfile:update",
+  AUTOMATION_PROFILE_DELETE: "automationProfile:delete",
+  AUTOMATION_PROFILE_ATTACH: "automationProfile:attach",
+  AUTOMATION_PROFILE_DETACH: "automationProfile:detach",
+  AUTOMATION_PROFILE_LIST_HEARTBEAT_RUNS: "automationProfile:listHeartbeatRuns",
+  AUTOMATION_PROFILE_LIST_SUBCONSCIOUS_RUNS: "automationProfile:listSubconsciousRuns",
+  CORE_TRACE_LIST: "coreTrace:list",
+  CORE_TRACE_GET: "coreTrace:get",
+  CORE_TRACE_LIST_BY_PROFILE: "coreTrace:listByProfile",
+  CORE_FAILURE_LIST: "coreFailure:list",
+  CORE_FAILURE_CLUSTER_LIST: "coreFailure:listClusters",
+  CORE_FAILURE_CLUSTER_REVIEW: "coreFailure:reviewCluster",
+  CORE_EVAL_CASE_LIST: "coreEval:listCases",
+  CORE_EVAL_CASE_REVIEW: "coreEval:reviewCase",
+  CORE_EXPERIMENT_LIST: "coreExperiment:list",
+  CORE_EXPERIMENT_RUN: "coreExperiment:run",
+  CORE_EXPERIMENT_REVIEW: "coreExperiment:review",
+  CORE_LEARNINGS_LIST: "coreLearnings:list",
+  CORE_MEMORY_LIST_CANDIDATES: "coreMemory:listCandidates",
+  CORE_MEMORY_REVIEW_CANDIDATE: "coreMemory:reviewCandidate",
+  CORE_MEMORY_LIST_DISTILL_RUNS: "coreMemory:listDistillRuns",
+  CORE_MEMORY_RUN_DISTILL_NOW: "coreMemory:runDistillNow",
   // Mission Control - Task Subscriptions
   SUBSCRIPTION_LIST: "subscription:list",
   SUBSCRIPTION_ADD: "subscription:add",
@@ -1152,6 +1188,7 @@ const IPC_CHANNELS = {
   QA_STOP_RUN: "qa:stopRun",
   QA_EVENT: "qa:event",
 } as const;
+void LEGACY_IPC_CHANNELS_MIRROR;
 
 // Mobile Companion Node types (inlined for sandboxed preload)
 type NodePlatform = "ios" | "android" | "macos";
@@ -2247,15 +2284,6 @@ interface CreateAgentRoleRequest {
   // Automation fields
   autonomyLevel?: AgentAutonomyLevel;
   soul?: string;
-  heartbeatPolicy?: import("../shared/types").HeartbeatPolicyInput;
-  heartbeatEnabled?: boolean;
-  heartbeatIntervalMinutes?: number;
-  heartbeatStaggerOffset?: number;
-  pulseEveryMinutes?: number;
-  dispatchCooldownMinutes?: number;
-  maxDispatchesPerDay?: number;
-  heartbeatProfile?: import("../shared/types").HeartbeatProfile;
-  activeHours?: import("../shared/types").HeartbeatActiveHours;
   operatorMandate?: string;
   allowedLoopTypes?: import("../shared/types").CompanyLoopType[];
   outputTypes?: import("../shared/types").CompanyOutputType[];
@@ -2286,15 +2314,6 @@ interface UpdateAgentRoleRequest {
   // Automation fields
   autonomyLevel?: AgentAutonomyLevel;
   soul?: string;
-  heartbeatPolicy?: import("../shared/types").HeartbeatPolicyInput;
-  heartbeatEnabled?: boolean;
-  heartbeatIntervalMinutes?: number;
-  heartbeatStaggerOffset?: number;
-  pulseEveryMinutes?: number;
-  dispatchCooldownMinutes?: number;
-  maxDispatchesPerDay?: number;
-  heartbeatProfile?: import("../shared/types").HeartbeatProfile;
-  activeHours?: import("../shared/types").HeartbeatActiveHours | null;
   operatorMandate?: string;
   allowedLoopTypes?: import("../shared/types").CompanyLoopType[];
   outputTypes?: import("../shared/types").CompanyOutputType[];
@@ -2302,6 +2321,26 @@ interface UpdateAgentRoleRequest {
   maxAutonomousOutputsPerCycle?: number;
   lastUsefulOutputAt?: number | null;
   operatorHealthScore?: number | null;
+}
+
+interface AutomationProfileData {
+  id: string;
+  agentRoleId: string;
+  enabled: boolean;
+  cadenceMinutes: number;
+  staggerOffsetMinutes: number;
+  dispatchCooldownMinutes: number;
+  maxDispatchesPerDay: number;
+  profile: import("../shared/types").HeartbeatProfile;
+  activeHours?: import("../shared/types").HeartbeatActiveHours | null;
+  heartbeatStatus: HeartbeatStatus;
+  lastHeartbeatAt?: number;
+  lastPulseAt?: number;
+  lastDispatchAt?: number;
+  lastPulseResult?: import("../shared/types").HeartbeatPulseResultKind;
+  lastDispatchKind?: import("../shared/types").HeartbeatDispatchKind;
+  createdAt: number;
+  updatedAt: number;
 }
 
 // Activity Feed types (inlined for sandboxed preload)
@@ -3909,8 +3948,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
       color?: string;
       modelKey?: string;
       providerType?: string;
-      heartbeatIntervalMinutes?: number;
-      enabledProactiveTasks?: string[];
     };
   }) => ipcRenderer.invoke(IPC_CHANNELS.PERSONA_TEMPLATE_ACTIVATE, request),
   previewPersonaTemplate: (templateId: string) =>
@@ -4160,6 +4197,78 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on(IPC_CHANNELS.HEARTBEAT_EVENT, subscription);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.HEARTBEAT_EVENT, subscription);
   },
+  listAutomationProfiles: () => ipcRenderer.invoke(IPC_CHANNELS.AUTOMATION_PROFILE_LIST),
+  getAutomationProfile: (id: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AUTOMATION_PROFILE_GET, id),
+  createAutomationProfile: (request: import("../shared/types").CreateAutomationProfileRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AUTOMATION_PROFILE_CREATE, request),
+  updateAutomationProfile: (request: import("../shared/types").UpdateAutomationProfileRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AUTOMATION_PROFILE_UPDATE, request),
+  deleteAutomationProfile: (id: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AUTOMATION_PROFILE_DELETE, id),
+  attachAutomationProfileToAgentRole: (
+    agentRoleId: string,
+    request?: Partial<import("../shared/types").CreateAutomationProfileRequest>,
+  ) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AUTOMATION_PROFILE_ATTACH, agentRoleId, request),
+  detachAutomationProfileFromAgentRole: (agentRoleId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AUTOMATION_PROFILE_DETACH, agentRoleId),
+  listHeartbeatRunsForAutomationProfile: (profileId: string, limit?: number) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AUTOMATION_PROFILE_LIST_HEARTBEAT_RUNS, { profileId, limit }),
+  listSubconsciousRunsForAutomationProfile: (profileId: string, limit?: number) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AUTOMATION_PROFILE_LIST_SUBCONSCIOUS_RUNS, { profileId, limit }),
+  listCoreTraces: (request?: import("../shared/types").ListCoreTracesRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CORE_TRACE_LIST, request) as Promise<CoreTrace[]>,
+  getCoreTrace: (id: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CORE_TRACE_GET, id) as Promise<GetCoreTraceResult | undefined>,
+  listCoreTracesForAutomationProfile: (profileId: string, limit?: number) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CORE_TRACE_LIST_BY_PROFILE, { profileId, limit }) as Promise<CoreTrace[]>,
+  listCoreFailureRecords: (request?: import("../shared/types").ListCoreFailureRecordsRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CORE_FAILURE_LIST, request) as Promise<CoreFailureRecord[]>,
+  listCoreFailureClusters: (request?: import("../shared/types").ListCoreFailureClustersRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CORE_FAILURE_CLUSTER_LIST, request) as Promise<CoreFailureCluster[]>,
+  reviewCoreFailureCluster: (
+    request: import("../shared/types").ReviewCoreFailureClusterRequest,
+  ) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CORE_FAILURE_CLUSTER_REVIEW, request) as Promise<
+      CoreFailureCluster | undefined
+    >,
+  listCoreEvalCases: (request?: import("../shared/types").ListCoreEvalCasesRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CORE_EVAL_CASE_LIST, request) as Promise<CoreEvalCase[]>,
+  reviewCoreEvalCase: (request: import("../shared/types").ReviewCoreEvalCaseRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CORE_EVAL_CASE_REVIEW, request) as Promise<
+      CoreEvalCase | undefined
+    >,
+  listCoreExperiments: (request?: import("../shared/types").ListCoreExperimentsRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CORE_EXPERIMENT_LIST, request) as Promise<
+      CoreHarnessExperiment[]
+    >,
+  runCoreExperiment: (request: import("../shared/types").RunCoreExperimentRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CORE_EXPERIMENT_RUN, request) as Promise<{
+      experiment: CoreHarnessExperiment;
+      run: import("../shared/types").CoreHarnessExperimentRun;
+      gate: import("../shared/types").CoreRegressionGateResult;
+    }>,
+  reviewCoreExperiment: (request: import("../shared/types").ReviewCoreExperimentRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CORE_EXPERIMENT_REVIEW, request) as Promise<
+      CoreHarnessExperiment | undefined
+    >,
+  listCoreLearnings: (request?: import("../shared/types").ListCoreLearningsRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CORE_LEARNINGS_LIST, request) as Promise<CoreLearningsEntry[]>,
+  listCoreMemoryCandidates: (request?: import("../shared/types").ListCoreMemoryCandidatesRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CORE_MEMORY_LIST_CANDIDATES, request) as Promise<CoreMemoryCandidate[]>,
+  reviewCoreMemoryCandidate: (request: import("../shared/types").ReviewCoreMemoryCandidateRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CORE_MEMORY_REVIEW_CANDIDATE, request) as Promise<
+      CoreMemoryCandidate | undefined
+    >,
+  listCoreMemoryDistillRuns: (profileId: string, workspaceId?: string, limit?: number) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CORE_MEMORY_LIST_DISTILL_RUNS, {
+      profileId,
+      workspaceId,
+      limit,
+    }) as Promise<CoreMemoryDistillRun[]>,
+  runCoreMemoryDistillNow: (request: import("../shared/types").RunCoreMemoryDistillNowRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CORE_MEMORY_RUN_DISTILL_NOW, request) as Promise<CoreMemoryDistillRun>,
 
   // Task Subscriptions
   listSubscriptions: (taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.SUBSCRIPTION_LIST, taskId),
@@ -6077,8 +6186,6 @@ export interface ElectronAPI {
       color?: string;
       modelKey?: string;
       providerType?: string;
-      heartbeatIntervalMinutes?: number;
-      enabledProactiveTasks?: string[];
     };
   }) => Promise<{
     agentRole: AgentRoleData;
@@ -6462,6 +6569,72 @@ export interface ElectronAPI {
       activeHours?: import("../shared/types").HeartbeatActiveHours | null;
     },
   ) => Promise<Any>;
+  listAutomationProfiles: () => Promise<AutomationProfileData[]>;
+  getAutomationProfile: (id: string) => Promise<AutomationProfileData | undefined>;
+  createAutomationProfile: (
+    request: import("../shared/types").CreateAutomationProfileRequest,
+  ) => Promise<AutomationProfileData>;
+  updateAutomationProfile: (
+    request: import("../shared/types").UpdateAutomationProfileRequest,
+  ) => Promise<AutomationProfileData | undefined>;
+  deleteAutomationProfile: (id: string) => Promise<void>;
+  attachAutomationProfileToAgentRole: (
+    agentRoleId: string,
+    request?: Partial<import("../shared/types").CreateAutomationProfileRequest>,
+  ) => Promise<AutomationProfileData>;
+  detachAutomationProfileFromAgentRole: (agentRoleId: string) => Promise<void>;
+  listHeartbeatRunsForAutomationProfile: (profileId: string, limit?: number) => Promise<Any[]>;
+  listSubconsciousRunsForAutomationProfile: (profileId: string, limit?: number) => Promise<Any[]>;
+  listCoreTraces: (
+    request?: import("../shared/types").ListCoreTracesRequest,
+  ) => Promise<CoreTrace[]>;
+  getCoreTrace: (id: string) => Promise<GetCoreTraceResult | undefined>;
+  listCoreTracesForAutomationProfile: (profileId: string, limit?: number) => Promise<CoreTrace[]>;
+  listCoreFailureRecords: (
+    request?: import("../shared/types").ListCoreFailureRecordsRequest,
+  ) => Promise<CoreFailureRecord[]>;
+  listCoreFailureClusters: (
+    request?: import("../shared/types").ListCoreFailureClustersRequest,
+  ) => Promise<CoreFailureCluster[]>;
+  reviewCoreFailureCluster: (
+    request: import("../shared/types").ReviewCoreFailureClusterRequest,
+  ) => Promise<CoreFailureCluster | undefined>;
+  listCoreEvalCases: (
+    request?: import("../shared/types").ListCoreEvalCasesRequest,
+  ) => Promise<CoreEvalCase[]>;
+  reviewCoreEvalCase: (
+    request: import("../shared/types").ReviewCoreEvalCaseRequest,
+  ) => Promise<CoreEvalCase | undefined>;
+  listCoreExperiments: (
+    request?: import("../shared/types").ListCoreExperimentsRequest,
+  ) => Promise<CoreHarnessExperiment[]>;
+  runCoreExperiment: (
+    request: import("../shared/types").RunCoreExperimentRequest,
+  ) => Promise<{
+    experiment: CoreHarnessExperiment;
+    run: import("../shared/types").CoreHarnessExperimentRun;
+    gate: import("../shared/types").CoreRegressionGateResult;
+  }>;
+  reviewCoreExperiment: (
+    request: import("../shared/types").ReviewCoreExperimentRequest,
+  ) => Promise<CoreHarnessExperiment | undefined>;
+  listCoreLearnings: (
+    request?: import("../shared/types").ListCoreLearningsRequest,
+  ) => Promise<CoreLearningsEntry[]>;
+  listCoreMemoryCandidates: (
+    request?: import("../shared/types").ListCoreMemoryCandidatesRequest,
+  ) => Promise<CoreMemoryCandidate[]>;
+  reviewCoreMemoryCandidate: (
+    request: import("../shared/types").ReviewCoreMemoryCandidateRequest,
+  ) => Promise<CoreMemoryCandidate | undefined>;
+  listCoreMemoryDistillRuns: (
+    profileId: string,
+    workspaceId?: string,
+    limit?: number,
+  ) => Promise<CoreMemoryDistillRun[]>;
+  runCoreMemoryDistillNow: (
+    request: import("../shared/types").RunCoreMemoryDistillNowRequest,
+  ) => Promise<CoreMemoryDistillRun>;
   triggerHeartbeat: (agentRoleId: string) => Promise<HeartbeatResult>;
   getHeartbeatStatus: (agentRoleId: string) => Promise<
     | {
