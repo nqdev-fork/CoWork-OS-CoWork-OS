@@ -1,5 +1,8 @@
 import { useState, useEffect } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Download, CheckCircle, XCircle } from "lucide-react";
+import { transformReleaseNotesUrl } from "../utils/release-notes-markdown";
 
 interface VersionInfo {
   version: string;
@@ -24,6 +27,22 @@ interface UpdateProgress {
   phase: "checking" | "downloading" | "extracting" | "installing" | "complete" | "error";
   percent?: number;
   message: string;
+}
+
+function ReleaseNotesLink({
+  href,
+  children,
+  ...props
+}: React.ComponentPropsWithoutRef<"a">) {
+  if (!href) {
+    return <>{children}</>;
+  }
+
+  return (
+    <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
+      {children}
+    </a>
+  );
 }
 
 export function UpdateSettings() {
@@ -176,9 +195,16 @@ export function UpdateSettings() {
                 {updateInfo.releaseNotes && (
                   <div className="release-notes">
                     <h4>Release Notes</h4>
-                    <div className="release-notes-content">
-                      {updateInfo.releaseNotes.split("\n").slice(0, 10).join("\n")}
-                      {updateInfo.releaseNotes.split("\n").length > 10 && "..."}
+                    <div className="release-notes-content markdown-content">
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        urlTransform={(url) =>
+                          transformReleaseNotesUrl(url, updateInfo.releaseUrl)
+                        }
+                        components={{ a: ReleaseNotesLink }}
+                      >
+                        {updateInfo.releaseNotes}
+                      </ReactMarkdown>
                     </div>
                   </div>
                 )}
