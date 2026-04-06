@@ -11,6 +11,11 @@ import type {
 import type {
   Company,
   CompanyCommandCenterSummary,
+  CoreEvalCase,
+  CoreFailureCluster,
+  CoreFailureRecord,
+  CoreHarnessExperiment,
+  CoreLearningsEntry,
   Goal,
   HeartbeatEvent,
   HeartbeatDispatchKind,
@@ -30,9 +35,11 @@ import { isTempWorkspaceId } from "../../../shared/types";
 import { TASK_EVENT_STATUS_MAP } from "../../../shared/task-event-status-map";
 import { useAgentContext } from "../../hooks/useAgentContext";
 import { getEffectiveTaskEventType } from "../../utils/task-event-compat";
+import { createRendererLogger } from "../../utils/logger";
 
 type AgentRole = AgentRoleData;
 type Any = any; // oxlint-disable-line typescript-eslint(no-explicit-any)
+const logger = createRendererLogger("MissionControlData");
 
 export const ALL_WORKSPACES_ID = "__all__";
 
@@ -119,7 +126,7 @@ export type FeedItem = {
 };
 
 export type MCTab = "overview" | "agents" | "board" | "feed" | "ops";
-export type OpsSubTab = "overview" | "operators" | "outputs" | "execution" | "planner";
+export type OpsSubTab = "overview" | "operators" | "outputs" | "execution" | "planner" | "harness";
 export type DetailPanelView =
   | { kind: "task"; taskId: string }
   | { kind: "agent"; agentId: string }
@@ -303,6 +310,11 @@ export function useMissionControlData(
   const [plannerRuns, setPlannerRuns] = useState<StrategicPlannerRun[]>([]);
   const [selectedPlannerRunId, setSelectedPlannerRunId] = useState<string | null>(null);
   const [commandCenterSummary, setCommandCenterSummary] = useState<CompanyCommandCenterSummary | null>(null);
+  const [coreFailureRecords, setCoreFailureRecords] = useState<CoreFailureRecord[]>([]);
+  const [coreFailureClusters, setCoreFailureClusters] = useState<CoreFailureCluster[]>([]);
+  const [coreEvalCases, setCoreEvalCases] = useState<CoreEvalCase[]>([]);
+  const [coreExperiments, setCoreExperiments] = useState<CoreHarnessExperiment[]>([]);
+  const [coreLearnings, setCoreLearnings] = useState<CoreLearningsEntry[]>([]);
   const [plannerLoading, setPlannerLoading] = useState(false);
   const [plannerSaving, setPlannerSaving] = useState(false);
   const [plannerRunning, setPlannerRunning] = useState(false);
@@ -382,7 +394,7 @@ export function useMissionControlData(
         if (prev && combined.some((workspace) => workspace.id === prev)) return prev;
         return combined[0]?.id || null;
       });
-    } catch (err) { console.error("Failed to load workspaces:", err); }
+    } catch (err) { logger.error("Failed to load workspaces:", err); }
   }, [selectedWorkspaceId]);
 
   const loadCompanies = useCallback(async () => {
@@ -394,7 +406,7 @@ export function useMissionControlData(
         if (initialCompanyId && loaded.some((c) => c.id === initialCompanyId)) return initialCompanyId;
         return loaded[0]?.id || null;
       });
-    } catch (err) { console.error("Failed to load companies:", err); }
+    } catch (err) { logger.error("Failed to load companies:", err); }
   }, [initialCompanyId]);
 
   const loadPlannerData = useCallback(async (companyId: string) => {
@@ -410,7 +422,7 @@ export function useMissionControlData(
         prev && runs.some((r) => r.id === prev) ? prev : runs[0]?.id || null,
       );
     } catch (err) {
-      console.error("Failed to load planner data:", err);
+      logger.error("Failed to load planner data:", err);
       setPlannerConfig(null); setPlannerRuns([]); setSelectedPlannerRunId(null);
     } finally { setPlannerLoading(false); }
   }, []);
@@ -425,7 +437,7 @@ export function useMissionControlData(
       setGoals(g); setProjects(p); setIssues(i);
       setSelectedIssueId((prev) => prev && i.some((x) => x.id === prev) ? prev : i[0]?.id || null);
     } catch (err) {
-      console.error("Failed to load company ops:", err);
+      logger.error("Failed to load company ops:", err);
       setGoals([]); setProjects([]); setIssues([]); setSelectedIssueId(null);
     }
   }, []);
@@ -435,8 +447,49 @@ export function useMissionControlData(
       const summary = await window.electronAPI.getCommandCenterSummary(companyId);
       setCommandCenterSummary(summary);
     } catch (err) {
-      console.error("Failed to load command center summary:", err);
+      logger.error("Failed to load command center summary:", err);
       setCommandCenterSummary(null);
+    }
+  }, []);
+
+  const loadCoreHarnessData = useCallback(async (workspaceId: string | null) => {
+    try {
+      const workspaceScope =
+        workspaceId && workspaceId !== ALL_WORKSPACES_ID ? { workspaceId } : undefined;
+      const [failures, clusters, evals, experiments, learnings] = await Promise.all([
+        window.electronAPI.listCoreFailureRecords({
+          ...(workspaceScope || {}),
+          limit: 20,
+        }),
+        window.electronAPI.listCoreFailureClusters({
+          ...(workspaceScope || {}),
+          limit: 20,
+        }),
+        window.electronAPI.listCoreEvalCases({
+          ...(workspaceScope || {}),
+          limit: 20,
+        }),
+        window.electronAPI.listCoreExperiments({
+          ...(workspaceScope || {}),
+          limit: 20,
+        }),
+        window.electronAPI.listCoreLearnings({
+          ...(workspaceScope || {}),
+          limit: 25,
+        }),
+      ]);
+      setCoreFailureRecords(failures);
+      setCoreFailureClusters(clusters);
+      setCoreEvalCases(evals);
+      setCoreExperiments(experiments);
+      setCoreLearnings(learnings);
+    } catch (err) {
+      logger.error("Failed to load core harness data:", err);
+      setCoreFailureRecords([]);
+      setCoreFailureClusters([]);
+      setCoreEvalCases([]);
+      setCoreExperiments([]);
+      setCoreLearnings([]);
     }
   }, []);
 
@@ -451,7 +504,7 @@ export function useMissionControlData(
         prev && runs.some((r) => r.id === prev) ? prev : runs[0]?.id || null,
       );
     } catch (err) {
-      console.error("Failed to load issue context:", err);
+      logger.error("Failed to load issue context:", err);
       setIssueComments([]); setIssueRuns([]); setSelectedIssueRunId(null); setRunEvents([]);
     }
   }, []);
@@ -512,23 +565,29 @@ export function useMissionControlData(
   const loadData = useCallback(async (workspaceId: string) => {
     try {
       setLoading(true);
-      const result = await loadWorkspaceScopedData(workspaceId, workspaces);
+      const [result] = await Promise.all([
+        loadWorkspaceScopedData(workspaceId, workspaces),
+        loadCoreHarnessData(workspaceId),
+      ]);
       setAgents(result.loadedAgents);
       setHeartbeatStatuses(result.statuses);
       setTasks(result.loadedTasks);
       setTaskLabels(result.loadedTaskLabels);
       setActivities(result.loadedActivities);
       setMentions(result.loadedMentions);
-    } catch (err) { console.error("Failed to load mission control data:", err); }
+    } catch (err) { logger.error("Failed to load mission control data:", err); }
     finally { setLoading(false); }
-  }, [loadWorkspaceScopedData, workspaces]);
+  }, [loadCoreHarnessData, loadWorkspaceScopedData, workspaces]);
 
   const handleManualRefresh = useCallback(async () => {
     if (!selectedWorkspaceId && !selectedCompanyId) return;
     try {
       setIsRefreshing(true);
       if (selectedWorkspaceId) {
-        const result = await loadWorkspaceScopedData(selectedWorkspaceId, workspaces);
+        const [result] = await Promise.all([
+          loadWorkspaceScopedData(selectedWorkspaceId, workspaces),
+          loadCoreHarnessData(selectedWorkspaceId),
+        ]);
         setHeartbeatStatuses(result.statuses);
         setTasks(result.loadedTasks);
         setTaskLabels(result.loadedTaskLabels);
@@ -540,9 +599,9 @@ export function useMissionControlData(
         await loadCompanyOps(selectedCompanyId);
         await loadCommandCenterSummary(selectedCompanyId);
       }
-    } catch (err) { console.error("Failed to refresh:", err); }
+    } catch (err) { logger.error("Failed to refresh:", err); }
     finally { setIsRefreshing(false); }
-  }, [loadCommandCenterSummary, loadCompanyOps, loadPlannerData, loadWorkspaceScopedData, selectedCompanyId, selectedWorkspaceId, workspaces]);
+  }, [loadCommandCenterSummary, loadCompanyOps, loadCoreHarnessData, loadPlannerData, loadWorkspaceScopedData, selectedCompanyId, selectedWorkspaceId, workspaces]);
 
   // ── Effects: Load on selection change ──
   useEffect(() => { loadWorkspaces(); }, [loadWorkspaces]);
@@ -722,8 +781,6 @@ export function useMissionControlData(
           modelKey: agent.modelKey, providerType: agent.providerType, systemPrompt: agent.systemPrompt,
           capabilities: agent.capabilities, toolRestrictions: agent.toolRestrictions,
           autonomyLevel: agent.autonomyLevel, soul: agent.soul,
-          heartbeatEnabled: agent.heartbeatEnabled, heartbeatIntervalMinutes: agent.heartbeatIntervalMinutes,
-          heartbeatStaggerOffset: agent.heartbeatStaggerOffset,
         });
         setAgents((prev) => [...prev, normalizeMissionControlAgent(created)]);
       } else {
@@ -734,8 +791,6 @@ export function useMissionControlData(
           capabilities: agent.capabilities, toolRestrictions: agent.toolRestrictions,
           isActive: agent.isActive, sortOrder: agent.sortOrder,
           autonomyLevel: agent.autonomyLevel, soul: agent.soul,
-          heartbeatEnabled: agent.heartbeatEnabled, heartbeatIntervalMinutes: agent.heartbeatIntervalMinutes,
-          heartbeatStaggerOffset: agent.heartbeatStaggerOffset,
         });
         if (updated) {
           const normalized = normalizeMissionControlAgent(updated);
@@ -763,14 +818,14 @@ export function useMissionControlData(
       const boardColumn = getBoardColumnForMission(missionColumnId);
       await window.electronAPI.moveTaskToColumn(taskId, boardColumn);
       setTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, boardColumn, updatedAt: Date.now() } : t));
-    } catch (err) { console.error("Failed to move task:", err); }
+    } catch (err) { logger.error("Failed to move task:", err); }
   }, [getBoardColumnForMission]);
 
   const handleAssignTask = useCallback(async (taskId: string, agentRoleId: string | null) => {
     try {
       await window.electronAPI.assignAgentRoleToTask(taskId, agentRoleId);
       setTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, assignedAgentRoleId: agentRoleId ?? undefined, updatedAt: Date.now() } : t));
-    } catch (err) { console.error("Failed to assign agent:", err); }
+    } catch (err) { logger.error("Failed to assign agent:", err); }
   }, []);
 
   const handleSetTaskPriority = useCallback(async (taskId: string, priority: number) => {
@@ -778,7 +833,7 @@ export function useMissionControlData(
       await window.electronAPI.setTaskPriority(taskId, priority);
       setTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, priority, updatedAt: Date.now() } : t)));
     } catch (err) {
-      console.error("Failed to set task priority:", err);
+      logger.error("Failed to set task priority:", err);
     }
   }, []);
 
@@ -789,7 +844,7 @@ export function useMissionControlData(
         prev.map((t) => (t.id === taskId ? { ...t, dueDate: dueDate ?? undefined, updatedAt: Date.now() } : t)),
       );
     } catch (err) {
-      console.error("Failed to set task due date:", err);
+      logger.error("Failed to set task due date:", err);
     }
   }, []);
 
@@ -802,7 +857,7 @@ export function useMissionControlData(
         ),
       );
     } catch (err) {
-      console.error("Failed to set task estimate:", err);
+      logger.error("Failed to set task estimate:", err);
     }
   }, []);
 
@@ -815,7 +870,7 @@ export function useMissionControlData(
         ),
       );
     } catch (err) {
-      console.error("Failed to add task label:", err);
+      logger.error("Failed to add task label:", err);
     }
   }, []);
 
@@ -830,7 +885,7 @@ export function useMissionControlData(
         ),
       );
     } catch (err) {
-      console.error("Failed to remove task label:", err);
+      logger.error("Failed to remove task label:", err);
     }
   }, []);
 
@@ -876,7 +931,7 @@ export function useMissionControlData(
 
   const handleTriggerHeartbeat = useCallback(async (agentRoleId: string) => {
     try { await window.electronAPI.triggerHeartbeat(agentRoleId); }
-    catch (err) { console.error("Failed to trigger background review:", err); }
+    catch (err) { logger.error("Failed to trigger background review:", err); }
   }, []);
 
   // ── Planner actions ──
@@ -893,7 +948,7 @@ export function useMissionControlData(
       setPlannerSaving(true);
       const next = await window.electronAPI.updatePlannerConfig({ companyId: selectedCompanyId, ...updates });
       setPlannerConfig(next);
-    } catch (err) { console.error("Failed to update planner config:", err); }
+    } catch (err) { logger.error("Failed to update planner config:", err); }
     finally { setPlannerSaving(false); }
   }, [selectedCompanyId]);
 
@@ -907,7 +962,7 @@ export function useMissionControlData(
       await loadPlannerData(selectedCompanyId);
       await loadCompanyOps(selectedCompanyId);
       if (selectedWorkspaceId) await handleManualRefresh();
-    } catch (err) { console.error("Failed to run planner:", err); }
+    } catch (err) { logger.error("Failed to run planner:", err); }
     finally { setPlannerRunning(false); }
   }, [handleManualRefresh, loadCompanyOps, loadPlannerData, selectedCompanyId, selectedWorkspaceId]);
 
@@ -925,7 +980,7 @@ export function useMissionControlData(
         actorType: "user", activityType: "comment", title: "Comment", description: text,
       });
       setCommentText("");
-    } catch (err) { console.error("Failed to post comment:", err); }
+    } catch (err) { logger.error("Failed to post comment:", err); }
     finally { setPostingComment(false); }
   }, [commentText, detailPanel, tasks]);
 
@@ -1206,6 +1261,7 @@ export function useMissionControlData(
     // Planner
     plannerConfig, plannerRuns, selectedPlannerRunId, setSelectedPlannerRunId,
     commandCenterSummary, plannerLoading, plannerSaving, plannerRunning,
+    coreFailureRecords, coreFailureClusters, coreEvalCases, coreExperiments, coreLearnings,
 
     // UI state
     loading, isRefreshing, activeTab, setActiveTab,
