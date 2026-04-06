@@ -371,4 +371,143 @@ describe("OpenRouterProvider attribution headers", () => {
         'minimax/minimax-m2.5-20260211:free requires moderation on OpenInference. Your input was flagged for "violence/graphic". No credits were charged.',
     });
   });
+
+  it("marks generic OpenRouter provider 400 errors as retryable route failures", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        statusText: "Bad Request",
+        json: vi.fn().mockResolvedValue({
+          error: {
+            message: "Provider returned error",
+          },
+        }),
+      } as unknown as Response),
+    );
+
+    const provider = new OpenRouterProvider({
+      type: "openrouter",
+      model: "minimax/minimax-m2.5:free",
+      openrouterApiKey: "test-key",
+    });
+
+    await expect(
+      provider.createMessage({
+        model: "minimax/minimax-m2.5:free",
+        maxTokens: 32,
+        system: "",
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      retryable: true,
+      providerMessage: "Provider returned error",
+    });
+  });
+
+  it("marks text-only OpenRouter models with image input as retryable route failures", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/models?output_modalities=all")) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            data: [
+              {
+                id: "minimax/minimax-m2.5:free",
+                architecture: { input_modalities: ["text"], output_modalities: ["text"] },
+              },
+            ],
+          }),
+        } as unknown as Response;
+      }
+      throw new Error(`Unexpected fetch call: ${url} ${String(init?.method || "GET")}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = new OpenRouterProvider({
+      type: "openrouter",
+      model: "minimax/minimax-m2.5:free",
+      openrouterApiKey: "test-key",
+    });
+
+    await expect(
+      provider.createMessage({
+        model: "minimax/minimax-m2.5:free",
+        maxTokens: 32,
+        system: "",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Review this screenshot." },
+              { type: "image", mimeType: "image/png", data: "AA==" },
+            ],
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({
+      status: 404,
+      retryable: true,
+      providerMessage: "No endpoints found that support image input for model minimax/minimax-m2.5:free",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks OpenRouter image-input 404s as retryable route failures", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/models?output_modalities=all")) {
+        return {
+          ok: false,
+          status: 500,
+          statusText: "Server Error",
+          json: vi.fn().mockResolvedValue({}),
+        } as unknown as Response;
+      }
+
+      const body = init?.body ? JSON.parse(String(init.body)) : null;
+      const userMessage = body.messages[0];
+      expect(Array.isArray(userMessage.content)).toBe(true);
+      return {
+        ok: false,
+        status: 404,
+        statusText: "Not Found",
+        json: vi.fn().mockResolvedValue({
+          error: { message: "No endpoints found that support image input" },
+        }),
+      } as unknown as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = new OpenRouterProvider({
+      type: "openrouter",
+      model: "openai/gpt-4o",
+      openrouterApiKey: "test-key",
+    });
+
+    await expect(
+      provider.createMessage({
+        model: "openai/gpt-4o",
+        maxTokens: 32,
+        system: "",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Describe the image." },
+              { type: "image", mimeType: "image/png", data: "AA==" },
+            ],
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({
+      status: 404,
+      retryable: true,
+      providerMessage: "No endpoints found that support image input",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });
