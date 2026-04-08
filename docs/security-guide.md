@@ -514,6 +514,9 @@ Tools are categorized by risk level for policy-based access control:
 | **Destructive** | `delete_file`, `run_command` | High risk, usually approval-gated unless an explicit allow rule or mode applies |
 | **System** | `read_clipboard`, `take_screenshot`, `open_application` | System-level access |
 | **Network** | `web_search`, `browser_*` | External network operations |
+| **Export / Egress** | mutating `http_request`, `analyze_image`, `read_pdf_visual` | Outbound transfer of local bytes or payloads; reviewed separately from ordinary network reads |
+
+High-autonomy modes and session "Approve all" do not silently bypass this export/egress lane.
 
 The `computer_*` family (screenshot, pointer, keyboard on macOS) is **not** low-risk read-only automation: it can drive arbitrary UI the operator can reach. Treat it as **high trust** and keep the `computer_use` built-in category disabled unless you need it. See [Computer use (macOS)](computer-use.md).
 
