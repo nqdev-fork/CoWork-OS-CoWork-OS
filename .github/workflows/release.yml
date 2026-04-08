@@ -140,57 +140,8 @@ jobs:
         continue-on-error: true
         run: npm test
 
-      - name: Validate npm tarball first-install flow (macOS)
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euo pipefail
-          repo_root="${GITHUB_WORKSPACE:-$(pwd)}"
-          tarball="$(npm pack --silent)"
-          install_source="${repo_root}/${tarball}"
-          tmp_dir="$(mktemp -d)"
-          test_dir="${tmp_dir}/smoke"
-
-          mkdir -p "$test_dir"
-          cd "$test_dir"
-          npm init -y >/dev/null 2>&1
-          npm install --ignore-scripts --omit=optional --no-audit --no-fund "$install_source"
-          npm run --prefix node_modules/cowork-os setup 2>&1 | tee setup.log
-
-          if grep -q "^\\[cowork\\] setup:bootstrap" setup.log; then
-            echo "Setup unexpectedly triggered dependency bootstrap fallback; electron should resolve from parent node_modules." >&2
-            exit 1
-          fi
-
-          node "${repo_root}/scripts/release-smoke-check.mjs"
-
-      - name: Validate npm tarball first-install flow (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $repoRoot = if ($env:GITHUB_WORKSPACE) { $env:GITHUB_WORKSPACE } else { (Get-Location).Path }
-          $tarball = (npm pack --silent | Select-Object -Last 1).Trim()
-          $installSource = Join-Path $repoRoot $tarball
-          $tmpDir = Join-Path $env:RUNNER_TEMP ("cowork-smoke-" + [guid]::NewGuid().ToString("N"))
-          $testDir = Join-Path $tmpDir "smoke"
-
-          New-Item -ItemType Directory -Force -Path $testDir | Out-Null
-          Set-Location $testDir
-          npm init -y | Out-Null
-          npm install --ignore-scripts --omit=optional --no-audit --no-fund $installSource
-
-          $setupLog = Join-Path $testDir "setup.log"
-          npm run --prefix node_modules/cowork-os setup *>&1 | Tee-Object -FilePath $setupLog
-          if ($LASTEXITCODE -ne 0) {
-            throw "Setup failed with exit code $LASTEXITCODE. See setup.log for details."
-          }
-
-          if (Select-String -Path $setupLog -Pattern '^\[cowork\] setup:bootstrap' -Quiet) {
-            throw "Setup unexpectedly triggered dependency bootstrap fallback; electron should resolve from parent node_modules."
-          }
-
-          node (Join-Path $repoRoot "scripts/release-smoke-check.mjs")
+      - name: Validate npm tarball first-install flow
+        run: node scripts/release-smoke-install.mjs
 
       - name: Build application
         run: npm run build
@@ -315,15 +266,6 @@ jobs:
             gh release upload "${release_tag}" "${artifact}" --repo "${GITHUB_REPOSITORY}" --clobber
           done
 
-      - name: Publish draft GitHub release
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          release_tag="${{ steps.release_metadata.outputs.release_tag }}"
-          gh release edit "${release_tag}" --draft=false --repo "${GITHUB_REPOSITORY}"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   publish-npm:
     name: Publish to npm
     runs-on: ubuntu-latest
@@ -395,3 +337,24 @@ jobs:
         run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-github-release:
+    name: Publish GitHub release
+    runs-on: ubuntu-latest
+    needs:
+      - release
+      - publish-npm
+      - publish-github-packages
+    timeout-minutes: 15
+    steps:
+      - name: Publish draft GitHub release
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_tag="${GITHUB_REF_NAME}"
+          if [[ "${release_tag}" != v* ]]; then
+            release_tag="v${release_tag}"
+          fi
+          gh release edit "${release_tag}" --draft=false --repo "${GITHUB_REPOSITORY}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
