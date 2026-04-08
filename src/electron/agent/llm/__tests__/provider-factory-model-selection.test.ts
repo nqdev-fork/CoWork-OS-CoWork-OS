@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { OPENROUTER_DEFAULT_MODEL } from "../openrouter-provider";
 import { LLMProviderFactory, type LLMSettings } from "../provider-factory";
 
 afterEach(() => {
@@ -68,9 +69,9 @@ describe("LLMProviderFactory model status", () => {
       settings: {
         providerType: "openrouter",
         modelKey: "sonnet-4-5",
-        openrouter: { model: "anthropic/claude-3.5-sonnet" },
+        openrouter: {},
       } as LLMSettings,
-      expectedCurrentModel: "anthropic/claude-3.5-sonnet",
+      expectedCurrentModel: OPENROUTER_DEFAULT_MODEL,
     },
     {
       name: "ollama",
@@ -352,5 +353,75 @@ describe("LLMProviderFactory provider failover chain", () => {
 
     expect(chain).toHaveLength(1);
     expect(chain[0]?.modelKey).toBe("gpt-4.1-mini");
+  });
+
+  it("filters known text-only OpenRouter fallbacks for image-bearing requests", () => {
+    const settings: LLMSettings = {
+      providerType: "openrouter",
+      modelKey: "sonnet-4-5",
+      openrouter: {
+        apiKey: "openrouter-key",
+        model: "openai/gpt-4o",
+      },
+      anthropic: {
+        apiKey: "anthropic-key",
+      },
+      fallbackProviders: [
+        { providerType: "openrouter", modelKey: "minimax/minimax-m2.5:free" },
+        { providerType: "anthropic", modelKey: "sonnet-4-5" },
+      ],
+    };
+    vi.spyOn(LLMProviderFactory, "loadSettings").mockReturnValue(settings);
+
+    const primary = LLMProviderFactory.resolveTaskModelSelection();
+    const chain = LLMProviderFactory.resolveProviderFailoverChain(primary, undefined, {
+      requiresImageInput: true,
+    });
+
+    expect(chain.map((entry) => entry.modelId)).toEqual(
+      expect.not.arrayContaining(["minimax/minimax-m2.5:free"]),
+    );
+    expect(chain).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ providerType: "openrouter", modelId: "openai/gpt-4o" }),
+        expect.objectContaining({
+          providerType: "anthropic",
+          modelId: "claude-sonnet-4-5",
+        }),
+      ]),
+    );
+  });
+
+  it("prefers image-capable failover selections when the primary route cannot accept image input", () => {
+    const settings: LLMSettings = {
+      providerType: "openrouter",
+      modelKey: "minimax/minimax-m2.5:free",
+      openrouter: {
+        apiKey: "openrouter-key",
+        model: "minimax/minimax-m2.5:free",
+      },
+      anthropic: {
+        apiKey: "anthropic-key",
+      },
+      fallbackProviders: [{ providerType: "anthropic", modelKey: "sonnet-4-5" }],
+    };
+    vi.spyOn(LLMProviderFactory, "loadSettings").mockReturnValue(settings);
+
+    const primary = LLMProviderFactory.resolveTaskModelSelection();
+    const chain = LLMProviderFactory.resolveProviderFailoverChain(primary, undefined, {
+      requiresImageInput: true,
+    });
+
+    expect(chain[0]).toEqual(
+      expect.objectContaining({
+        providerType: "anthropic",
+        modelId: "claude-sonnet-4-5",
+      }),
+    );
+    expect(chain).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ modelId: "minimax/minimax-m2.5:free" }),
+      ]),
+    );
   });
 });
