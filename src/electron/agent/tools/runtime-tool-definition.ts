@@ -38,6 +38,10 @@ const READ_PARALLEL_TOOLS = new Set([
   "task_history",
   "task_list_list",
   "search_memories",
+  "search_quotes",
+  "search_sessions",
+  "memory_topics_load",
+  "memory_curated_read",
   "scratchpad_read",
   "browser_get_content",
   "browser_get_text",
@@ -87,7 +91,12 @@ const ALWAYS_EXPOSE_TOOLS = new Set([
   "scratchpad_write",
   "scratchpad_read",
   "search_memories",
+  "search_quotes",
+  "search_sessions",
+  "memory_topics_load",
   "memory_save",
+  "memory_curate",
+  "memory_curated_read",
 ]);
 
 function inferCapabilityTags(toolName: string): RuntimeToolCapabilityTag[] {
@@ -127,6 +136,7 @@ function inferConcurrencyClass(toolName: string): RuntimeToolConcurrencyClass {
 
 function inferReadOnly(toolName: string, concurrencyClass: RuntimeToolConcurrencyClass): boolean {
   if (toolName === "run_command") return false;
+  if (toolName === "analyze_image" || toolName === "read_pdf_visual") return false;
   if (toolName.endsWith("_action")) return false;
   if (toolName.startsWith("browser_")) {
     return (
@@ -157,6 +167,7 @@ function inferApprovalKind(toolName: string, readOnly: boolean): RuntimeToolAppr
     return "none";
   }
   if (toolName === "run_command") return "shell_sensitive";
+  if (toolName === "analyze_image" || toolName === "read_pdf_visual") return "data_export";
   if (toolName === "delete_file" || toolName.endsWith("_action")) return "destructive";
   if (toolName.startsWith("mcp_")) return "external_service";
   return readOnly ? "none" : "workspace_policy";
@@ -164,6 +175,7 @@ function inferApprovalKind(toolName: string, readOnly: boolean): RuntimeToolAppr
 
 function inferSideEffectLevel(toolName: string, readOnly: boolean): RuntimeToolSideEffectLevel {
   if (readOnly) return "none";
+  if (toolName === "analyze_image" || toolName === "read_pdf_visual") return "high";
   if (toolName === "delete_file" || toolName.endsWith("_action")) return "high";
   if (toolName === "run_command" || toolName.startsWith("browser_") || toolName.startsWith("computer_")) {
     return "medium";
