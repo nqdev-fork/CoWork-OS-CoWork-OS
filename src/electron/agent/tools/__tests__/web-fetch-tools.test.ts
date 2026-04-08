@@ -18,6 +18,7 @@ global.fetch = mockFetch;
 // Import after mocking
 import { WebFetchTools } from "../web-fetch-tools";
 import { Workspace } from "../../../../shared/types";
+import { GuardrailManager } from "../../../guardrails/guardrail-manager";
 
 // Mock daemon
 const mockDaemon = {
@@ -44,6 +45,11 @@ describe("WebFetchTools", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.spyOn(GuardrailManager, "isDomainAllowed").mockReturnValue(true);
+    vi.spyOn(GuardrailManager, "loadSettings").mockReturnValue({
+      enforceAllowedDomains: true,
+      allowedDomains: ["example.com"],
+    } as Any);
     webFetchTools = new WebFetchTools(mockWorkspace, mockDaemon as Any, "test-task-id");
   });
 
@@ -134,6 +140,15 @@ describe("WebFetchTools", () => {
         const result = await webFetchTools.webFetch({ url: "https://example.com" });
 
         expect(result.success).toBe(true);
+      });
+
+      it("should block disallowed domains", async () => {
+        vi.spyOn(GuardrailManager, "isDomainAllowed").mockReturnValue(false);
+
+        const result = await webFetchTools.webFetch({ url: "https://blocked.example.com" });
+
+        expect(result.success).toBe(false);
+        expect(result.error).toContain("Domain not allowed");
       });
     });
 
@@ -572,6 +587,15 @@ describe("WebFetchTools", () => {
   });
 
   describe("httpRequest", () => {
+    it("should block disallowed domains for raw http requests", async () => {
+      vi.spyOn(GuardrailManager, "isDomainAllowed").mockReturnValue(false);
+
+      const result = await webFetchTools.httpRequest({ url: "https://blocked.example.com" });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Domain not allowed");
+    });
+
     describe("URL validation", () => {
       it("should reject non-HTTP URLs", async () => {
         const result = await webFetchTools.httpRequest({ url: "ftp://example.com" });
