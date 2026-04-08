@@ -23,6 +23,7 @@ export function SlackSettings({ onStatusChange }: SlackSettingsProps) {
   const [signingSecret, setSigningSecret] = useState("");
   const [channelName, setChannelName] = useState("Slack Workspace");
   const [securityMode, setSecurityMode] = useState<SecurityMode>("pairing");
+  const [progressRelayMode, setProgressRelayMode] = useState<"minimal" | "curated">("minimal");
   const [pairingCode, setPairingCode] = useState<string | null>(null);
 
   const selectedChannel = useMemo(
@@ -98,6 +99,7 @@ export function SlackSettings({ onStatusChange }: SlackSettingsProps) {
         botToken: botToken.trim(),
         appToken: appToken.trim(),
         signingSecret: signingSecret.trim() || undefined,
+        progressRelayMode,
         securityMode,
       });
 
@@ -105,6 +107,7 @@ export function SlackSettings({ onStatusChange }: SlackSettingsProps) {
       setAppToken("");
       setSigningSecret("");
       setChannelName("Slack Workspace");
+      setProgressRelayMode("minimal");
       await loadChannels(created.id);
     } catch (error: Any) {
       setTestResult({ success: false, error: error.message });
@@ -172,6 +175,34 @@ export function SlackSettings({ onStatusChange }: SlackSettingsProps) {
       );
     } catch (error) {
       console.error("Failed to update Slack security mode:", error);
+    }
+  };
+
+  const handleUpdateProgressRelayMode = async (mode: "minimal" | "curated") => {
+    if (!selectedChannel) return;
+    try {
+      await window.electronAPI.updateGatewayChannel({
+        id: selectedChannel.id,
+        config: {
+          ...(selectedChannel.config || {}),
+          progressRelayMode: mode,
+        },
+      });
+      setChannels((prev) =>
+        prev.map((entry) =>
+          entry.id === selectedChannel.id
+            ? {
+                ...entry,
+                config: {
+                  ...(entry.config || {}),
+                  progressRelayMode: mode,
+                },
+              }
+            : entry,
+        ),
+      );
+    } catch (error) {
+      console.error("Failed to update Slack progress relay mode:", error);
     }
   };
 
@@ -262,6 +293,18 @@ export function SlackSettings({ onStatusChange }: SlackSettingsProps) {
             <option value="pairing">Pairing Code (Recommended)</option>
             <option value="allowlist">Allowlist Only</option>
             <option value="open">Open</option>
+          </select>
+        </div>
+
+        <div className="settings-field">
+          <label>Progress Updates</label>
+          <select
+            className="settings-select"
+            value={progressRelayMode}
+            onChange={(e) => setProgressRelayMode(e.target.value as "minimal" | "curated")}
+          >
+            <option value="minimal">Minimal</option>
+            <option value="curated">Curated middle steps</option>
           </select>
         </div>
 
@@ -361,6 +404,23 @@ export function SlackSettings({ onStatusChange }: SlackSettingsProps) {
               <option value="allowlist">Allowlist Only</option>
               <option value="open">Open</option>
             </select>
+          </div>
+
+          <div className="settings-section">
+            <h4>Progress Updates</h4>
+            <select
+              className="settings-select"
+              value={(selectedChannel.config?.progressRelayMode as "minimal" | "curated") || "minimal"}
+              onChange={(e) =>
+                handleUpdateProgressRelayMode(e.target.value as "minimal" | "curated")
+              }
+            >
+              <option value="minimal">Minimal</option>
+              <option value="curated">Curated middle steps</option>
+            </select>
+            <p className="settings-description">
+              Curated mode relays short planning and step updates back into Slack while the task is running.
+            </p>
           </div>
 
           {selectedChannel.securityMode === "pairing" && (
