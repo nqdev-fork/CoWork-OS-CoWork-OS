@@ -1,6 +1,6 @@
 import type { TaskDomain } from "./types";
 
-const SUPPORTED_COMMANDS = new Set(["simplify", "batch"]);
+const SUPPORTED_COMMANDS = new Set(["simplify", "batch", "llm-wiki"]);
 const SUPPORTED_DOMAINS = new Set([
   "auto",
   "code",
@@ -11,10 +11,15 @@ const SUPPORTED_DOMAINS = new Set([
 ]);
 const SUPPORTED_SIMPLIFY_SCOPES = new Set(["current", "workspace", "path"]);
 const SUPPORTED_EXTERNAL_MODES = new Set(["confirm", "execute", "none"]);
+const SUPPORTED_LLM_WIKI_MODES = new Set(["auto", "init", "ingest", "query", "lint", "refresh"]);
+const SUPPORTED_LLM_WIKI_OBSIDIAN_MODES = new Set(["auto", "on", "off"]);
+const LLM_WIKI_OPTIONAL_OBJECTIVE_MODES = new Set(["init", "lint", "refresh"]);
 
-export type SkillSlashCommandName = "simplify" | "batch";
+export type SkillSlashCommandName = "simplify" | "batch" | "llm-wiki";
 export type SkillSlashExternalMode = "confirm" | "execute" | "none";
 export type SkillSlashScope = "current" | "workspace" | "path";
+export type SkillSlashLlmWikiMode = "auto" | "init" | "ingest" | "query" | "lint" | "refresh";
+export type SkillSlashLlmWikiObsidianMode = "auto" | "on" | "off";
 
 export interface ParsedSkillSlashCommand {
   command: SkillSlashCommandName;
@@ -24,6 +29,9 @@ export interface ParsedSkillSlashCommand {
     scope?: SkillSlashScope;
     parallel?: number;
     external?: SkillSlashExternalMode;
+    mode?: SkillSlashLlmWikiMode;
+    path?: string;
+    obsidian?: SkillSlashLlmWikiObsidianMode;
   };
   raw: string;
 }
@@ -43,17 +51,76 @@ function tokenizeArgs(input: string): string[] {
   if (!text) return [];
 
   const tokens: string[] = [];
-  const re = /"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'|`([^`\\]*(?:\\.[^`\\]*)*)`|(\S+)/g;
-  let match: RegExpExecArray | null = null;
-  while ((match = re.exec(text)) !== null) {
-    const quoted = match[1] ?? match[2] ?? match[3];
-    const bare = match[4];
-    const value = String(quoted ?? bare ?? "").replace(/\\(["'`\\])/g, "$1");
-    if (value.length > 0) {
-      tokens.push(value);
+  let current = "";
+  let quote: '"' | "'" | "`" | null = null;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+
+    if (char === "\\") {
+      const next = text[i + 1];
+      if (quote && next) {
+        current += next;
+        i += 1;
+        continue;
+      }
+      if (!quote && next && /[\s"'`\\]/.test(next)) {
+        current += next;
+        i += 1;
+        continue;
+      }
+      current += char;
+      continue;
     }
+
+    if (quote) {
+      if (char === quote) {
+        quote = null;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (char === '"' || char === "'" || char === "`") {
+      quote = char;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      if (current.length > 0) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+
+    current += char;
   }
+
+  if (current.length > 0) {
+    tokens.push(current);
+  }
+
   return tokens;
+}
+
+function splitLongFlagToken(token: string): { key: string; inlineValue: string | null } | null {
+  if (!token.startsWith("--")) {
+    return null;
+  }
+  const body = token.slice(2);
+  if (!body) {
+    return null;
+  }
+  const equalsIndex = body.indexOf("=");
+  if (equalsIndex === -1) {
+    return { key: body.toLowerCase(), inlineValue: null };
+  }
+  return {
+    key: body.slice(0, equalsIndex).toLowerCase(),
+    inlineValue: body.slice(equalsIndex + 1),
+  };
 }
 
 function parseCommandTail(commandName: string, tail: string, raw: string): SkillSlashParseResult {
@@ -74,10 +141,19 @@ function parseCommandTail(commandName: string, tail: string, raw: string): Skill
       continue;
     }
 
-    const key = token.slice(2).toLowerCase();
+    const parsedFlag = splitLongFlagToken(token);
+    if (!parsedFlag) {
+      objectiveTokens.push(token);
+      continue;
+    }
+
+    const { key, inlineValue } = parsedFlag;
     const nextValue = tokens[i + 1];
 
     const consumeFlagValue = (): string | null => {
+      if (inlineValue !== null) {
+        return inlineValue.length > 0 ? inlineValue : null;
+      }
       if (!nextValue || nextValue.startsWith("--")) {
         return null;
       }
@@ -152,6 +228,54 @@ function parseCommandTail(commandName: string, tail: string, raw: string): Skill
       continue;
     }
 
+    if (key === "mode") {
+      if (command !== "llm-wiki") {
+        return { matched: true, error: "--mode is only supported for /llm-wiki." };
+      }
+      const value = consumeFlagValue();
+      if (!value) {
+        return { matched: true, error: `Missing value for --${key}.` };
+      }
+      if (!SUPPORTED_LLM_WIKI_MODES.has(value)) {
+        return {
+          matched: true,
+          error: `Invalid mode "${value}". Use auto|init|ingest|query|lint|refresh.`,
+        };
+      }
+      flags.mode = value as SkillSlashLlmWikiMode;
+      continue;
+    }
+
+    if (key === "path") {
+      if (command !== "llm-wiki") {
+        return { matched: true, error: "--path is only supported for /llm-wiki." };
+      }
+      const value = consumeFlagValue();
+      if (!value) {
+        return { matched: true, error: `Missing value for --${key}.` };
+      }
+      flags.path = value;
+      continue;
+    }
+
+    if (key === "obsidian") {
+      if (command !== "llm-wiki") {
+        return { matched: true, error: "--obsidian is only supported for /llm-wiki." };
+      }
+      const value = consumeFlagValue();
+      if (!value) {
+        return { matched: true, error: `Missing value for --${key}.` };
+      }
+      if (!SUPPORTED_LLM_WIKI_OBSIDIAN_MODES.has(value)) {
+        return {
+          matched: true,
+          error: `Invalid --obsidian value "${value}". Use auto|on|off.`,
+        };
+      }
+      flags.obsidian = value as SkillSlashLlmWikiObsidianMode;
+      continue;
+    }
+
     // Keep freeform objectives truly freeform, even when they contain "--tokens".
     objectiveTokens.push(token);
   }
@@ -162,6 +286,24 @@ function parseCommandTail(commandName: string, tail: string, raw: string): Skill
       matched: true,
       error:
         "Missing objective for /batch. Usage: /batch <objective> [--parallel 1-8] [--domain auto|code|research|operations|writing|general] [--external confirm|execute|none].",
+    };
+  }
+  if (command === "llm-wiki" && !objective) {
+    if (flags.mode && LLM_WIKI_OPTIONAL_OBJECTIVE_MODES.has(flags.mode)) {
+      return {
+        matched: true,
+        parsed: {
+          command,
+          objective,
+          flags,
+          raw: raw.trim(),
+        },
+      };
+    }
+    return {
+      matched: true,
+      error:
+        "Missing objective for /llm-wiki. Usage: /llm-wiki <objective> [--mode auto|init|ingest|query|lint|refresh] [--path <workspace-relative-or-absolute-path>] [--obsidian auto|on|off].",
     };
   }
 
@@ -178,7 +320,7 @@ function parseCommandTail(commandName: string, tail: string, raw: string): Skill
 
 export function parseLeadingSkillSlashCommand(input: string): SkillSlashParseResult {
   const trimmed = String(input || "").trim();
-  const match = trimmed.match(/^\/(simplify|batch)(?=\s|$)([\s\S]*)$/i);
+  const match = trimmed.match(/^\/(simplify|batch|llm-wiki)(?=\s|$)([\s\S]*)$/i);
   if (!match) {
     return { matched: false };
   }
@@ -187,7 +329,7 @@ export function parseLeadingSkillSlashCommand(input: string): SkillSlashParseRes
 
 export function parseInlineSkillSlashChain(input: string): InlineSkillSlashParseResult {
   const text = String(input || "");
-  const re = /\bthen\s+run\s+\/(simplify|batch)(?=$|[\s.,!?;:)\]"'])/gi;
+  const re = /\bthen\s+run\s+\/(simplify|batch|llm-wiki)(?=$|[\s.,!?;:)\]"'])/gi;
   const matches = Array.from(text.matchAll(re)) as RegExpExecArray[];
   if (matches.length === 0) {
     return { matched: false };
@@ -212,7 +354,17 @@ export function parseInlineSkillSlashChain(input: string): InlineSkillSlashParse
     .replace(/^[\s.,!?;:)\]"']+/, "")
     .trim();
   const raw = `/${commandName}${tail ? ` ${tail}` : ""}`;
-  const parsed = parseCommandTail(commandName, tail, raw);
+  let parsed = parseCommandTail(commandName, tail, raw);
+  if (
+    commandName.toLowerCase() === "llm-wiki" &&
+    parsed.matched &&
+    parsed.error &&
+    parsed.error.startsWith("Missing objective for /llm-wiki") &&
+    baseText
+  ) {
+    const inferredTail = `${baseText}${tail ? ` ${tail}` : ""}`.trim();
+    parsed = parseCommandTail(commandName, inferredTail, `/${commandName} ${inferredTail}`.trim());
+  }
   return {
     ...parsed,
     baseText,
