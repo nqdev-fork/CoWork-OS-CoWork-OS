@@ -19,6 +19,9 @@ function spawnNpm(args, opts = {}) {
   if (NPM_EXEC_PATH) {
     return spawnSync(process.execPath, [NPM_EXEC_PATH, ...args], opts);
   }
+  if (process.platform === "win32") {
+    return spawnSync(NPM_CMD, args, { ...opts, shell: true });
+  }
   return spawnSync(NPM_CMD, args, opts);
 }
 
