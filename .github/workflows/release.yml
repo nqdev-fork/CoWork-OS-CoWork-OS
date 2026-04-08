@@ -162,7 +162,7 @@ jobs:
             exit 1
           fi
 
-          node -e "const { execFileSync } = require('node:child_process'); const { createRequire } = require('node:module'); const path = require('node:path'); const pkgDir = path.resolve('./node_modules/cowork-os'); const pkgRequire = createRequire(path.join(pkgDir, 'package.json')); const electron = pkgRequire('electron'); const out = execFileSync(electron, ['-e', \"const Database=require('better-sqlite3');const db=new Database(':memory:');db.close();console.log('ok')\"], { cwd: pkgDir, encoding: 'utf8', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } }); if ((out || '').trim() !== 'ok') { console.error('Installed package check failed; better-sqlite3 not loading in Electron.'); process.exit(1); }"
+          node scripts/release-smoke-check.mjs
 
       - name: Validate npm tarball first-install flow (Windows)
         if: runner.os == 'Windows'
@@ -187,7 +187,7 @@ jobs:
             throw "Setup unexpectedly triggered dependency bootstrap fallback; electron should resolve from parent node_modules."
           }
 
-          node -e "const { execFileSync } = require('node:child_process'); const { createRequire } = require('node:module'); const path = require('node:path'); const pkgDir = path.resolve('./node_modules/cowork-os'); const pkgRequire = createRequire(path.join(pkgDir, 'package.json')); const electron = pkgRequire('electron'); const out = execFileSync(electron, ['-e', \"const Database=require('better-sqlite3');const db=new Database(':memory:');db.close();console.log('ok')\"], { cwd: pkgDir, encoding: 'utf8', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } }); if ((out || '').trim() !== 'ok') { console.error('Installed package check failed; better-sqlite3 not loading in Electron.'); process.exit(1); }"
+          node scripts/release-smoke-check.mjs
 
       - name: Build application
         run: npm run build
