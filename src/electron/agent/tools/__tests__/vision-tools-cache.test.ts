@@ -131,4 +131,87 @@ describe("VisionTools cache and page range guards", () => {
       loadSettingsSpy.mockRestore();
     }
   });
+
+  it("uses Azure OpenAI for vision when Azure is the active provider", async () => {
+    const vision = createVisionTools();
+    const loadSettingsSpy = vi.spyOn(LLMProviderFactory, "loadSettings").mockReturnValue({
+      providerType: "azure",
+      azure: {
+        apiKey: "azure-key",
+        endpoint: "https://example.openai.azure.com/openai/v1/responses",
+        deployment: "gpt-4.1-mini",
+        apiVersion: "2024-12-01-preview",
+      },
+    } as Any);
+    const azureSpy = vi
+      .spyOn(vision, "analyzeWithAzureOpenAI")
+      .mockResolvedValue("Azure vision result");
+
+    try {
+      const result = await vision.analyzeBuffer({
+        base64: "AA==",
+        mimeType: "image/png",
+        prompt: "describe the page",
+        maxTokens: 64,
+        toolName: "read_pdf_visual",
+      });
+
+      expect(azureSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          endpoint: "https://example.openai.azure.com/openai/v1/responses",
+          deployment: "gpt-4.1-mini",
+          model: "gpt-4.1-mini",
+        }),
+      );
+      expect(result).toEqual({
+        success: true,
+        provider: "azure",
+        model: "gpt-4.1-mini",
+        text: "Azure vision result",
+      });
+    } finally {
+      azureSpy.mockRestore();
+      loadSettingsSpy.mockRestore();
+    }
+  });
+
+  it("aliases provider=openai to Azure when Azure is configured and no direct OpenAI key exists", async () => {
+    const vision = createVisionTools();
+    const loadSettingsSpy = vi.spyOn(LLMProviderFactory, "loadSettings").mockReturnValue({
+      providerType: "azure",
+      azure: {
+        apiKey: "azure-key",
+        endpoint: "https://example.openai.azure.com",
+        deployment: "gpt-4.1-mini",
+      },
+      openai: {
+        apiKey: "",
+      },
+    } as Any);
+    const azureSpy = vi
+      .spyOn(vision, "analyzeWithAzureOpenAI")
+      .mockResolvedValue("Azure alias result");
+
+    try {
+      const result = await vision.analyzeBuffer({
+        base64: "AA==",
+        mimeType: "image/png",
+        prompt: "describe the page",
+        maxTokens: 64,
+        providerOverride: "openai",
+        toolName: "read_pdf_visual",
+      });
+
+      expect(azureSpy).toHaveBeenCalledTimes(1);
+      expect(result).toEqual({
+        success: true,
+        provider: "azure",
+        model: "gpt-4.1-mini",
+        text: "Azure alias result",
+      });
+    } finally {
+      azureSpy.mockRestore();
+      loadSettingsSpy.mockRestore();
+    }
+  });
 });
