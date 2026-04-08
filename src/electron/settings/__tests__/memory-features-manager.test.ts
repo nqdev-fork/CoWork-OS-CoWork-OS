@@ -43,24 +43,42 @@ describe("MemoryFeaturesManager", () => {
 
     expect(settings.contextPackInjectionEnabled).toBe(true);
     expect(settings.heartbeatMaintenanceEnabled).toBe(true);
+    expect(settings.checkpointCaptureEnabled).toBe(true);
+    expect(settings.verbatimRecallEnabled).toBe(true);
+    expect(settings.wakeUpLayersEnabled).toBe(true);
+    expect(settings.temporalKnowledgeEnabled).toBe(true);
     expect(settings.promptStackV2Enabled).toBe(false);
     expect(settings.layeredMemoryEnabled).toBe(false);
     expect(settings.transcriptStoreEnabled).toBe(false);
     expect(settings.backgroundConsolidationEnabled).toBe(false);
     expect(settings.queryOrchestratorEnabled).toBe(false);
     expect(settings.sessionLineageEnabled).toBe(false);
+    expect(settings.curatedMemoryEnabled).toBe(true);
+    expect(settings.sessionRecallEnabled).toBe(true);
+    expect(settings.topicMemoryEnabled).toBe(true);
+    expect(settings.defaultArchiveInjectionEnabled).toBe(false);
+    expect(settings.autoPromoteToCuratedMemoryEnabled).toBe(false);
   });
 
   it("preserves explicit experimental settings when loaded", () => {
     mocks.storedSettings = {
       contextPackInjectionEnabled: false,
       heartbeatMaintenanceEnabled: true,
+      checkpointCaptureEnabled: false,
+      verbatimRecallEnabled: false,
+      wakeUpLayersEnabled: false,
+      temporalKnowledgeEnabled: false,
       promptStackV2Enabled: true,
       layeredMemoryEnabled: true,
       transcriptStoreEnabled: true,
       backgroundConsolidationEnabled: true,
       queryOrchestratorEnabled: true,
       sessionLineageEnabled: true,
+      curatedMemoryEnabled: false,
+      sessionRecallEnabled: false,
+      topicMemoryEnabled: false,
+      defaultArchiveInjectionEnabled: true,
+      autoPromoteToCuratedMemoryEnabled: true,
     };
 
     MemoryFeaturesManager.clearCache();
@@ -68,12 +86,21 @@ describe("MemoryFeaturesManager", () => {
 
     expect(settings.contextPackInjectionEnabled).toBe(false);
     expect(settings.heartbeatMaintenanceEnabled).toBe(true);
+    expect(settings.checkpointCaptureEnabled).toBe(false);
+    expect(settings.verbatimRecallEnabled).toBe(false);
+    expect(settings.wakeUpLayersEnabled).toBe(false);
+    expect(settings.temporalKnowledgeEnabled).toBe(false);
     expect(settings.promptStackV2Enabled).toBe(true);
     expect(settings.layeredMemoryEnabled).toBe(true);
     expect(settings.transcriptStoreEnabled).toBe(true);
     expect(settings.backgroundConsolidationEnabled).toBe(true);
     expect(settings.queryOrchestratorEnabled).toBe(true);
     expect(settings.sessionLineageEnabled).toBe(true);
+    expect(settings.curatedMemoryEnabled).toBe(false);
+    expect(settings.sessionRecallEnabled).toBe(false);
+    expect(settings.topicMemoryEnabled).toBe(false);
+    expect(settings.defaultArchiveInjectionEnabled).toBe(true);
+    expect(settings.autoPromoteToCuratedMemoryEnabled).toBe(true);
   });
 
   it("saves partial settings with experimental features disabled by default", () => {
@@ -87,12 +114,21 @@ describe("MemoryFeaturesManager", () => {
     expect(mocks.storedSettings).toEqual({
       contextPackInjectionEnabled: true,
       heartbeatMaintenanceEnabled: true,
+      checkpointCaptureEnabled: true,
+      verbatimRecallEnabled: true,
+      wakeUpLayersEnabled: true,
+      temporalKnowledgeEnabled: true,
       promptStackV2Enabled: false,
       layeredMemoryEnabled: false,
       transcriptStoreEnabled: false,
       backgroundConsolidationEnabled: false,
       queryOrchestratorEnabled: false,
       sessionLineageEnabled: false,
+      curatedMemoryEnabled: true,
+      sessionRecallEnabled: true,
+      topicMemoryEnabled: true,
+      defaultArchiveInjectionEnabled: false,
+      autoPromoteToCuratedMemoryEnabled: false,
     });
   });
 });
