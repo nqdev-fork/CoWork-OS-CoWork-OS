@@ -122,6 +122,20 @@ Context compaction is separate from task-session persistence. Task execution wri
 - `conversation_snapshot` remains the persisted event name for compatibility
 - the payload schema is `session_runtime_v2`
 - the payload includes transcript, tooling, files, loop, recovery, queues, worker, verification, and usage state
+- the paired checkpoint payload can also carry a structured summary plus a verbatim evidence packet for post-compaction recall
+
+### Checkpoint capture
+
+The runtime now writes memory checkpoints natively instead of relying on external hooks:
+
+- **pre-compaction**: always, before messages are removed
+- **periodic long-run capture**: every 12 meaningful user/assistant exchanges, deduped by span hash
+- **task completion**: when a task produced a non-trivial output or decision
+
+Each checkpoint stores both:
+
+- a compact structured summary for synthesis/restart paths
+- a verbatim evidence packet made of exact transcript/message spans with provenance
 
 ### Restore precedence
 
@@ -175,11 +189,12 @@ Compaction behavior is controlled by constants in `src/electron/agent/executor-h
 
 ### Event Flow
 
-1. **Pre-compaction flush** — If context slack < 1,200 tokens, a durable summary is flushed to memory *before* any messages are removed
-2. **Proactive compaction** — At 90% utilization, `proactiveCompactWithMeta()` compacts to 50%
-3. **Summary generation** — `buildCompactionSummaryBlock()` calls the LLM with the structured prompt
-4. **Overflow guard** — Ensures summary + remaining messages stay below 95%
-5. **Pinned insertion** — Summary upserted as a pinned `<cowork_compaction_summary>` user message
-6. **Memory flush** — Summary stored in MemoryService for cross-session recall
-7. **UI event** — `context_summarized` event emitted for timeline rendering
-8. **Reactive fallback** — Standard `compactMessagesWithMeta()` runs if proactive didn't trigger
+1. **Pre-compaction checkpoint** — Before any message removal, the runtime writes a durable checkpoint with structured summary + verbatim evidence packet
+2. **Pre-compaction flush** — If context slack < 1,200 tokens, a durable summary is flushed to memory *before* any messages are removed
+3. **Proactive compaction** — At 90% utilization, `proactiveCompactWithMeta()` compacts to 50%
+4. **Summary generation** — `buildCompactionSummaryBlock()` calls the LLM with the structured prompt
+5. **Overflow guard** — Ensures summary + remaining messages stay below 95%
+6. **Pinned insertion** — Summary upserted as a pinned `<cowork_compaction_summary>` user message
+7. **Memory flush** — Summary stored in MemoryService for cross-session recall
+8. **UI event** — `context_summarized` event emitted for timeline rendering
+9. **Reactive fallback** — Standard `compactMessagesWithMeta()` runs if proactive didn't trigger
