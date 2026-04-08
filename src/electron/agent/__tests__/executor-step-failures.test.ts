@@ -182,6 +182,8 @@ function createExecutorWithStubs(responses: LLMResponse[], toolResults: Record<s
     { name: "run_command", description: "", input_schema: { type: "object", properties: {} } },
     { name: "glob", description: "", input_schema: { type: "object", properties: {} } },
     { name: "read_file", description: "", input_schema: { type: "object", properties: {} } },
+    { name: "parse_document", description: "", input_schema: { type: "object", properties: {} } },
+    { name: "read_pdf_visual", description: "", input_schema: { type: "object", properties: {} } },
     { name: "list_directory", description: "", input_schema: { type: "object", properties: {} } },
     { name: "get_file_info", description: "", input_schema: { type: "object", properties: {} } },
     { name: "system_info", description: "", input_schema: { type: "object", properties: {} } },
@@ -1495,6 +1497,135 @@ relationship_memory:
     }
   });
 
+  it("treats verified run_command workspace writes as satisfying write_file contract", async () => {
+    executor = createExecutorWithStubs(
+      [
+        toolUseResponse("run_command", {
+          command: "mkdir -p research/wiki && printf '# Research Wiki\\n' > research/wiki/index.md",
+        }),
+        textResponse("Saved research/wiki/index.md"),
+      ],
+      {},
+    );
+    const tempDir = fs.mkdtempSync("/tmp/cowork-run-command-write-");
+    (executor as Any).workspace.path = tempDir;
+    (executor as Any).toolRegistry.executeTool = vi.fn(async (name: string) => {
+      if (name === "run_command") {
+        const targetPath = path.join(tempDir, "research/wiki/index.md");
+        fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+        fs.writeFileSync(targetPath, "# Research Wiki\n");
+        return { success: true, stdout: "", stderr: "", exitCode: 0 };
+      }
+      return { success: true };
+    });
+
+    const step: Any = {
+      id: "artifact-run-command-write",
+      description: "Write the research vault home note to `research/wiki/index.md`.",
+      status: "pending",
+    };
+
+    try {
+      await (executor as Any).executeStep(step);
+      expect(step.status).toBe("completed");
+      expect(String(step.error || "")).toBe("");
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("treats run_command task file events as satisfying write_file contract when the command mutates a workspace file", async () => {
+    executor = createExecutorWithStubs(
+      [
+        toolUseResponse("run_command", { command: "node scripts/build-wiki.js" }),
+        textResponse("Saved the research wiki home note."),
+      ],
+      {},
+    );
+    const tempDir = fs.mkdtempSync("/tmp/cowork-run-command-event-write-");
+    const mutationEvents: Any[] = [];
+    (executor as Any).workspace.path = tempDir;
+    (executor as Any).daemon.getTaskEvents = vi.fn((_taskId: string, opts?: Any) => {
+      const requestedTypes = Array.isArray(opts?.types) ? new Set(opts.types) : null;
+      return mutationEvents.filter((event) => !requestedTypes || requestedTypes.has(event.type));
+    });
+    (executor as Any).toolRegistry.executeTool = vi.fn(async (name: string) => {
+      if (name === "run_command") {
+        const relativePath = "research/wiki/home.md";
+        const targetPath = path.join(tempDir, relativePath);
+        fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+        fs.writeFileSync(targetPath, "# Home\n");
+        mutationEvents.push({
+          id: "evt-1",
+          taskId: "task-1",
+          type: "file_created",
+          timestamp: Date.now(),
+          payload: { path: relativePath },
+        });
+        return { success: true, stdout: "", stderr: "", exitCode: 0 };
+      }
+      return { success: true };
+    });
+
+    const step: Any = {
+      id: "artifact-run-command-event-write",
+      description: "Write the research wiki home note.",
+      status: "pending",
+    };
+
+    try {
+      await (executor as Any).executeStep(step);
+      expect(step.status).toBe("completed");
+      expect(String(step.error || "")).toBe("");
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not treat run_command path mentions without a real file write as mutation evidence", () => {
+    executor = createExecutorWithStubs([textResponse("done")], {});
+    const tempDir = fs.mkdtempSync("/tmp/cowork-run-command-path-only-");
+    (executor as Any).workspace.path = tempDir;
+
+    try {
+      const evidence = (executor as Any).collectMutationEvidence({
+        toolName: "run_command",
+        input: {
+          command: "printf 'planned output: research/wiki/index.md\\n'",
+        },
+        result: {
+          success: true,
+          stdout: "planned output: research/wiki/index.md\n",
+          stderr: "",
+          exitCode: 0,
+        },
+        stepStartedAt: Date.now(),
+      });
+      expect(evidence).toBeNull();
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not treat directory-only run_command mutations as satisfying write contract", () => {
+    executor = createExecutorWithStubs([textResponse("done")], {});
+    const tempDir = fs.mkdtempSync("/tmp/cowork-run-command-dir-only-");
+    (executor as Any).workspace.path = tempDir;
+
+    try {
+      fs.mkdirSync(path.join(tempDir, "research/wiki"), { recursive: true });
+      const evidence = (executor as Any).collectMutationEvidence({
+        toolName: "run_command",
+        input: { command: "mkdir -p research/wiki" },
+        result: { success: true, stdout: "", stderr: "", exitCode: 0 },
+        stepStartedAt: Date.now(),
+      });
+      expect(evidence).toBeNull();
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("fails fast with write checkpoint when required write_file is never attempted", async () => {
     const responses: LLMResponse[] = Array.from({ length: 16 }, (_, i) =>
       toolUseResponse("create_directory", { path: `backend/src/services/ais/p${i}` }),
@@ -2261,6 +2392,131 @@ relationship_memory:
 
     expect(step.status).toBe("failed");
     expect(step.error).toContain("Verification failed");
+  });
+
+  it("completes analysis steps when PDF vision config is missing but text extraction succeeded", async () => {
+    executor = createExecutorWithStubs(
+      [
+        toolUseResponse("read_file", { path: "Sens_et_Dieu_finale.pdf" }),
+        toolUseResponse("read_pdf_visual", { path: "Sens_et_Dieu_finale.pdf", pages: "1-3" }),
+        textResponse(
+          "Metinden yeterli içerik çıkarıldı. Bu belge felsefi değerlendirme için yeterli metinsel kapsam sağlıyor.",
+        ),
+      ],
+      {
+        read_file: {
+          success: true,
+          content:
+            "Sens et Dieu\n-- 1 of 130 --\n...\n-- 10 of 130 --\nMetnin orta kısımlarından örnek içerik.",
+          format: "pdf",
+        },
+        read_pdf_visual: {
+          success: false,
+          error: "OpenAI API key not configured (OpenAI OAuth sign-in does not support image analysis here yet).",
+          nonBlocking: true,
+          recoverableFallback: true,
+          fallbackHint:
+            "Vision analysis is unavailable. Continue with read_file or parse_document if the task can be completed from extracted text.",
+        },
+      },
+    );
+
+    const step: Any = {
+      id: "pdf-analysis-fallback",
+      description:
+        "PDF dosyasından çıkan metne dayanarak kitap değerlendirmesi için yeterli içerik olup olmadığını belirle.",
+      status: "pending",
+      kind: "primary",
+    };
+    (executor as Any).plan = { description: "Plan", steps: [step] };
+
+    await (executor as Any).executeStep(step);
+
+    expect(step.status, String(step.error || "")).toBe("completed");
+  });
+
+  it("blocks browser fallback for local PDFs and still completes from extracted text", async () => {
+    executor = createExecutorWithStubs(
+      [
+        toolUseResponse("read_file", { path: "Sens_et_Dieu_finale.pdf" }),
+        toolUseResponse("browser_navigate", { url: "file:///tmp/Sens_et_Dieu_finale.pdf" }),
+        textResponse("Metinsel çıkarım yeterli olduğu için değerlendirmeyi tamamladım."),
+      ],
+      {
+        read_file: {
+          success: true,
+          content:
+            "Sens et Dieu\n-- 1 of 130 --\n...\n-- 12 of 130 --\nKitabın temel argümanları metinsel olarak çıkarıldı.",
+          format: "pdf",
+        },
+      },
+    );
+    (executor as Any).getAvailableTools = vi.fn().mockReturnValue([
+      { name: "read_file", description: "", input_schema: { type: "object", properties: {} } },
+      {
+        name: "browser_navigate",
+        description: "",
+        input_schema: { type: "object", properties: {} },
+      },
+    ]);
+
+    const step: Any = {
+      id: "pdf-analysis-browser-fallback",
+      description: "PDF metnine dayanarak belgeyi değerlendir.",
+      status: "pending",
+      kind: "primary",
+    };
+    (executor as Any).plan = { description: "Plan", steps: [step] };
+
+    await (executor as Any).executeStep(step);
+
+    expect(step.status, String(step.error || "")).toBe("completed");
+    expect(executor.toolRegistry.executeTool).toHaveBeenCalledTimes(1);
+    expect(executor.toolRegistry.executeTool).toHaveBeenCalledWith("read_file", {
+      path: "Sens_et_Dieu_finale.pdf",
+    });
+  });
+
+  it("blocks alternate OCR probing after reliable PDF extraction already succeeded", async () => {
+    executor = createExecutorWithStubs(
+      [
+        toolUseResponse("read_file", { path: "Sens_et_Dieu_finale.pdf" }),
+        toolUseResponse("run_command", { command: "which pdftotext && which ocrmypdf" }),
+        textResponse("PDF metni zaten güvenilir biçimde çıkarıldı; değerlendirmeyi bu metne dayanarak tamamladım."),
+      ],
+      {
+        read_file: {
+          success: true,
+          content:
+            "[PDF Metadata: Pages: 66 | Extraction: complete via embedded text layer; OCR not needed]\n\nKitabın metni burada.",
+          format: "pdf",
+          pdf_extraction: {
+            status: "complete",
+            mode: "pdf-parse",
+            used_fallback: false,
+            preview_limited: false,
+            note: "complete via embedded text layer; OCR not needed",
+            page_count: 66,
+          },
+        },
+      },
+    );
+
+    const step: Any = {
+      id: "pdf-no-probe",
+      description: "PDF metnine dayanarak kitabı değerlendir.",
+      status: "pending",
+      kind: "primary",
+    };
+    (executor as Any).plan = { description: "Plan", steps: [step] };
+
+    await (executor as Any).executeStep(step);
+
+    expect(step.status, String(step.error || "")).toBe("completed");
+    expect(executor.toolRegistry.executeTool).toHaveBeenCalledTimes(1);
+    expect(executor.toolRegistry.executeTool).toHaveBeenCalledWith("read_file", {
+      path: "Sens_et_Dieu_finale.pdf",
+    });
   });
 
   it("retries final verification once via rewind and completes after returning OK", async () => {
