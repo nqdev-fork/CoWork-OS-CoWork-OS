@@ -39,6 +39,8 @@ import {
   type RuntimeToolMetadata,
   type SkillApplication,
   type SkillApplicationTrigger,
+  type QuotedAssistantMessage,
+  type TaskFollowUpInput,
 } from "../../shared/types";
 import { resolveModelPreferenceToModelKey } from "../../shared/agent-preferences";
 import { isVerificationStepDescription } from "../../shared/plan-utils";
@@ -49,6 +51,8 @@ import {
   type ParsedSkillSlashCommand,
   type SkillSlashExternalMode,
 } from "../../shared/skill-slash-commands";
+import { parseNaturalLlmWikiPrompt } from "../../shared/llm-wiki-prompt-routing";
+import { parseOnboardingSlashCommand } from "../../shared/onboarding";
 import * as fs from "fs";
 import * as fsPromises from "fs/promises";
 import * as path from "path";
@@ -123,6 +127,7 @@ import { assertNormalizedTurnTranscript } from "./runtime/turn-transcript-normal
 import { getCustomSkillLoader } from "./custom-skill-loader";
 import { MemoryService } from "../memory/MemoryService";
 import { PlaybookService } from "../memory/PlaybookService";
+import { SessionRecallService } from "../memory/SessionRecallService";
 import { RuntimeVisibilityService } from "./RuntimeVisibilityService";
 import { UserProfileService } from "../memory/UserProfileService";
 import { KnowledgeGraphService } from "../knowledge-graph/KnowledgeGraphService";
@@ -204,6 +209,7 @@ import { sanitizeToolCallTextFromAssistant } from "./tool-call-text-sanitizer";
 import {
   evaluateToolAvailability,
   evaluateToolPolicy,
+  hasPdfVisualIntent,
   hasNativeDesktopGuiIntent,
   normalizeExecutionMode,
   normalizeTaskDomain,
@@ -324,6 +330,7 @@ import {
   formatToolInputForLog as formatToolInputForLogUtil,
   getToolFailureReason as getToolFailureReasonUtil,
   inferAndNormalizeToolInput as inferAndNormalizeToolInputUtil,
+  isAdvisoryToolFailureResult as isAdvisoryToolFailureResultUtil,
   isEffectivelyIdempotentToolCall as isEffectivelyIdempotentToolCallUtil,
   isHardToolFailure as isHardToolFailureUtil,
   normalizeToolUseName as normalizeToolUseNameUtil,
@@ -515,6 +522,7 @@ interface MutationEvidence {
   fs_exists: boolean;
   mtime_after_step_start: boolean;
   size_bytes: number | null;
+  observed_event_type?: string | null;
 }
 
 interface ArtifactMutationLedgerEntry {
@@ -609,6 +617,7 @@ interface ParallelBatchAttemptResult {
   hasHardToolFailureAttempt: boolean;
   hadToolError: boolean;
   hadToolSuccessAfterError: boolean;
+  hadRecoverableVisionFallback: boolean;
   hadAnyToolSuccess: boolean;
   allToolErrorsInputDependent: boolean;
   lastToolErrorReason: string;
@@ -879,7 +888,7 @@ export class TaskExecutor {
   }
 
   /** Follow-up messages queued while the executor is busy (mutex held). */
-  private pendingFollowUps: Array<{ message: string; images?: ImageAttachment[] }> = [];
+  private pendingFollowUps: TaskFollowUpInput[] = [];
   /** When true, sendMessageUnified skips emitting user_message (already emitted by daemon). */
   private _suppressNextUserMessageEvent = false;
 
@@ -1490,6 +1499,44 @@ export class TaskExecutor {
       contextText: params.contextText,
     });
     params.content.input = inputValidation.input;
+    if (this.isLocalPdfBrowserNavigateAttempt(params.content.name, params.content.input)) {
+      const advisoryPayload = this.buildLocalPdfBrowserNavigateFallbackPayload();
+      return {
+        status: "blocked",
+        canonicalToolName,
+        inputValidation,
+        blockedReason: "invalid_input",
+        blockedMessage: advisoryPayload.error,
+        blockedToolResult: {
+          type: "tool_result",
+          tool_use_id: params.content.id,
+          content: JSON.stringify(advisoryPayload),
+          is_error: false,
+        },
+        ...(forcedToolAction ? { forcedToolAction } : {}),
+      };
+    }
+    if (this.shouldBlockAlternatePdfExtractionProbe({
+      toolName: params.content.name,
+      input: params.content.input,
+      contextText: params.contextText,
+    })) {
+      const advisoryPayload = this.buildPdfExtractionProbeBlockedPayload();
+      return {
+        status: "blocked",
+        canonicalToolName,
+        inputValidation,
+        blockedReason: "invalid_input",
+        blockedMessage: advisoryPayload.error,
+        blockedToolResult: {
+          type: "tool_result",
+          tool_use_id: params.content.id,
+          content: JSON.stringify(advisoryPayload),
+          is_error: false,
+        },
+        ...(forcedToolAction ? { forcedToolAction } : {}),
+      };
+    }
     if (inputValidation.error) {
       return {
         status: "blocked",
@@ -1878,9 +1925,12 @@ export class TaskExecutor {
     let hasHardToolFailureAttempt = false;
     let hadToolError = false;
     let hadToolSuccessAfterError = false;
+    let hadRecoverableVisionFallback = false;
     let hadAnyToolSuccess = false;
     let allToolErrorsInputDependent = true;
     let lastToolErrorReason = "";
+    const successfulToolNames = new Set<string>();
+    const toolFailureReasons = new Map<string, string[]>();
     const scheduledOutcome = await this.getToolScheduler().executeBatch({
       calls: jobs.map((job, index) => ({
         index,
@@ -1932,6 +1982,10 @@ export class TaskExecutor {
                 hadToolError = true;
                 params.toolErrors.add(toolName);
                 lastToolErrorReason = `Tool ${toolName} failed: ${failureMessage}`;
+                toolFailureReasons.set(toolName, [
+                  ...(toolFailureReasons.get(toolName) || []),
+                  failureMessage,
+                ]);
                 if (!_isInputDependentError(failureMessage)) {
                   allToolErrorsInputDependent = false;
                 }
@@ -1951,6 +2005,11 @@ export class TaskExecutor {
                 );
                 if (failureTracking.shouldDisable || failureTracking.isHardFailure) {
                   hasHardToolFailureAttempt = true;
+                }
+                if (
+                  this.isRecoverableVisionToolConfigurationFailure(toolName, failureMessage)
+                ) {
+                  hadRecoverableVisionFallback = true;
                 }
                 this.emitEvent(
                   "tool_error",
@@ -1996,6 +2055,7 @@ export class TaskExecutor {
               const toolSucceeded = !(result && result.success === false);
               if (toolSucceeded) {
                 hadAnyToolSuccess = true;
+                successfulToolNames.add(canonicalToolName);
                 if (hadToolError) {
                   hadToolSuccessAfterError = true;
                 }
@@ -2024,6 +2084,10 @@ export class TaskExecutor {
                 hadToolError = true;
                 params.toolErrors.add(toolName);
                 lastToolErrorReason = `Tool ${toolName} failed: ${reason}`;
+                toolFailureReasons.set(toolName, [
+                  ...(toolFailureReasons.get(toolName) || []),
+                  reason,
+                ]);
                 if (!_isInputDependentError(reason)) {
                   allToolErrorsInputDependent = false;
                 }
@@ -2043,6 +2107,9 @@ export class TaskExecutor {
                 );
                 if (failureTracking.shouldDisable || failureTracking.isHardFailure) {
                   hasHardToolFailureAttempt = true;
+                }
+                if (this.isRecoverableVisionToolConfigurationFailure(toolName, reason)) {
+                  hadRecoverableVisionFallback = true;
                 }
                 this.emitEvent(
                   "tool_error",
@@ -2111,6 +2178,7 @@ export class TaskExecutor {
       hasHardToolFailureAttempt,
       hadToolError,
       hadToolSuccessAfterError,
+      hadRecoverableVisionFallback,
       hadAnyToolSuccess,
       allToolErrorsInputDependent,
       lastToolErrorReason,
@@ -2247,6 +2315,7 @@ export class TaskExecutor {
           status: "in_progress",
           legacyType: type,
           message,
+          extraPayload: payloadObj,
         },
       );
       return;
@@ -2447,14 +2516,22 @@ export class TaskExecutor {
   private async sendMessageWithAcpxRuntime(
     message: string,
     _images?: ImageAttachment[],
+    quotedAssistantMessage?: QuotedAssistantMessage,
   ): Promise<void> {
     const runner = this.getAcpxRuntimeRunner();
     const runtimeAgentName = this.getAcpxRuntimeAgentDisplayName();
+    const followUpConversationMessage = this.buildQuotedAssistantContextMessage(
+      message,
+      quotedAssistantMessage,
+    );
     this.daemon.updateTaskStatus(this.task.id, "executing");
     this.emitEvent("executing", { message: `Processing follow-up via ${runtimeAgentName} ACP runtime` });
-    this.emitEvent("user_message", { message });
+    this.emitEvent("user_message", {
+      message,
+      ...(quotedAssistantMessage ? { quotedAssistantMessage } : {}),
+    });
     await runner.ensureSession();
-    const result = await runner.prompt(message);
+    const result = await runner.prompt(followUpConversationMessage);
     const assistantText = result.assistantText.trim();
     if (assistantText) {
       this.lastAssistantOutput = assistantText;
@@ -4415,6 +4492,7 @@ ${transcript}
   > = [];
   private providerFailoverIndex = 0;
   private providerFailoverPreserveUntil = 0;
+  private providerFailoverRequiresImageInput = false;
   private toolBatchExecutor?: ToolBatchExecutor;
 
   private getToolBatchExecutor(): ToolBatchExecutor {
@@ -4789,6 +4867,7 @@ ${transcript}
         temporaryGrants: new Map<string, { grantedAt: number; expiresAt?: number }>(),
         denialTracking: new Map<string, { consecutiveDenials: number; totalDenials: number }>(),
         latestPromptContext: null,
+        recentSensitiveSources: [],
       },
       verification: {
         verificationEvidenceEntries: Array.isArray(self.verificationEvidenceEntries)
@@ -5701,6 +5780,7 @@ ${transcript}
   /** Attach images from the initial task creation (before execute() is called). */
   setInitialImages(images: ImageAttachment[]): void {
     this.initialImages = images;
+    this.ensureProviderFailoverSelectionsContext(this.hasImageAttachments(images));
   }
 
   /**
@@ -6208,7 +6288,11 @@ ${transcript}
     requestFn: (attempt: number) => Promise<Any>,
     operation: string,
     maxRetries = 5,
+    opts?: { requiresImageInput?: boolean },
   ): Promise<Any> {
+    this.ensureProviderFailoverSelectionsContext(
+      opts?.requiresImageInput ?? this.providerFailoverRequiresImageInput,
+    );
     const llmCallId = ++this.llmCallSequence;
     const maxAttempts =
       maxRetries + 1 + Math.max(0, (this.providerFailoverSelections?.length || 1) - 1);
@@ -6216,23 +6300,38 @@ ${transcript}
       `${this.logTag}[LLM ${llmCallId}] start: ${operation} (max attempts: ${maxAttempts})`,
     );
     let lastError: Error | null = null;
+    let skipRetryDelayOnce = false;
+    let deferredPrimaryOutageFailover = false;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const attemptNumber = attempt + 1;
       const attemptStart = Date.now();
       try {
         if (attempt > 0) {
-          const delay = calculateBackoffDelay(attempt - 1);
-          console.log(
-            `${this.logTag} Retry attempt ${attempt}/${maxAttempts - 1} for ${operation} after ${delay}ms`,
-          );
-          this.emitEvent("llm_retry", {
-            operation,
-            attempt,
-            maxRetries: maxAttempts - 1,
-            delayMs: delay,
-          });
-          await sleep(delay);
+          if (skipRetryDelayOnce) {
+            skipRetryDelayOnce = false;
+            console.log(
+              `${this.logTag} Retry attempt ${attempt}/${maxAttempts - 1} for ${operation} immediately after provider failover`,
+            );
+            this.emitEvent("llm_retry", {
+              operation,
+              attempt,
+              maxRetries: maxAttempts - 1,
+              delayMs: 0,
+            });
+          } else {
+            const delay = calculateBackoffDelay(attempt - 1);
+            console.log(
+              `${this.logTag} Retry attempt ${attempt}/${maxAttempts - 1} for ${operation} after ${delay}ms`,
+            );
+            this.emitEvent("llm_retry", {
+              operation,
+              attempt,
+              maxRetries: maxAttempts - 1,
+              delayMs: delay,
+            });
+            await sleep(delay);
+          }
         }
 
         // Check for cancellation before retry
@@ -6296,12 +6395,18 @@ ${transcript}
 
         // Check if it's a retryable error (rate limit, timeout, network error)
         const errorText = String(error?.message || "").toLowerCase();
+        const errorCode = String(error?.code || error?.cause?.code || "").toLowerCase();
         const isRetryable =
           (this.providerRetryV2Enabled && error?.retryable === true) ||
           errorText.includes("timeout") ||
           errorText.includes("timed out") ||
           errorText.includes("429") ||
           errorText.includes("rate limit") ||
+          errorCode === "econnreset" ||
+          errorCode === "etimedout" ||
+          errorCode === "enotfound" ||
+          errorCode === "eai_again" ||
+          errorCode === "econnrefused" ||
           errorText.includes("econnreset") ||
           errorText.includes("etimedout") ||
           errorText.includes("enotfound") ||
@@ -6320,7 +6425,19 @@ ${transcript}
           error.status === 504;
 
         const retryReason = this.getRetryRouteReason(error);
-        if (isRetryable && this.failoverToNextProvider(retryReason, error)) {
+        const shouldRetryPrimaryProviderFirst =
+          isRetryable &&
+          retryReason === "provider_outage" &&
+          this.providerFailoverIndex === 0 &&
+          !deferredPrimaryOutageFailover;
+        if (shouldRetryPrimaryProviderFirst) {
+          deferredPrimaryOutageFailover = true;
+          console.warn(
+            `${this.logTag}[LLM ${llmCallId}] retaining primary provider for one local retry: ` +
+              `${operation} (attempt ${attemptNumber}/${maxAttempts}) -> ${this.provider.type}/${this.modelId}`,
+          );
+        } else if (isRetryable && this.failoverToNextProvider(retryReason, error)) {
+          skipRetryDelayOnce = true;
           console.warn(
             `${this.logTag}[LLM ${llmCallId}] failover: ${operation} ` +
               `(attempt ${attemptNumber}/${maxAttempts}) -> ${this.provider.type}/${this.modelId}`,
@@ -10699,6 +10816,156 @@ ${transcript}
     return isHardToolFailureUtil(toolName, result, failureReason);
   }
 
+  private isRecoverableVisionToolConfigurationFailure(
+    toolName: string,
+    failureReason: string,
+  ): boolean {
+    const canonicalToolName = canonicalizeToolNameUtil(toolName);
+    if (canonicalToolName !== "read_pdf_visual" && canonicalToolName !== "analyze_image") {
+      return false;
+    }
+
+    const message = String(failureReason || "").toLowerCase();
+    if (!message) return false;
+
+    return (
+      message.includes("not configured") ||
+      message.includes("does not support image analysis here yet") ||
+      message.includes("no vision-capable provider configured") ||
+      message.includes("vision requires")
+    );
+  }
+
+  private shouldRecoverAnalysisStepFromVisionFallback(opts: {
+    stepContract: { mode?: string };
+    successfulToolNames: Set<string>;
+    toolFailureReasons: Map<string, string[]>;
+  }): boolean {
+    if (opts.stepContract.mode !== "analysis_only") {
+      return false;
+    }
+
+    const hasTextExtractionSuccess =
+      opts.successfulToolNames.has("read_file") || opts.successfulToolNames.has("parse_document");
+    if (!hasTextExtractionSuccess) {
+      return false;
+    }
+
+    const failingTools = Array.from(opts.toolFailureReasons.keys());
+    if (failingTools.length === 0) {
+      return false;
+    }
+
+    return failingTools.every((toolName) => {
+      const reasons = opts.toolFailureReasons.get(toolName) || [];
+      return (
+        reasons.length > 0 &&
+        reasons.every((reason) =>
+          this.isRecoverableVisionToolConfigurationFailure(toolName, reason),
+        )
+      );
+    });
+  }
+
+  private isLocalPdfBrowserNavigateAttempt(toolName: string, input: Any): boolean {
+    if (canonicalizeToolNameUtil(toolName) !== "browser_navigate") {
+      return false;
+    }
+
+    const url = String(input?.url || "").trim();
+    if (!url) return false;
+
+    return /^file:\/\//i.test(url) && /\.pdf(?:[?#].*)?$/i.test(url);
+  }
+
+  private buildLocalPdfBrowserNavigateFallbackPayload(): {
+    success: false;
+    error: string;
+    nonBlocking: true;
+    recoverableFallback: true;
+    fallbackHint: string;
+  } {
+    return {
+      success: false,
+      error:
+        "Cannot open local PDF files in browser (this triggers a download instead of readable page content).",
+      nonBlocking: true,
+      recoverableFallback: true,
+      fallbackHint:
+        "Use read_file or parse_document to extract text. Use read_pdf_visual only when the task truly needs layout or visual analysis.",
+    };
+  }
+
+  private taskRequestsPdfExtractionDebugging(contextText?: string): boolean {
+    const haystack = [
+      this.task.title,
+      this.getExecutionTaskPrompt(),
+      this.lastUserMessage,
+      contextText,
+    ]
+      .filter(Boolean)
+      .join("\n")
+      .toLowerCase();
+
+    const extractionTerms =
+      /\b(pdf|ocr|text extraction|extractor|parser|pdftotext|pdfinfo|mutool|ocrmypdf|tesseract|read_pdf_visual)\b/;
+    if (!extractionTerms.test(haystack)) {
+      return false;
+    }
+
+    return /\b(debug|diagnos(?:e|ing|is)|troubleshoot|investigat(?:e|ing|ion)|why|how|problem|issue|fail(?:ed|ing|ure)?|broken|error|bug|eksik|hata|neden|niye|incomplete|partial|quality|missing|recover)\b/.test(
+      haystack,
+    );
+  }
+
+  private hasRecentReliablePdfExtraction(): boolean {
+    const memory = Array.isArray(this.toolResultMemory) ? this.toolResultMemory : [];
+    return memory
+      .slice(-6)
+      .some((entry) =>
+        /pdf extraction, status=(complete|recovered|ocr)\b/i.test(String(entry?.summary || "")),
+      );
+  }
+
+  private shouldBlockAlternatePdfExtractionProbe(opts: {
+    toolName: string;
+    input: Any;
+    contextText?: string;
+  }): boolean {
+    if (canonicalizeToolNameUtil(opts.toolName) !== "run_command") {
+      return false;
+    }
+    if (this.taskRequestsPdfExtractionDebugging(opts.contextText)) {
+      return false;
+    }
+    if (!this.hasRecentReliablePdfExtraction()) {
+      return false;
+    }
+
+    const command = String(opts.input?.command || "").toLowerCase();
+    if (!command) return false;
+
+    return /\b(pdftotext|pdfinfo|mutool|qpdf|ocrmypdf|tesseract|pdftoppm)\b/.test(command);
+  }
+
+  private buildPdfExtractionProbeBlockedPayload(): {
+    success: false;
+    error: string;
+    nonBlocking: true;
+    recoverableFallback: true;
+    fallbackHint: string;
+  } {
+    return {
+      success: false,
+      error:
+        "PDF text extraction already succeeded with reliable text output. Do not probe alternate OCR/extractor commands for this task.",
+      nonBlocking: true,
+      recoverableFallback: true,
+      fallbackHint:
+        "Continue using the extracted PDF text unless a tool result explicitly reports partial or empty extraction, or the user explicitly asks to debug extraction quality.",
+    };
+  }
+
   private getToolFailureReason(result: Any, fallback: string): string {
     return getToolFailureReasonUtil(result, fallback);
   }
@@ -11357,6 +11624,7 @@ ${transcript}
       "HONESTY & UNCERTAINTY:",
       "- State uncertainty explicitly when it matters.",
       "- Never fabricate tool outputs or claim a tool succeeded when it did not.",
+      "- For PDF extraction, do not claim the built-in reader was incomplete, that OCR is needed, or that alternate extraction is being tried unless a tool result explicitly reports partial/empty extraction or OCR fallback.",
       "",
       "FINAL ANSWER CONTRACT:",
       "- Always end a task or turn with a text response.",
@@ -11406,7 +11674,28 @@ ${transcript}
       .trim();
   }
 
-  private buildFollowUpTurnGuidancePrompt(message: string): string {
+  private buildQuotedAssistantContextMessage(
+    message: string,
+    quotedAssistantMessage?: QuotedAssistantMessage,
+  ): string {
+    const quotedText = typeof quotedAssistantMessage?.message === "string"
+      ? quotedAssistantMessage.message.trim()
+      : "";
+    if (!quotedText) return message;
+    return [
+      "QUOTED ASSISTANT MESSAGE (the user explicitly quoted this earlier assistant reply and is responding to it):",
+      '"""',
+      quotedText,
+      '"""',
+      "",
+      message,
+    ].join("\n");
+  }
+
+  private buildFollowUpTurnGuidancePrompt(
+    message: string,
+    quotedAssistantMessage?: QuotedAssistantMessage,
+  ): string {
     if (this.redirectRequested) {
       return [
         "TASK RE-SCOPE (CRITICAL):",
@@ -11420,9 +11709,110 @@ ${transcript}
       "FOLLOW-UP TURN (CRITICAL):",
       "- Reuse the conversation history and prior findings before doing new work.",
       "- Do not contradict earlier evidence or restart research if the answer is already in context.",
+      quotedAssistantMessage?.message
+        ? "- The user explicitly quoted an earlier assistant message. Treat that quote as the exact reply they are referring to."
+        : "",
       `- Build on the latest follow-up message: ${String(message || "").trim()}`,
       "- Gather new evidence only when the follow-up needs information that is not already available.",
     ].join("\n");
+  }
+
+  private async buildAdaptiveRecoveryTurnGuidance(
+    taskPrompt: string,
+    options?: {
+      includePlaybook?: boolean;
+    },
+  ): Promise<string> {
+    const transientRetryCount = Math.max(
+      0,
+      Number(this.daemon.getTransientRetryCount?.(this.task.id) || 0),
+    );
+    const currentAttempt = Math.max(1, Number(this.task.currentAttempt || 1));
+    const retryReason = String(this.lastRetryReason || "").trim();
+    const recoveryClass = String(this.lastRecoveryClass || "").trim();
+    const pendingVerificationItems = this.getPendingVerificationChecklistTitles();
+
+    const shouldInject =
+      transientRetryCount > 0 ||
+      currentAttempt > 1 ||
+      retryReason.length > 0 ||
+      recoveryClass.length > 0 ||
+      pendingVerificationItems.length > 0;
+
+    if (!shouldInject) {
+      return "";
+    }
+
+    const lines: string[] = [
+      "RECOVERY GUIDANCE (CRITICAL):",
+      "- Continue from the last known good state instead of restarting solved work.",
+      "- Do not repeat an approach that already failed unless you have a concrete new reason.",
+    ];
+
+    if (transientRetryCount > 0) {
+      lines.push(
+        `- This task is resuming after ${transientRetryCount} transient retry attempt${transientRetryCount === 1 ? "" : "s"}.`,
+      );
+    }
+
+    if (currentAttempt > 1) {
+      const maxAttempts = Math.max(currentAttempt, Number(this.task.maxAttempts || currentAttempt));
+      lines.push(`- You are on attempt ${currentAttempt}/${maxAttempts}.`);
+    }
+
+    if (retryReason) {
+      lines.push(`- Last retry reason: ${retryReason}.`);
+    }
+
+    if (recoveryClass) {
+      lines.push(`- Last recovery classification: ${recoveryClass}.`);
+    }
+
+    if (pendingVerificationItems.length > 0) {
+      lines.push(
+        `- Preserve these unfinished verification items across recovery: ${pendingVerificationItems.join(", ")}.`,
+      );
+    }
+
+    if (options?.includePlaybook !== false) {
+      try {
+        const playbookContext = PlaybookService.getPlaybookForContext(
+          this.workspace.id,
+          taskPrompt,
+          2,
+        ).trim();
+        if (playbookContext) {
+          lines.push("");
+          lines.push(playbookContext);
+        }
+      } catch {
+        // best-effort
+      }
+    }
+
+    try {
+      const recallQuery = retryReason || String(taskPrompt || "").trim();
+      if (recallQuery) {
+        const recallResults = await SessionRecallService.search({
+          workspacePath: this.workspace.path,
+          taskId: this.task.id,
+          query: recallQuery,
+          limit: 3,
+          includeCheckpoints: true,
+        });
+        if (recallResults.length > 0) {
+          lines.push("");
+          lines.push("Earlier session evidence to reuse:");
+          for (const result of recallResults) {
+            lines.push(`- [${result.type}] ${result.snippet}`);
+          }
+        }
+      }
+    } catch {
+      // best-effort
+    }
+
+    return lines.join("\n").trim();
   }
 
   private shouldWarmPlanningPromptCacheWithTools(
@@ -11433,11 +11823,18 @@ ${transcript}
     if (settings.mode === "off" || !settings.surfaceCoverage[surface]) {
       return false;
     }
+    if (this.shouldSkipPlanningWarmupToolsForCurrentRoute()) {
+      return false;
+    }
     return (
       providerFamily === "openai" ||
       providerFamily === "azure-openai" ||
       providerFamily === "openrouter-openai"
     );
+  }
+
+  private shouldSkipPlanningWarmupToolsForCurrentRoute(): boolean {
+    return this.provider?.type === "openrouter" && this.providerFailoverIndex > 0;
   }
 
   private getPromptCacheDebugEnabled(): boolean {
@@ -11838,6 +12235,7 @@ ${transcript}
 
     const analysis = new Set<string>([
       ...always,
+      "parse_document",
       "read_multiple_files",
       "web_search",
       "web_fetch",
@@ -11912,6 +12310,9 @@ ${transcript}
       base.add("generate_video");
       base.add("get_video_generation_job");
       base.add("cancel_video_generation_job");
+    }
+    if (hasPdfVisualIntent(String(stepText || "").toLowerCase())) {
+      base.add("read_pdf_visual");
     }
     if (hasNativeDesktopGuiIntent(String(stepText || "").toLowerCase())) {
       base.add("open_application");
@@ -14453,6 +14854,24 @@ You are continuing a previous conversation. The context from the previous conver
       }
     }
 
+    if ((toolName === "read_file" || toolName === "parse_document") && result?.pdf_extraction) {
+      const pdfExtraction = result.pdf_extraction;
+      const status = typeof pdfExtraction?.status === "string" ? pdfExtraction.status : "unknown";
+      const mode = typeof pdfExtraction?.mode === "string" ? pdfExtraction.mode : "unknown";
+      const note = typeof pdfExtraction?.note === "string" ? pdfExtraction.note.trim() : "";
+      const pageCount =
+        typeof pdfExtraction?.page_count === "number" ? pdfExtraction.page_count : undefined;
+      return [
+        "pdf extraction",
+        `status=${status}`,
+        `mode=${mode}`,
+        pageCount ? `pages=${pageCount}` : "",
+        note,
+      ]
+        .filter(Boolean)
+        .join(", ");
+    }
+
     if (toolName === "box_action") {
       const action =
         (typeof result?.action === "string" ? result.action : "") ||
@@ -16386,13 +16805,245 @@ You are continuing a previous conversation. The context from the previous conver
     );
   }
 
+  private shouldCollectMutationEvidence(toolName: string): boolean {
+    const canonicalToolName = canonicalizeToolNameUtil(toolName);
+    return this.isFileMutationTool(canonicalToolName) || canonicalToolName === "run_command";
+  }
+
+  private resolveWorkspaceMutationPathCandidate(pathValue: string): string | null {
+    const trimmed = String(pathValue || "").trim();
+    if (!trimmed) return null;
+    const resolved = path.isAbsolute(trimmed)
+      ? path.resolve(trimmed)
+      : path.resolve(this.workspace.path, trimmed);
+    return this.isPathInsideWorkspace(resolved) ? resolved : null;
+  }
+
+  private buildObservedMutationEvidence(params: {
+    canonicalToolName: string;
+    reportedPath: string;
+    thresholdMs: number;
+    observedEventType?: string | null;
+    observedEventTimestamp?: number | null;
+  }): MutationEvidence | null {
+    const resolvedReportedPath = this.resolveWorkspaceMutationPathCandidate(params.reportedPath);
+    if (!resolvedReportedPath) return null;
+
+    let stats: fs.Stats;
+    try {
+      stats = fs.statSync(resolvedReportedPath);
+    } catch {
+      return null;
+    }
+    if (!stats.isFile()) return null;
+
+    const mtimeAfterStepStart = stats.mtimeMs >= params.thresholdMs;
+    const observedEventAfterStart =
+      typeof params.observedEventTimestamp === "number" &&
+      Number.isFinite(params.observedEventTimestamp) &&
+      params.observedEventTimestamp >= params.thresholdMs;
+    if (!mtimeAfterStepStart && !observedEventAfterStart) {
+      return null;
+    }
+
+    const normalizedReportedPath = path.resolve(resolvedReportedPath);
+    const createdFiles = (this.fileOperationTracker?.getCreatedFiles?.() || []).map((file) =>
+      path.resolve(String(file)),
+    );
+    const artifactRegistered =
+      createdFiles.includes(normalizedReportedPath) ||
+      params.observedEventType === "artifact_created" ||
+      params.observedEventType === "file_created";
+
+    return {
+      tool_success: true,
+      canonical_tool: params.canonicalToolName,
+      reported_path: resolvedReportedPath,
+      artifact_registered: artifactRegistered,
+      fs_exists: true,
+      mtime_after_step_start: mtimeAfterStepStart || observedEventAfterStart,
+      size_bytes: stats.size,
+      observed_event_type: params.observedEventType || null,
+    };
+  }
+
+  private collectShellMutationTargetPaths(
+    input: Any,
+    stepContract?: StepExecutionContract,
+  ): string[] {
+    const candidates = new Set<string>();
+    const addCandidate = (value: unknown): void => {
+      if (typeof value !== "string") return;
+      const resolved = this.resolveWorkspaceMutationPathCandidate(value);
+      if (resolved) {
+        candidates.add(path.resolve(resolved));
+      }
+    };
+
+    for (const candidate of extractArtifactPathCandidates(String(input?.command || ""))) {
+      addCandidate(candidate);
+    }
+    for (const candidate of stepContract?.targetPaths || []) {
+      addCandidate(String(candidate || ""));
+    }
+
+    return Array.from(candidates.values());
+  }
+
+  private getWorkspaceMutationEventsSince(sinceTs: number): TaskEvent[] {
+    const getTaskEvents = (this.daemon as Any)?.getTaskEvents;
+    if (typeof getTaskEvents !== "function") return [];
+
+    try {
+      const threshold = Math.max(0, sinceTs - 1000);
+      const events = getTaskEvents.call(this.daemon, this.task.id, {
+        types: ["file_created", "artifact_created", "file_modified"],
+      });
+      if (!Array.isArray(events)) return [];
+
+      return events
+        .filter((event: TaskEvent) => {
+          const eventType = this.getReplayEventType(event);
+          if (
+            eventType !== "file_created" &&
+            eventType !== "artifact_created" &&
+            eventType !== "file_modified"
+          ) {
+            return false;
+          }
+          if (eventType === "file_created" && event.payload?.type === "directory") {
+            return false;
+          }
+          const eventTimestamp =
+            typeof event.timestamp === "number" && Number.isFinite(event.timestamp)
+              ? event.timestamp
+              : 0;
+          return eventTimestamp >= threshold;
+        })
+        .sort((a: TaskEvent, b: TaskEvent) => {
+          const aTs =
+            typeof a.timestamp === "number" && Number.isFinite(a.timestamp) ? a.timestamp : 0;
+          const bTs =
+            typeof b.timestamp === "number" && Number.isFinite(b.timestamp) ? b.timestamp : 0;
+          return bTs - aTs;
+        });
+    } catch {
+      return [];
+    }
+  }
+
+  private getWorkspaceMutationEventPath(event: TaskEvent): {
+    eventType: string;
+    reportedPath: string | null;
+    eventTimestamp: number;
+  } {
+    const eventType = this.getReplayEventType(event);
+    const rawPath =
+      eventType === "file_modified"
+        ? event.payload?.path || event.payload?.to || event.payload?.from
+        : event.payload?.path;
+    return {
+      eventType,
+      reportedPath:
+        typeof rawPath === "string" && rawPath.trim().length > 0 ? rawPath.trim() : null,
+      eventTimestamp:
+        typeof event.timestamp === "number" && Number.isFinite(event.timestamp)
+          ? event.timestamp
+          : 0,
+    };
+  }
+
+  private collectRunCommandMutationEvidence(opts: {
+    input: Any;
+    result: Any;
+    stepStartedAt: number;
+    toolStartedAt?: number;
+    stepContract?: StepExecutionContract;
+  }): MutationEvidence | null {
+    const toolSuccess = !(
+      opts.result &&
+      typeof opts.result === "object" &&
+      (opts.result as Any).success === false
+    );
+    if (!toolSuccess) return null;
+
+    const mutationStartTs =
+      typeof opts.toolStartedAt === "number" && Number.isFinite(opts.toolStartedAt)
+        ? opts.toolStartedAt
+        : opts.stepStartedAt;
+    const thresholdMs = Math.max(0, mutationStartTs - 1000);
+    const candidatePaths = this.collectShellMutationTargetPaths(opts.input, opts.stepContract);
+
+    for (const candidatePath of candidatePaths) {
+      const evidence = this.buildObservedMutationEvidence({
+        canonicalToolName: "run_command",
+        reportedPath: candidatePath,
+        thresholdMs,
+      });
+      if (evidence) return evidence;
+    }
+
+    const scopedCandidates = new Set(candidatePaths.map((candidate) => path.resolve(candidate)));
+    let fallbackEvidence: MutationEvidence | null = null;
+    for (const event of this.getWorkspaceMutationEventsSince(mutationStartTs)) {
+      const { eventType, reportedPath, eventTimestamp } = this.getWorkspaceMutationEventPath(event);
+      if (!reportedPath) continue;
+      const evidence = this.buildObservedMutationEvidence({
+        canonicalToolName: "run_command",
+        reportedPath,
+        thresholdMs,
+        observedEventType: eventType,
+        observedEventTimestamp: eventTimestamp,
+      });
+      if (!evidence?.reported_path) continue;
+      if (scopedCandidates.size > 0) {
+        if (scopedCandidates.has(path.resolve(evidence.reported_path))) {
+          return evidence;
+        }
+        continue;
+      }
+      fallbackEvidence = fallbackEvidence || evidence;
+    }
+
+    return scopedCandidates.size > 0 ? null : fallbackEvidence;
+  }
+
+  private getEquivalentRequiredMutationToolsFromEvidence(
+    stepContract: StepExecutionContract,
+    evidence: MutationEvidence,
+  ): string[] {
+    if (canonicalizeToolNameUtil(evidence.canonical_tool) !== "run_command") {
+      return [];
+    }
+    if (!this.mutationEvidenceSatisfiesWriteContract(evidence)) {
+      return [];
+    }
+
+    const bridgedTools = new Set<string>();
+    for (const toolName of stepContract.requiredTools.values()) {
+      const canonical = canonicalizeToolNameUtil(toolName);
+      if (canonical === "write_file") {
+        bridgedTools.add(canonical);
+      } else if (canonical === "edit_file" && evidence.observed_event_type === "file_modified") {
+        bridgedTools.add(canonical);
+      }
+    }
+
+    return Array.from(bridgedTools);
+  }
+
   private collectMutationEvidence(opts: {
     toolName: string;
     input: Any;
     result: Any;
     stepStartedAt: number;
+    toolStartedAt?: number;
+    stepContract?: StepExecutionContract;
   }): MutationEvidence | null {
     const canonicalToolName = canonicalizeToolNameUtil(opts.toolName);
+    if (canonicalToolName === "run_command") {
+      return this.collectRunCommandMutationEvidence(opts);
+    }
     if (!this.isFileMutationTool(canonicalToolName)) {
       return null;
     }
@@ -16869,6 +17520,35 @@ You are continuing a previous conversation. The context from the previous conver
     } catch (error) {
       console.warn(`${this.logTag} Failed to dispatch mentioned agents:`, error);
     }
+  }
+
+  /**
+   * Handle onboarding slash commands locally so rerunning setup never depends on the LLM.
+   */
+  private async maybeHandleOnboardingSlashCommand(): Promise<boolean> {
+    const raw = String(this.getContractPrompt() || this.task.title || "").trim();
+    if (!raw) return false;
+
+    const parsed = parseOnboardingSlashCommand(raw);
+    if (!parsed.matched) return false;
+
+    this.daemon.updateTaskStatus(this.task.id, "executing");
+
+    const command = parsed.command || "/onboard";
+    const message =
+      `${command} opens the onboarding flow in the desktop UI.\n\n` +
+      "Use it from the main composer or Settings > Appearance > Run onboarding again. " +
+      "That flow updates your assistant profile, priorities, tools, response style, and workspace kit notes.";
+
+    this.emitEvent("assistant_message", { message });
+    this.updateConversationHistory([
+      { role: "user", content: [{ type: "text", text: raw }] },
+      { role: "assistant", content: [{ type: "text", text: message }] },
+    ]);
+    this.lastAssistantOutput = message;
+    this.lastNonVerificationOutput = message;
+    this.finalizeTask("Explained how to reopen onboarding.");
+    return true;
   }
 
   /**
@@ -17446,6 +18126,45 @@ You are continuing a previous conversation. The context from the previous conver
     await this.executeSkillInvocation(command.command, args, `/${command.command}`, "slash");
   }
 
+  private async maybeHandleNaturalLlmWikiPrompt(): Promise<boolean> {
+    const queryCandidates = [
+      this.extractCurrentTaskText(this.task.rawPrompt),
+      this.extractCurrentTaskText(this.task.userPrompt),
+      this.extractCurrentTaskText(this.getContractPrompt()),
+      this.extractCurrentTaskText(this.task.title),
+    ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+    if (this.hasAppliedSkill("llm-wiki") || queryCandidates.length === 0) {
+      return false;
+    }
+    const availableToolNames = this.buildAvailableToolNameSet(this.getAvailableTools());
+    if (!availableToolNames.has("Skill")) {
+      return false;
+    }
+
+    const query = queryCandidates.find((candidate) => parseNaturalLlmWikiPrompt(candidate).matched) || "";
+    if (!query) {
+      return false;
+    }
+    const parsed = parseNaturalLlmWikiPrompt(query);
+
+    await this.executeSkillInvocation(
+      "llm-wiki",
+      parsed.args || "",
+      "the research-vault GUI prompt",
+      "explicit_hint",
+    );
+
+    this.emitEvent("log", {
+      message: "[skill-routing] auto-applied llm-wiki from a natural research-vault prompt.",
+      taskId: this.task.id,
+      mode: parsed.mode,
+      objectivePreview: String(parsed.objective || "").slice(0, 160),
+      obsidian: parsed.obsidian,
+      args: parsed.args || "",
+    });
+    return true;
+  }
+
   private hasAppliedSkill(skillId: string): boolean {
     const normalizedSkillId = String(skillId || "").trim();
     if (!normalizedSkillId) return false;
@@ -17976,7 +18695,8 @@ You are continuing a previous conversation. The context from the previous conver
           `${direct.error || "Invalid slash command."}\n\n` +
             "Usage:\n" +
             "- /simplify [objective] [--domain auto|code|research|operations|writing|general] [--scope current|workspace|path]\n" +
-            "- /batch <objective> [--parallel 1-8] [--domain auto|code|research|operations|writing|general] [--external confirm|execute|none]",
+            "- /batch <objective> [--parallel 1-8] [--domain auto|code|research|operations|writing|general] [--external confirm|execute|none]\n" +
+            "- /llm-wiki <objective> [--mode auto|init|ingest|query|lint|refresh] [--path <path>] [--obsidian auto|on|off]",
         );
       }
 
@@ -18032,7 +18752,8 @@ You are continuing a previous conversation. The context from the previous conver
         `${inline.error || "Invalid inline slash command."}\n\n` +
           "Inline usage example:\n" +
           "- Refactor this module then run /simplify\n" +
-          "- Migrate these docs then run /batch --domain writing --parallel 4",
+          "- Migrate these docs then run /batch --domain writing --parallel 4\n" +
+          "- Research agent memory systems then run /llm-wiki --mode ingest",
       );
     }
 
@@ -18851,12 +19572,19 @@ You are continuing a previous conversation. The context from the previous conver
 
       // Handle local slash-commands (e.g. /schedule ...) deterministically without relying on the LLM.
       // This prevents "plan-only" runs that never create the underlying cron job.
+      if (await this.maybeHandleOnboardingSlashCommand()) {
+        return;
+      }
+
+      // Handle local slash-commands (e.g. /schedule ...) deterministically without relying on the LLM.
+      // This prevents "plan-only" runs that never create the underlying cron job.
       if (await this.maybeHandleScheduleSlashCommand()) {
         return;
       }
 
       const handledSkillSlashOrInline = await this.maybeHandleSkillSlashCommandOrInlineChain();
       if (!handledSkillSlashOrInline) {
+        await this.maybeHandleNaturalLlmWikiPrompt();
         await this.maybeAutoApplyExplicitSkillInvocation(
           this.getSkillRoutingQuery(),
           "task",
@@ -19507,6 +20235,19 @@ Return ONLY a JSON object:
       const planTextPrompt = highConfidenceSkillHints
         ? `Task: ${this.task.title}\n\nDetails: ${planningPrompt}\n\n${highConfidenceSkillHints}\n\nCreate an execution plan.`
         : `Task: ${this.task.title}\n\nDetails: ${planningPrompt}\n\nCreate an execution plan.`;
+      const adaptiveRecoveryGuidance = await this.buildAdaptiveRecoveryTurnGuidance(planTextPrompt, {
+        includePlaybook: true,
+      });
+      const planningTurnGuidance = [
+        this.buildPlanningTurnGuidancePrompt({
+          toolDescriptions,
+          planningGuidance,
+          kitContext,
+        }),
+        adaptiveRecoveryGuidance,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
       const memoryFeatureSettings = this.loadExecutionPromptMemoryFeatures();
       const effectivePlanningExecutionMode = this.getEffectiveExecutionMode();
       const effectivePlanningTaskDomain = this.getEffectiveTaskDomain();
@@ -19520,11 +20261,7 @@ Return ONLY a JSON object:
         executionMode: effectivePlanningExecutionMode,
         taskDomain: effectivePlanningTaskDomain,
         memoryFeatures: memoryFeatureSettings,
-        turnGuidancePrompt: this.buildPlanningTurnGuidancePrompt({
-          toolDescriptions,
-          planningGuidance,
-          kitContext,
-        }),
+        turnGuidancePrompt: planningTurnGuidance,
         turnGuidanceMaxTokens: 3600,
       });
       const systemPrompt = this.setPromptCacheContext({
@@ -20896,6 +21633,10 @@ Return ONLY a JSON object:
     }
     const effectiveExecutionMode = this.getEffectiveExecutionMode();
     const effectiveTaskDomain = this.getEffectiveTaskDomain();
+    const adaptiveRecoveryGuidance = await this.buildAdaptiveRecoveryTurnGuidance(
+      this.getExecutionTaskPrompt(),
+      { includePlaybook: false },
+    );
     const builtPrompt = await this.buildExecutionSystemPrompt({
       taskPrompt: this.getExecutionTaskPrompt(),
       identityPrompt,
@@ -20909,6 +21650,7 @@ Return ONLY a JSON object:
       executionMode: effectiveExecutionMode,
       taskDomain: effectiveTaskDomain,
       memoryFeatures: memoryFeatureSettings,
+      turnGuidancePrompt: adaptiveRecoveryGuidance || undefined,
     });
     this.systemPrompt = this.setPromptCacheContext({
       surface: "executor",
@@ -21179,9 +21921,12 @@ Return ONLY a JSON object:
       let limitationRefusalWithoutAction = false;
       let hadToolError = false;
       let hadToolSuccessAfterError = false;
+      let hadRecoverableVisionFallback = false;
       let hadAnyToolSuccess = false;
       let allToolErrorsInputDependent = true;
       const toolErrors = new Set<string>();
+      const successfulToolNames = new Set<string>();
+      const toolFailureReasons = new Map<string, string[]>();
       let lastToolErrorReason = "";
       let awaitingUserInput = false;
       let awaitingUserInputReason: string | null = null;
@@ -21441,7 +22186,13 @@ Return ONLY a JSON object:
             while (pendingMsg) {
               console.log(`${this.logTag} Injecting queued follow-up into step execution`);
               const userUpdate = `USER UPDATE: ${pendingMsg.message}`;
-              const content = await this.buildUserContent(userUpdate, pendingMsg.images);
+              const content = await this.buildUserContent(
+                this.buildQuotedAssistantContextMessage(
+                  userUpdate,
+                  pendingMsg.quotedAssistantMessage,
+                ),
+                pendingMsg.images,
+              );
               messages.push({ role: "user" as const, content });
               this.appendConversationHistory({ role: "user", content });
               pendingMsg = this.drainPendingFollowUp();
@@ -22794,6 +23545,7 @@ Return ONLY a JSON object:
                           durationMs: Date.now() - toolExecStart,
                           resultJson: resultStr,
                           metadata: {
+                            startedAt: toolExecStart,
                             envelope: runtimeEnvelope,
                             policyTrace: runtimePolicyTrace,
                             correlation: toolCorrelation,
@@ -22814,6 +23566,7 @@ Return ONLY a JSON object:
                           error,
                           durationMs: Date.now() - toolExecStart,
                           metadata: {
+                            startedAt: toolExecStart,
                             correlation: toolCorrelation,
                             canonicalToolName: canonicalContentName,
                             isExecutionToolCall,
@@ -22843,6 +23596,10 @@ Return ONLY a JSON object:
                         hadToolError = true;
                         toolErrors.add(content.name);
                         lastToolErrorReason = `Tool ${content.name} failed: ${failureMessage}`;
+                        toolFailureReasons.set(content.name, [
+                          ...(toolFailureReasons.get(content.name) || []),
+                          failureMessage,
+                        ]);
                         if (
                           this.isWorkspaceAliasRecoverableTool(content.name) &&
                           this.isWorkspaceAliasRecoverableFailure(
@@ -22923,6 +23680,14 @@ Return ONLY a JSON object:
                         if (failureTracking.shouldDisable || failureTracking.isHardFailure) {
                           hasHardToolFailureAttempt = true;
                         }
+                        if (
+                          this.isRecoverableVisionToolConfigurationFailure(
+                            content.name,
+                            failureMessage,
+                          )
+                        ) {
+                          hadRecoverableVisionFallback = true;
+                        }
 
                         const disabledScope =
                           failureTracking.shouldDisable &&
@@ -22997,6 +23762,7 @@ Return ONLY a JSON object:
 
                       if (toolSucceeded) {
                         hadAnyToolSuccess = true;
+                        successfulToolNames.add(canonicalContentName);
                         this.recordToolResult(content.name, result, content.input);
                         if (
                           content.name === "browser_navigate" ||
@@ -23051,13 +23817,22 @@ Return ONLY a JSON object:
                             }
                           }
                         }
-                        if (this.isFileMutationTool(content.name)) {
+                        if (this.shouldCollectMutationEvidence(content.name)) {
+                          const toolStartedAt =
+                            typeof rawOutcome.metadata?.startedAt === "number" &&
+                            Number.isFinite(rawOutcome.metadata.startedAt)
+                              ? rawOutcome.metadata.startedAt
+                              : undefined;
                           const evidence = this.collectMutationEvidence({
                             toolName: content.name,
                             input: content.input,
                             result,
                             stepStartedAt,
+                            toolStartedAt,
+                            stepContract,
                           });
+                          const mutationAttemptObserved =
+                            this.isFileMutationTool(content.name) || Boolean(evidence);
                           if (evidence) {
                             mutationEvidence.push(evidence);
                             this.emitEvent("log", {
@@ -23070,6 +23845,7 @@ Return ONLY a JSON object:
                               fs_exists: evidence.fs_exists,
                               mtime_after_step_start: evidence.mtime_after_step_start,
                               size_bytes: evidence.size_bytes,
+                              observed_event_type: evidence.observed_event_type,
                             });
                             const mutationSatisfiedByEvidence = this
                               .mutationEvidenceV2Enabled
@@ -23114,8 +23890,23 @@ Return ONLY a JSON object:
                               if (mutationGuardKey) {
                                 successfulMutationGuardKeys.add(mutationGuardKey);
                               }
+                              for (const bridgedToolName of this.getEquivalentRequiredMutationToolsFromEvidence(
+                                stepContract,
+                                evidence,
+                              )) {
+                                if (requiredToolsSucceeded.has(bridgedToolName)) continue;
+                                requiredToolsSucceeded.add(bridgedToolName);
+                                this.emitEvent("log", {
+                                  metric: "required_tool_satisfied_by_equivalent_mutation",
+                                  stepId: step.id,
+                                  tool: bridgedToolName,
+                                  via_tool: content.name,
+                                  reported_path: evidence.reported_path,
+                                  observed_event_type: evidence.observed_event_type,
+                                });
+                              }
                             }
-                          } else if (!this.mutationEvidenceV2Enabled) {
+                          } else if (!this.mutationEvidenceV2Enabled && this.isFileMutationTool(content.name)) {
                             stepSucceededWithFileMutation = true;
                             const syntheticPath = this.extractMutationPathFromInput(
                               content.input,
@@ -23148,7 +23939,7 @@ Return ONLY a JSON object:
                               successfulMutationGuardKeys.add(mutationGuardKey);
                             }
                           }
-                          if (!mutationSignalEmitted) {
+                          if (mutationAttemptObserved && !mutationSignalEmitted) {
                             mutationSignalEmitted = true;
                             this.emitEvent("log", {
                               metric: "file_mutation_attempted",
@@ -23222,112 +24013,147 @@ Return ONLY a JSON object:
 
                       if (result && result.success === false) {
                         const reason = this.getToolFailureReason(result, "unknown error");
-                        hadToolError = true;
-                        toolErrors.add(content.name);
-                        lastToolErrorReason = `Tool ${content.name} failed: ${reason}`;
-                        if (
-                          this.isWorkspaceAliasRecoverableTool(content.name) &&
-                          this.isWorkspaceAliasRecoverableFailure(
-                            String(content.input?.path || ""),
-                            String(result?.error || reason || ""),
-                          )
-                        ) {
-                          aliasRecoverableFailureObserved = true;
-                          aliasRecoverableFailureReason = String(
-                            result?.error || reason || "",
-                          );
-                        } else if (
-                          this.isRecoverableTaskRootPathDriftFailure(
-                            content.name,
-                            String(content.input?.path || ""),
-                            String(result?.error || reason || ""),
-                          )
-                        ) {
-                          aliasRecoverableFailureObserved = true;
-                          aliasRecoverableFailureReason = String(
-                            result?.error || reason || "",
-                          );
-                        }
-                        if (!_isInputDependentError(result.error || reason)) {
-                          allToolErrorsInputDependent = false;
-                        }
-                        if (isExecutionToolCall) {
-                          this.executionToolLastError = reason;
-                        }
-
-                        const pauseReason = getUserActionRequiredPauseReason(
-                          content.name,
-                          result.error || reason,
-                        );
-                        if (pauseReason && !pauseAfterNextAssistantMessage) {
-                          pauseAfterNextAssistantMessage = true;
-                          pauseAfterNextAssistantMessageReason = pauseReason;
-                        }
-
-                        const suppressDisableForPathDrift =
-                          this.shouldSuppressToolDisableForRecoverablePathDrift({
-                            toolName: content.name,
-                            inputPath: String(content.input?.path || ""),
-                            failureReason: String(result?.error || reason || ""),
-                            stepId: step.id,
-                          });
-                        const failureTracking = recordToolFailureOutcomeUtil({
-                          toolName: content.name,
-                          failureReason: result.error || reason,
-                          result,
-                          persistentToolFailures,
-                          recordFailure: (toolName, error) => {
-                            if (suppressDisableForPathDrift) {
-                              this.emitEvent(
-                                "tool_disable_suppressed_recoverable_path_drift",
-                                {
-                                  taskId: this.task?.id || "unknown_task",
-                                  stepId: step.id,
-                                  tool: toolName,
-                                  reason: error,
-                                  pinnedRoot: this.taskPinnedRoot,
-                                  retryBudget: this.getEffectivePathDriftRetryBudget(),
-                                  retryCount: this.getStepScopedPathDriftAttemptCount(
-                                    step.id,
-                                  ),
-                                },
-                              );
-                              return false;
-                            }
-                            return this.toolFailureTracker.recordFailure(toolName, error);
-                          },
-                          isHardToolFailure: (toolName, toolResult, error) =>
-                            this.isHardToolFailure(toolName, toolResult, error),
-                        });
-                        const canonicalFailureToolName =
-                          canonicalizeToolNameUtil(content.name);
-                        this.crossStepToolFailures.set(
-                          canonicalFailureToolName,
-                          (this.crossStepToolFailures.get(canonicalFailureToolName) || 0) +
-                            1,
-                        );
-                        if (failureTracking.shouldDisable) {
-                          const disabledScope =
-                            content.name === "web_search" &&
-                            /tavily|brave|serpapi|google|duckduckgo/i.test(
-                              result.error || reason,
+                        const advisoryFailure = isAdvisoryToolFailureResultUtil(result);
+                        if (advisoryFailure) {
+                          if (
+                            this.isRecoverableVisionToolConfigurationFailure(
+                              content.name,
+                              reason,
                             )
-                              ? "provider"
-                              : "global";
-                          this.emitEvent("tool_error", {
+                          ) {
+                            hadRecoverableVisionFallback = true;
+                          }
+                          this.emitEvent("tool_warning", {
                             ...this.attachToolCorrelationMetadata(
                               {
                                 tool: content.name,
-                                error: result.error || reason,
-                                disabled: true,
-                                disabledScope,
+                                error: reason,
+                                advisory: true,
+                                recoverableFallback: true,
                               },
                               effectiveCorrelation,
                             ),
                           });
-                          hasHardToolFailureAttempt = true;
-                        } else if (failureTracking.isHardFailure) {
-                          hasHardToolFailureAttempt = true;
+                        } else {
+                          hadToolError = true;
+                          toolErrors.add(content.name);
+                          lastToolErrorReason = `Tool ${content.name} failed: ${reason}`;
+                          toolFailureReasons.set(content.name, [
+                            ...(toolFailureReasons.get(content.name) || []),
+                            reason,
+                          ]);
+                          if (
+                            this.isWorkspaceAliasRecoverableTool(content.name) &&
+                            this.isWorkspaceAliasRecoverableFailure(
+                              String(content.input?.path || ""),
+                              String(result?.error || reason || ""),
+                            )
+                          ) {
+                            aliasRecoverableFailureObserved = true;
+                            aliasRecoverableFailureReason = String(
+                              result?.error || reason || "",
+                            );
+                          } else if (
+                            this.isRecoverableTaskRootPathDriftFailure(
+                              content.name,
+                              String(content.input?.path || ""),
+                              String(result?.error || reason || ""),
+                            )
+                          ) {
+                            aliasRecoverableFailureObserved = true;
+                            aliasRecoverableFailureReason = String(
+                              result?.error || reason || "",
+                            );
+                          }
+                          if (!_isInputDependentError(result.error || reason)) {
+                            allToolErrorsInputDependent = false;
+                          }
+                          if (isExecutionToolCall) {
+                            this.executionToolLastError = reason;
+                          }
+
+                          const pauseReason = getUserActionRequiredPauseReason(
+                            content.name,
+                            result.error || reason,
+                          );
+                          if (pauseReason && !pauseAfterNextAssistantMessage) {
+                            pauseAfterNextAssistantMessage = true;
+                            pauseAfterNextAssistantMessageReason = pauseReason;
+                          }
+
+                          const suppressDisableForPathDrift =
+                            this.shouldSuppressToolDisableForRecoverablePathDrift({
+                              toolName: content.name,
+                              inputPath: String(content.input?.path || ""),
+                              failureReason: String(result?.error || reason || ""),
+                              stepId: step.id,
+                            });
+                          const failureTracking = recordToolFailureOutcomeUtil({
+                            toolName: content.name,
+                            failureReason: result.error || reason,
+                            result,
+                            persistentToolFailures,
+                            recordFailure: (toolName, error) => {
+                              if (suppressDisableForPathDrift) {
+                                this.emitEvent(
+                                  "tool_disable_suppressed_recoverable_path_drift",
+                                  {
+                                    taskId: this.task?.id || "unknown_task",
+                                    stepId: step.id,
+                                    tool: toolName,
+                                    reason: error,
+                                    pinnedRoot: this.taskPinnedRoot,
+                                    retryBudget: this.getEffectivePathDriftRetryBudget(),
+                                    retryCount: this.getStepScopedPathDriftAttemptCount(
+                                      step.id,
+                                    ),
+                                  },
+                                );
+                                return false;
+                              }
+                              return this.toolFailureTracker.recordFailure(toolName, error);
+                            },
+                            isHardToolFailure: (toolName, toolResult, error) =>
+                              this.isHardToolFailure(toolName, toolResult, error),
+                          });
+                          const canonicalFailureToolName =
+                            canonicalizeToolNameUtil(content.name);
+                          this.crossStepToolFailures.set(
+                            canonicalFailureToolName,
+                            (this.crossStepToolFailures.get(canonicalFailureToolName) || 0) +
+                              1,
+                          );
+                          if (failureTracking.shouldDisable) {
+                            const disabledScope =
+                              content.name === "web_search" &&
+                              /tavily|brave|serpapi|google|duckduckgo/i.test(
+                                result.error || reason,
+                              )
+                                ? "provider"
+                                : "global";
+                            this.emitEvent("tool_error", {
+                              ...this.attachToolCorrelationMetadata(
+                                {
+                                  tool: content.name,
+                                  error: result.error || reason,
+                                  disabled: true,
+                                  disabledScope,
+                                },
+                                effectiveCorrelation,
+                              ),
+                            });
+                            hasHardToolFailureAttempt = true;
+                          } else if (failureTracking.isHardFailure) {
+                            hasHardToolFailureAttempt = true;
+                          }
+                          if (
+                            this.isRecoverableVisionToolConfigurationFailure(
+                              content.name,
+                              reason,
+                            )
+                          ) {
+                            hadRecoverableVisionFallback = true;
+                          }
                         }
                       } else {
                         if (isExecutionToolCall) {
@@ -23411,6 +24237,9 @@ Return ONLY a JSON object:
             hadToolError = hadToolError || parallelBatchResult.hadToolError;
             if (parallelBatchResult.hadToolSuccessAfterError) {
               hadToolSuccessAfterError = true;
+            }
+            if ((parallelBatchResult as Any).hadRecoverableVisionFallback) {
+              hadRecoverableVisionFallback = true;
             }
             if (parallelBatchResult.hadAnyToolSuccess) {
               hadAnyToolSuccess = true;
@@ -24259,13 +25088,17 @@ Return ONLY a JSON object:
                     }
                   }
                 }
-                if (this.isFileMutationTool(content.name)) {
+                if (this.shouldCollectMutationEvidence(content.name)) {
                   const evidence = this.collectMutationEvidence({
                     toolName: content.name,
                     input: content.input,
                     result,
                     stepStartedAt,
+                    toolStartedAt: toolExecStart,
+                    stepContract,
                   });
+                  const mutationAttemptObserved =
+                    this.isFileMutationTool(content.name) || Boolean(evidence);
                   if (evidence) {
                     mutationEvidence.push(evidence);
                     this.emitEvent("log", {
@@ -24278,6 +25111,7 @@ Return ONLY a JSON object:
                       fs_exists: evidence.fs_exists,
                       mtime_after_step_start: evidence.mtime_after_step_start,
                       size_bytes: evidence.size_bytes,
+                      observed_event_type: evidence.observed_event_type,
                     });
                     const mutationSatisfiedByEvidence = this.mutationEvidenceV2Enabled
                       ? this.mutationEvidenceSatisfiesWriteContract(evidence)
@@ -24315,8 +25149,23 @@ Return ONLY a JSON object:
                       if (mutationGuardKey) {
                         successfulMutationGuardKeys.add(mutationGuardKey);
                       }
+                      for (const bridgedToolName of this.getEquivalentRequiredMutationToolsFromEvidence(
+                        stepContract,
+                        evidence,
+                      )) {
+                        if (requiredToolsSucceeded.has(bridgedToolName)) continue;
+                        requiredToolsSucceeded.add(bridgedToolName);
+                        this.emitEvent("log", {
+                          metric: "required_tool_satisfied_by_equivalent_mutation",
+                          stepId: step.id,
+                          tool: bridgedToolName,
+                          via_tool: content.name,
+                          reported_path: evidence.reported_path,
+                          observed_event_type: evidence.observed_event_type,
+                        });
+                      }
                     }
-                  } else if (!this.mutationEvidenceV2Enabled) {
+                  } else if (!this.mutationEvidenceV2Enabled && this.isFileMutationTool(content.name)) {
                     stepSucceededWithFileMutation = true;
                     const syntheticPath = this.extractMutationPathFromInput(content.input);
                     if (syntheticPath) {
@@ -24344,7 +25193,7 @@ Return ONLY a JSON object:
                       successfulMutationGuardKeys.add(mutationGuardKey);
                     }
                   }
-                  if (!mutationSignalEmitted) {
+                  if (mutationAttemptObserved && !mutationSignalEmitted) {
                     mutationSignalEmitted = true;
                     this.emitEvent("log", {
                       metric: "file_mutation_attempted",
@@ -24413,99 +25262,122 @@ Return ONLY a JSON object:
               // Check if the result indicates an error (some tools return error in result)
               if (result && result.success === false) {
                 const reason = this.getToolFailureReason(result, "unknown error");
-                hadToolError = true;
-                toolErrors.add(content.name);
-                lastToolErrorReason = `Tool ${content.name} failed: ${reason}`;
-                if (
-                  this.isWorkspaceAliasRecoverableTool(content.name) &&
-                  this.isWorkspaceAliasRecoverableFailure(
-                    String(content.input?.path || ""),
-                    String(result?.error || reason || ""),
-                  )
-                ) {
-                  aliasRecoverableFailureObserved = true;
-                  aliasRecoverableFailureReason = String(result?.error || reason || "");
-                } else if (
-                  this.isRecoverableTaskRootPathDriftFailure(
+                const advisoryFailure = isAdvisoryToolFailureResultUtil(result);
+                if (advisoryFailure) {
+                  if (
+                    this.isRecoverableVisionToolConfigurationFailure(
+                      content.name,
+                      reason,
+                    )
+                  ) {
+                    hadRecoverableVisionFallback = true;
+                  }
+                  this.emitEvent("tool_warning", {
+                    ...this.attachToolCorrelationMetadata(
+                      {
+                        tool: content.name,
+                        error: reason,
+                        advisory: true,
+                        recoverableFallback: true,
+                      },
+                      toolCorrelation,
+                    ),
+                  });
+                } else {
+                  hadToolError = true;
+                  toolErrors.add(content.name);
+                  lastToolErrorReason = `Tool ${content.name} failed: ${reason}`;
+                  if (
+                    this.isWorkspaceAliasRecoverableTool(content.name) &&
+                    this.isWorkspaceAliasRecoverableFailure(
+                      String(content.input?.path || ""),
+                      String(result?.error || reason || ""),
+                    )
+                  ) {
+                    aliasRecoverableFailureObserved = true;
+                    aliasRecoverableFailureReason = String(result?.error || reason || "");
+                  } else if (
+                    this.isRecoverableTaskRootPathDriftFailure(
+                      content.name,
+                      String(content.input?.path || ""),
+                      String(result?.error || reason || ""),
+                    )
+                  ) {
+                    aliasRecoverableFailureObserved = true;
+                    aliasRecoverableFailureReason = String(result?.error || reason || "");
+                  }
+                  if (!_isInputDependentError(result.error || reason)) {
+                    allToolErrorsInputDependent = false;
+                  }
+                  if (isExecutionToolCall) {
+                    this.executionToolLastError = reason;
+                  }
+
+                  const pauseReason = getUserActionRequiredPauseReason(
                     content.name,
-                    String(content.input?.path || ""),
-                    String(result?.error || reason || ""),
-                  )
-                ) {
-                  aliasRecoverableFailureObserved = true;
-                  aliasRecoverableFailureReason = String(result?.error || reason || "");
-                }
-                if (!_isInputDependentError(result.error || reason)) {
-                  allToolErrorsInputDependent = false;
-                }
-                if (isExecutionToolCall) {
-                  this.executionToolLastError = reason;
-                }
+                    result.error || reason,
+                  );
+                  if (pauseReason && !pauseAfterNextAssistantMessage) {
+                    pauseAfterNextAssistantMessage = true;
+                    pauseAfterNextAssistantMessageReason = pauseReason;
+                  }
 
-                const pauseReason = getUserActionRequiredPauseReason(
-                  content.name,
-                  result.error || reason,
-                );
-                if (pauseReason && !pauseAfterNextAssistantMessage) {
-                  pauseAfterNextAssistantMessage = true;
-                  pauseAfterNextAssistantMessageReason = pauseReason;
+                  const suppressDisableForPathDrift = this.shouldSuppressToolDisableForRecoverablePathDrift({
+                    toolName: content.name,
+                    inputPath: String(content.input?.path || ""),
+                    failureReason: String(result?.error || reason || ""),
+                    stepId: step.id,
+                  });
+                  const failureTracking = recordToolFailureOutcomeUtil({
+                    toolName: content.name,
+                    failureReason: result.error || reason,
+                    result,
+                    persistentToolFailures,
+                    recordFailure: (toolName, error) => {
+                      if (suppressDisableForPathDrift) {
+                        this.emitEvent("tool_disable_suppressed_recoverable_path_drift", {
+                          taskId: this.task?.id || "unknown_task",
+                          stepId: step.id,
+                          tool: toolName,
+                          reason: error,
+                          pinnedRoot: this.taskPinnedRoot,
+                          retryBudget: this.getEffectivePathDriftRetryBudget(),
+                          retryCount: this.getStepScopedPathDriftAttemptCount(step.id),
+                        });
+                        return false;
+                      }
+                      return this.toolFailureTracker.recordFailure(toolName, error);
+                    },
+                    isHardToolFailure: (toolName, toolResult, error) =>
+                      this.isHardToolFailure(toolName, toolResult, error),
+                  });
+                  const canonicalFailureToolName = canonicalizeToolNameUtil(content.name);
+                  this.crossStepToolFailures.set(
+                    canonicalFailureToolName,
+                    (this.crossStepToolFailures.get(canonicalFailureToolName) || 0) + 1,
+                  );
+                  if (failureTracking.shouldDisable) {
+                    const disabledScope =
+                      content.name === "web_search" &&
+                      /tavily|brave|serpapi|google|duckduckgo/i.test(result.error || reason)
+                        ? "provider"
+                        : "global";
+	                    this.emitEvent("tool_error", {
+	                      ...this.attachToolCorrelationMetadata(
+	                        {
+	                          tool: content.name,
+	                          error: result.error || reason,
+	                          disabled: true,
+	                          disabledScope,
+	                        },
+	                        toolCorrelation,
+	                      ),
+	                    });
+	                    hasHardToolFailureAttempt = true;
+	                  } else if (failureTracking.isHardFailure) {
+	                    hasHardToolFailureAttempt = true;
+	                  }
                 }
-
-                const suppressDisableForPathDrift = this.shouldSuppressToolDisableForRecoverablePathDrift({
-                  toolName: content.name,
-                  inputPath: String(content.input?.path || ""),
-                  failureReason: String(result?.error || reason || ""),
-                  stepId: step.id,
-                });
-                const failureTracking = recordToolFailureOutcomeUtil({
-                  toolName: content.name,
-                  failureReason: result.error || reason,
-                  result,
-                  persistentToolFailures,
-                  recordFailure: (toolName, error) => {
-                    if (suppressDisableForPathDrift) {
-                      this.emitEvent("tool_disable_suppressed_recoverable_path_drift", {
-                        taskId: this.task?.id || "unknown_task",
-                        stepId: step.id,
-                        tool: toolName,
-                        reason: error,
-                        pinnedRoot: this.taskPinnedRoot,
-                        retryBudget: this.getEffectivePathDriftRetryBudget(),
-                        retryCount: this.getStepScopedPathDriftAttemptCount(step.id),
-                      });
-                      return false;
-                    }
-                    return this.toolFailureTracker.recordFailure(toolName, error);
-                  },
-                  isHardToolFailure: (toolName, toolResult, error) =>
-                    this.isHardToolFailure(toolName, toolResult, error),
-                });
-                const canonicalFailureToolName = canonicalizeToolNameUtil(content.name);
-                this.crossStepToolFailures.set(
-                  canonicalFailureToolName,
-                  (this.crossStepToolFailures.get(canonicalFailureToolName) || 0) + 1,
-                );
-                if (failureTracking.shouldDisable) {
-                  const disabledScope =
-                    content.name === "web_search" &&
-                    /tavily|brave|serpapi|google|duckduckgo/i.test(result.error || reason)
-                      ? "provider"
-                      : "global";
-	                  this.emitEvent("tool_error", {
-	                    ...this.attachToolCorrelationMetadata(
-	                      {
-	                        tool: content.name,
-	                        error: result.error || reason,
-	                        disabled: true,
-	                        disabledScope,
-	                      },
-	                      toolCorrelation,
-	                    ),
-	                  });
-	                  hasHardToolFailureAttempt = true;
-	                } else if (failureTracking.isHardFailure) {
-	                  hasHardToolFailureAttempt = true;
-	                }
               } else {
                 if (isExecutionToolCall) {
                   this.executionToolRunObserved = true;
@@ -24542,6 +25414,10 @@ Return ONLY a JSON object:
               hadToolError = true;
               toolErrors.add(content.name);
               lastToolErrorReason = `Tool ${content.name} failed: ${failureMessage}`;
+              toolFailureReasons.set(content.name, [
+                ...(toolFailureReasons.get(content.name) || []),
+                failureMessage,
+              ]);
               if (
                 this.isWorkspaceAliasRecoverableTool(content.name) &&
                 this.isWorkspaceAliasRecoverableFailure(
@@ -24610,6 +25486,14 @@ Return ONLY a JSON object:
               );
               if (failureTracking.shouldDisable || failureTracking.isHardFailure) {
                 hasHardToolFailureAttempt = true;
+              }
+              if (
+                this.isRecoverableVisionToolConfigurationFailure(
+                  content.name,
+                  failureMessage,
+                )
+              ) {
+                hadRecoverableVisionFallback = true;
               }
 
               const disabledScope =
@@ -25237,8 +26121,16 @@ Return ONLY a JSON object:
         const nonCriticalErrorTools = new Set(["web_search", "web_fetch"]);
         const onlyNonCriticalErrors =
           toolErrors.size > 0 && Array.from(toolErrors).every((t) => nonCriticalErrorTools.has(t));
+        const visionFallbackRecovered =
+          hadRecoverableVisionFallback ||
+          this.shouldRecoverAnalysisStepFromVisionFallback({
+            stepContract,
+            successfulToolNames,
+            toolFailureReasons,
+          });
         const recoveredByUsefulPartialProgress =
-          hadAnyToolSuccess && (onlyNonCriticalErrors || allToolErrorsInputDependent);
+          hadAnyToolSuccess &&
+          (onlyNonCriticalErrors || allToolErrorsInputDependent || visionFallbackRecovered);
         if (!recoveredByUsefulPartialProgress) {
           stepFailed = true;
           if (!lastFailureReason) {
@@ -26854,8 +27746,12 @@ Return ONLY a JSON object:
    * Queue a follow-up message to be injected into the currently running execution loop.
    * Caller is responsible for emitting the user_message event if immediate UI feedback is needed.
    */
-  queueFollowUp(message: string, images?: ImageAttachment[]): void {
-    this.getSessionRuntime().queueFollowUp(message, images);
+  queueFollowUp(
+    message: string,
+    images?: ImageAttachment[],
+    quotedAssistantMessage?: QuotedAssistantMessage,
+  ): void {
+    this.getSessionRuntime().queueFollowUp(message, images, quotedAssistantMessage);
     console.log(
       `${this.logTag} Follow-up queued for injection into running execution (queue size: ${this.pendingFollowUps.length})`,
     );
@@ -26904,7 +27800,7 @@ Return ONLY a JSON object:
   /**
    * Drain the first pending follow-up (if any) for injection into the execution loop.
    */
-  private drainPendingFollowUp(): { message: string; images?: ImageAttachment[] } | undefined {
+  private drainPendingFollowUp(): TaskFollowUpInput | undefined {
     return this.getSessionRuntime().drainPendingFollowUp();
   }
 
@@ -26912,7 +27808,7 @@ Return ONLY a JSON object:
    * Drain ALL pending follow-ups. Used by the daemon to re-dispatch orphaned
    * messages after execution completes.
    */
-  drainAllPendingFollowUps(): Array<{ message: string; images?: ImageAttachment[] }> {
+  drainAllPendingFollowUps(): TaskFollowUpInput[] {
     return this.getSessionRuntime().drainAllPendingFollowUps();
   }
 
@@ -26936,6 +27832,10 @@ Return ONLY a JSON object:
     return Boolean(this.task.agentConfig?.providerType || this.task.agentConfig?.modelKey);
   }
 
+  private hasImageAttachments(images?: ImageAttachment[]): boolean {
+    return Array.isArray(images) && images.length > 0;
+  }
+
   private applyResolvedProviderSelection(
     selection: ReturnType<typeof LLMProviderFactory.resolveTaskModelSelection>,
   ): void {
@@ -26953,21 +27853,45 @@ Return ONLY a JSON object:
   private rebuildProviderFailoverSelections(
     primarySelection: ReturnType<typeof LLMProviderFactory.resolveTaskModelSelection>,
     forceProfile?: LlmProfile,
+    opts?: { requiresImageInput?: boolean },
   ): void {
+    this.providerFailoverRequiresImageInput = opts?.requiresImageInput === true;
     this.providerFailoverSelections = LLMProviderFactory.resolveProviderFailoverChain(
       primarySelection,
       this.task.agentConfig,
       {
         forceProfile,
         isVerificationTask: this.isVerificationTaskRoute(),
+        requiresImageInput: this.providerFailoverRequiresImageInput,
       },
     );
     this.providerFailoverIndex = 0;
     this.providerFailoverPreserveUntil = 0;
   }
 
+  private ensureProviderFailoverSelectionsContext(requiresImageInput: boolean): void {
+    if (this.providerFailoverRequiresImageInput === requiresImageInput) {
+      return;
+    }
+
+    this.rebuildProviderFailoverSelections(
+      {
+        providerType: this.provider.type,
+        modelId: this.modelId,
+        modelKey: this.modelKey,
+        llmProfileUsed: this.llmProfileUsed,
+        resolvedModelKey: this.resolvedModelKey,
+        modelSource: "provider_default",
+        warnings: [],
+      },
+      this.llmProfileUsed,
+      { requiresImageInput },
+    );
+  }
+
   private getRetryRouteReason(error: Any): LLMRoutingReason {
     const message = String(error?.message || "").toLowerCase();
+    const errorCode = String(error?.code || error?.cause?.code || "").toLowerCase();
     if (error?.status === 429 || message.includes("rate limit") || message.includes("quota")) {
       return "quota";
     }
@@ -26985,9 +27909,20 @@ Return ONLY a JSON object:
       return "model_capability";
     }
     if (
+      (error?.status === 404 || message.includes("404")) &&
+      message.includes("no endpoints found that support the provided 'tool_choice' value")
+    ) {
+      return "model_capability";
+    }
+    if (
       message.includes("timeout") ||
       message.includes("timed out") ||
       message.includes("network") ||
+      errorCode === "econnreset" ||
+      errorCode === "etimedout" ||
+      errorCode === "enotfound" ||
+      errorCode === "eai_again" ||
+      errorCode === "econnrefused" ||
       message.includes("econnreset") ||
       message.includes("etimedout") ||
       message.includes("enotfound") ||
@@ -27212,16 +28147,24 @@ Return ONLY a JSON object:
   /**
    * Send a follow-up message to continue the conversation
    */
-  async sendMessage(message: string, images?: ImageAttachment[]): Promise<void> {
+  async sendMessage(
+    message: string,
+    images?: ImageAttachment[],
+    quotedAssistantMessage?: QuotedAssistantMessage,
+  ): Promise<void> {
     await this.getLifecycleMutex().runExclusive(async () => {
-      await this.sendMessageUnlocked(message, images);
+      await this.sendMessageUnlocked(message, images, quotedAssistantMessage);
     });
   }
 
-  private async sendMessageUnlocked(message: string, images?: ImageAttachment[]): Promise<void> {
+  private async sendMessageUnlocked(
+    message: string,
+    images?: ImageAttachment[],
+    quotedAssistantMessage?: QuotedAssistantMessage,
+  ): Promise<void> {
     if (this.isAcpxExternalRuntimeTask()) {
       try {
-        await this.sendMessageWithAcpxRuntime(message, images);
+        await this.sendMessageWithAcpxRuntime(message, images, quotedAssistantMessage);
         return;
       } catch (error) {
         if (error instanceof AcpxRuntimeUnavailableError) {
@@ -27240,12 +28183,13 @@ Return ONLY a JSON object:
       }
     }
 
-    await this.sendMessageUnified(message, images);
+    await this.sendMessageUnified(message, images, quotedAssistantMessage);
   }
 
   private async sendMessageUnified(
     message: string,
     images?: ImageAttachment[],
+    quotedAssistantMessage?: QuotedAssistantMessage,
     opts?: { recoveredFromTurnLimit?: boolean },
   ): Promise<void> {
     const recoveredFromTurnLimit = opts?.recoveredFromTurnLimit === true;
@@ -27261,6 +28205,7 @@ Return ONLY a JSON object:
       };
     }
     this.refreshProviderIfSettingsChanged();
+    this.ensureProviderFailoverSelectionsContext(this.hasImageAttachments(images));
     const previousStatus = persistedTask?.status || this.task.status;
     const shouldResumeAfterFollowup = previousStatus === "paused" || this.waitingForUserInput;
     const shouldStartNewCanvasSession = ["completed", "failed", "cancelled"].includes(
@@ -27271,6 +28216,10 @@ Return ONLY a JSON object:
     this.waitingForUserInput = false;
     this.paused = false;
     this.lastUserMessage = message;
+    const followUpConversationMessage = this.buildQuotedAssistantContextMessage(
+      message,
+      quotedAssistantMessage,
+    );
     this.getSessionRuntime().setRecoveryRequestActive(this.isRecoveryIntent(message));
     this.capabilityUpgradeRequested = this.isCapabilityUpgradeIntent(message);
     this.redirectRequested = this.isRedirectIntent(message);
@@ -27319,12 +28268,15 @@ Return ONLY a JSON object:
 
     if (this.preflightShellExecutionCheck()) {
       if (!suppressUserMessageEvent && !recoveredFromTurnLimit) {
-        this.emitEvent("user_message", { message });
+        this.emitEvent("user_message", {
+          message,
+          ...(quotedAssistantMessage ? { quotedAssistantMessage } : {}),
+        });
       }
       if (!recoveredFromTurnLimit) {
         this.appendConversationHistory({
           role: "user",
-          content: await this.buildUserContent(message, images),
+          content: await this.buildUserContent(followUpConversationMessage, images),
         });
       }
       return;
@@ -27344,7 +28296,10 @@ Return ONLY a JSON object:
     this.daemon.updateTaskStatus(this.task.id, "executing");
     this.emitEvent("executing", { message: "Processing follow-up message" });
     if (!suppressUserMessageEvent && !recoveredFromTurnLimit) {
-      this.emitEvent("user_message", { message });
+      this.emitEvent("user_message", {
+        message,
+        ...(quotedAssistantMessage ? { quotedAssistantMessage } : {}),
+      });
     }
 
     if (
@@ -27418,6 +28373,15 @@ Return ONLY a JSON object:
     }
     const effectiveFollowUpExecutionMode = this.getEffectiveExecutionMode();
     const effectiveFollowUpDomain = this.getEffectiveTaskDomain();
+    const adaptiveRecoveryGuidance = await this.buildAdaptiveRecoveryTurnGuidance(message, {
+      includePlaybook: false,
+    });
+    const followUpTurnGuidance = [
+      this.buildFollowUpTurnGuidancePrompt(message, quotedAssistantMessage),
+      adaptiveRecoveryGuidance,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
     const builtPrompt = await this.buildExecutionSystemPrompt({
       taskPrompt: message,
       identityPrompt,
@@ -27429,7 +28393,7 @@ Return ONLY a JSON object:
       executionMode: effectiveFollowUpExecutionMode,
       taskDomain: effectiveFollowUpDomain,
       memoryFeatures: memoryFeatureSettings,
-      turnGuidancePrompt: this.buildFollowUpTurnGuidancePrompt(message),
+      turnGuidancePrompt: followUpTurnGuidance,
     });
     this.systemPrompt = this.setPromptCacheContext({
       surface: "followUps",
@@ -27480,7 +28444,10 @@ Return ONLY a JSON object:
     if (!recoveredFromTurnLimit) {
       this.appendConversationHistory({
         role: "user",
-        content: await this.buildUserContent(messageWithContext, images),
+        content: await this.buildUserContent(
+          this.buildQuotedAssistantContextMessage(messageWithContext, quotedAssistantMessage),
+          images,
+        ),
       });
     }
 
@@ -27562,7 +28529,13 @@ Return ONLY a JSON object:
             while (pendingMsg) {
               console.log(`${this.logTag} Injecting queued follow-up into sendMessage loop`);
               const userUpdate = `USER UPDATE: ${pendingMsg.message}`;
-              const content = await this.buildUserContent(userUpdate, pendingMsg.images);
+              const content = await this.buildUserContent(
+                this.buildQuotedAssistantContextMessage(
+                  userUpdate,
+                  pendingMsg.quotedAssistantMessage,
+                ),
+                pendingMsg.images,
+              );
               // messages === this.conversationHistory here, so push persists automatically
               messages.push({ role: "user" as const, content });
               pendingMsg = this.drainPendingFollowUp();
@@ -28601,73 +29574,89 @@ Return ONLY a JSON object:
 
                         if (result && result.success === false) {
                           const reason = this.getToolFailureReason(result, "unknown error");
-                          if (isExecutionToolCall) {
-                            lastExecutionToolError = reason;
-                            this.executionToolLastError = reason;
-                          }
-                          if (isCanvasWorkflowToolCall) {
-                            lastCanvasToolError = reason;
-                          }
-                          const suppressDisableForPathDrift =
-                            this.shouldSuppressToolDisableForRecoverablePathDrift({
-                              toolName: content.name,
-                              inputPath: String(content.input?.path || ""),
-                              failureReason: reason,
-                              stepId: this.currentStepId || undefined,
-                            });
-                          const failureTracking = recordToolFailureOutcomeUtil({
-                            toolName: content.name,
-                            failureReason: reason,
-                            result,
-                            persistentToolFailures,
-                            recordFailure: (toolName, error) => {
-                              if (suppressDisableForPathDrift) {
-                                this.emitEvent(
-                                  "tool_disable_suppressed_recoverable_path_drift",
-                                  {
-                                    taskId: this.task?.id || "unknown_task",
-                                    stepId: this.currentStepId || undefined,
-                                    tool: toolName,
-                                    reason: error,
-                                    pinnedRoot: this.taskPinnedRoot,
-                                    retryBudget: this.getEffectivePathDriftRetryBudget(),
-                                    retryCount: this.getStepScopedPathDriftAttemptCount(
-                                      this.currentStepId || undefined,
-                                    ),
-                                    followUp: true,
-                                  },
-                                );
-                                return false;
-                              }
-                              return this.toolFailureTracker.recordFailure(toolName, error);
-                            },
-                            isHardToolFailure: (toolName, toolResult, error) =>
-                              this.isHardToolFailure(toolName, toolResult, error),
-                          });
-                          this.crossStepToolFailures.set(
-                            canonicalContentName,
-                            (this.crossStepToolFailures.get(canonicalContentName) || 0) + 1,
-                          );
-                          if (failureTracking.shouldDisable || failureTracking.isHardFailure) {
-                            hasHardToolFailureAttempt = true;
-                          }
-                          if (failureTracking.shouldDisable) {
-                            const disabledScope =
-                              content.name === "web_search" &&
-                              /tavily|brave|serpapi|google|duckduckgo/i.test(reason)
-                                ? "provider"
-                                : "global";
-                            this.emitEvent("tool_error", {
+                          const advisoryFailure = isAdvisoryToolFailureResultUtil(result);
+                          if (advisoryFailure) {
+                            this.emitEvent("tool_warning", {
                               ...this.attachToolCorrelationMetadata(
                                 {
                                   tool: content.name,
                                   error: reason,
-                                  disabled: true,
-                                  disabledScope,
+                                  advisory: true,
+                                  recoverableFallback: true,
+                                  followUp: true,
                                 },
                                 effectiveCorrelation,
                               ),
                             });
+                          } else {
+                            if (isExecutionToolCall) {
+                              lastExecutionToolError = reason;
+                              this.executionToolLastError = reason;
+                            }
+                            if (isCanvasWorkflowToolCall) {
+                              lastCanvasToolError = reason;
+                            }
+                            const suppressDisableForPathDrift =
+                              this.shouldSuppressToolDisableForRecoverablePathDrift({
+                                toolName: content.name,
+                                inputPath: String(content.input?.path || ""),
+                                failureReason: reason,
+                                stepId: this.currentStepId || undefined,
+                              });
+                            const failureTracking = recordToolFailureOutcomeUtil({
+                              toolName: content.name,
+                              failureReason: reason,
+                              result,
+                              persistentToolFailures,
+                              recordFailure: (toolName, error) => {
+                                if (suppressDisableForPathDrift) {
+                                  this.emitEvent(
+                                    "tool_disable_suppressed_recoverable_path_drift",
+                                    {
+                                      taskId: this.task?.id || "unknown_task",
+                                      stepId: this.currentStepId || undefined,
+                                      tool: toolName,
+                                      reason: error,
+                                      pinnedRoot: this.taskPinnedRoot,
+                                      retryBudget: this.getEffectivePathDriftRetryBudget(),
+                                      retryCount: this.getStepScopedPathDriftAttemptCount(
+                                        this.currentStepId || undefined,
+                                      ),
+                                      followUp: true,
+                                    },
+                                  );
+                                  return false;
+                                }
+                                return this.toolFailureTracker.recordFailure(toolName, error);
+                              },
+                              isHardToolFailure: (toolName, toolResult, error) =>
+                                this.isHardToolFailure(toolName, toolResult, error),
+                            });
+                            this.crossStepToolFailures.set(
+                              canonicalContentName,
+                              (this.crossStepToolFailures.get(canonicalContentName) || 0) + 1,
+                            );
+                            if (failureTracking.shouldDisable || failureTracking.isHardFailure) {
+                              hasHardToolFailureAttempt = true;
+                            }
+                            if (failureTracking.shouldDisable) {
+                              const disabledScope =
+                                content.name === "web_search" &&
+                                /tavily|brave|serpapi|google|duckduckgo/i.test(reason)
+                                  ? "provider"
+                                  : "global";
+                              this.emitEvent("tool_error", {
+                                ...this.attachToolCorrelationMetadata(
+                                  {
+                                    tool: content.name,
+                                    error: reason,
+                                    disabled: true,
+                                    disabledScope,
+                                  },
+                                  effectiveCorrelation,
+                                ),
+                              });
+                            }
                           }
                         } else {
                           if (isExecutionToolCall) {
@@ -29325,7 +30314,12 @@ Return ONLY a JSON object:
             continuationCount: this.continuationCount,
             continuationWindow: this.continuationWindow,
           });
-          return await this.sendMessageUnified(message, images, { recoveredFromTurnLimit: true });
+          return await this.sendMessageUnified(
+            message,
+            images,
+            quotedAssistantMessage,
+            { recoveredFromTurnLimit: true },
+          );
         }
 
         const recoveryBlockReason =
