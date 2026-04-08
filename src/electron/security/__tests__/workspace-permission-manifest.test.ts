@@ -88,4 +88,30 @@ describe("workspace-permission-manifest", () => {
     );
     expect(loadWorkspacePermissionManifest(workspacePath).rules).toHaveLength(0);
   });
+
+  it("persists normalized domain rules", () => {
+    const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), "cowork-permissions-"));
+    tempDirs.push(workspacePath);
+
+    appendWorkspacePermissionManifestRule(workspacePath, {
+      source: "workspace_manifest",
+      effect: "allow",
+      scope: {
+        kind: "domain",
+        toolName: "http_request",
+        domain: "API.Example.COM",
+      },
+    });
+
+    const manifest = loadWorkspacePermissionManifest(workspacePath);
+    expect(manifest.rules).toEqual([
+      expect.objectContaining({
+        scope: {
+          kind: "domain",
+          toolName: "http_request",
+          domain: "api.example.com",
+        },
+      }),
+    ]);
+  });
 });
