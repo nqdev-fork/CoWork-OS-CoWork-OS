@@ -30,6 +30,27 @@ export interface CompletionToastDecision {
   pathsToRecord: string[];
 }
 
+export function shouldShowPersistentNeedsUserActionBanner(
+  payload:
+    | {
+        terminalStatus?: string;
+        pendingChecklist?: unknown;
+        verificationMessage?: unknown;
+        verificationOutcome?: unknown;
+      }
+    | null
+    | undefined,
+): boolean {
+  if (payload?.terminalStatus !== "needs_user_action") return false;
+  if (Array.isArray(payload.pendingChecklist) && payload.pendingChecklist.some((item) => typeof item === "string")) {
+    return true;
+  }
+  if (typeof payload.verificationMessage === "string" && payload.verificationMessage.trim().length > 0) {
+    return true;
+  }
+  return payload.verificationOutcome === "pending_user_action";
+}
+
 /**
  * Decide whether to show the completion toast.
  * Show on first completion, or when new files are created in a follow-up.
