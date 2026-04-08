@@ -2,6 +2,7 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { CuratedMemoryService } from "../CuratedMemoryService";
 import { DailyLogService } from "../DailyLogService";
 import { DailyLogSummarizer } from "../DailyLogSummarizer";
 import { LayeredMemoryIndexService } from "../LayeredMemoryIndexService";
@@ -45,7 +46,29 @@ describe("LayeredMemoryIndexService", () => {
         path: "docs/agent.md",
       },
     ] as Any);
-    vi.spyOn(MemoryService, "getContextForInjection").mockReturnValue("<memory_context>hello</memory_context>");
+    vi.spyOn(CuratedMemoryService, "getPromptEntries").mockReturnValue([
+      {
+        id: "curated-1",
+        workspaceId: "workspace-1",
+        target: "workspace",
+        kind: "workflow_rule",
+        content: "Keep prompts deterministic.",
+        confidence: 0.9,
+        status: "active",
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      },
+    ] as Any);
+    vi.spyOn(MemoryService, "searchForPromptRecall").mockReturnValue([
+      {
+        id: "mem-2",
+        snippet: "Archive recall still exists.",
+        type: "summary",
+        relevanceScore: 0.7,
+        createdAt: Date.now(),
+        source: "db",
+      },
+    ] as Any);
     vi.spyOn(DailyLogService, "listRecentDays").mockResolvedValue(["2026-03-31"]);
     vi.spyOn(DailyLogSummarizer, "countRecentSummaries").mockReturnValue(2);
 
@@ -62,5 +85,29 @@ describe("LayeredMemoryIndexService", () => {
 
     const topicFile = await fs.readFile(snapshot.topics[0]!.path, "utf8");
     expect(topicFile).toContain(snapshot.topics[0]!.title);
+  });
+
+  it("reads existing topic files without rebuilding them", async () => {
+    const workspacePath = await createWorkspace();
+    const topicsDir = path.join(workspacePath, ".cowork", "memory", "topics");
+    await fs.mkdir(topicsDir, { recursive: true });
+    const topicPath = path.join(topicsDir, "prompts.md");
+    await fs.writeFile(
+      topicPath,
+      "# Prompt Patterns\n\nsource: memory\n\ntopicId: mem-1\n\nKeep prompts deterministic.\n",
+      "utf8",
+    );
+
+    const refreshSpy = vi.spyOn(LayeredMemoryIndexService, "refreshIndex");
+    const topics = await LayeredMemoryIndexService.loadRelevantTopicSnippets({
+      workspaceId: "workspace-1",
+      workspacePath,
+      query: "deterministic prompts",
+      limit: 3,
+    });
+
+    expect(refreshSpy).not.toHaveBeenCalled();
+    expect(topics).toHaveLength(1);
+    expect(topics[0]?.title).toBe("Prompt Patterns");
   });
 });
