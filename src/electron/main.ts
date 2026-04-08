@@ -116,6 +116,7 @@ import {
   isManagedScheduledWorkspacePath,
 } from "./cron/workspace-context";
 import { MemoryService } from "./memory/MemoryService";
+import { CuratedMemoryService } from "./memory/CuratedMemoryService";
 import { KnowledgeGraphService } from "./knowledge-graph/KnowledgeGraphService";
 import { MailboxAutomationHub } from "./mailbox/MailboxAutomationHub";
 import { MailboxAutomationRegistry } from "./mailbox/MailboxAutomationRegistry";
@@ -198,6 +199,7 @@ import { SubconsciousLoopService } from "./subconscious/SubconsciousLoopService"
 import { createLogger } from "./utils/logger";
 import { registerMediaProtocol, registerMediaScheme } from "./media";
 import { rememberApprovedImportFiles } from "./security/file-import-approvals";
+import { healMovedDesktopWorkspacePaths } from "./utils/workspace-path-healer";
 
 let mainWindow: BrowserWindow | null = null;
 let dbManager: DatabaseManager;
@@ -864,6 +866,26 @@ if (!gotTheLock) {
     // This MUST be done before provider factories so they can migrate legacy settings
     new SecureSettingsRepository(dbManager.getDatabase());
     logger.info("SecureSettingsRepository initialized");
+    {
+      const workspaceRepo = new WorkspaceRepository(dbManager.getDatabase());
+      const repairs = healMovedDesktopWorkspacePaths(
+        workspaceRepo.findAll(),
+        (workspaceId, nextPath) => workspaceRepo.updatePath(workspaceId, nextPath),
+        {
+          log: (message, meta) => logger.info(message, meta),
+        },
+      );
+      if (repairs.length) {
+        logger.info("Healed moved workspace paths.", {
+          repairedCount: repairs.length,
+          repairs: repairs.map((item) => ({
+            workspaceId: item.workspaceId,
+            oldPath: item.oldPath,
+            newPath: item.newPath,
+          })),
+        });
+      }
+    }
     normalizeTwinCoreBoundary();
     ensureCoreAutomationProfiles();
     try {
@@ -991,6 +1013,7 @@ if (!gotTheLock) {
     // can immediately resume queued tasks, and their early timeline events capture to memory.
     try {
       MemoryService.initialize(dbManager);
+      CuratedMemoryService.initialize(dbManager);
       logger.info("Memory Service initialized");
     } catch (error) {
       logger.error("Failed to initialize Memory Service:", error);
@@ -3075,12 +3098,134 @@ if (!gotTheLock) {
     return BrowserWindow.getFocusedWindow()?.isMaximized() ?? false;
   });
 
+  const resolveDialogDefaultPath = async (candidate?: string | null) => {
+    const requested = typeof candidate === "string" ? candidate.trim() : "";
+    const tempWorkspaceRoot = path.resolve(os.tmpdir(), TEMP_WORKSPACE_ROOT_DIR_NAME);
+    const homeDir = path.resolve(app.getPath("home"));
+    const blockedRoots = new Set(
+      [
+        homeDir,
+        path.join(homeDir, "Desktop"),
+        path.join(homeDir, "Downloads"),
+        path.join(homeDir, "Documents"),
+        path.join(homeDir, "Library", "Mobile Documents", "com~apple~CloudDocs", "Documents"),
+      ].map((entry) => path.resolve(entry)),
+    );
+
+    const isBlockedDialogRoot = (candidatePath: string) => {
+      const normalizedPath = path.resolve(candidatePath);
+      if (
+        normalizedPath === tempWorkspaceRoot ||
+        normalizedPath.startsWith(`${tempWorkspaceRoot}${path.sep}`)
+      ) {
+        return "temp-workspace";
+      }
+      if (blockedRoots.has(normalizedPath)) {
+        return "broad-root";
+      }
+      if (isManagedScheduledWorkspacePath(normalizedPath, getUserDataDir())) {
+        return "managed-scheduled-workspace";
+      }
+      return null;
+    };
+
+    const recentWorkspaceCandidates = (() => {
+      try {
+        return new WorkspaceRepository(dbManager.getDatabase())
+          .findAll()
+          .filter((workspace) => {
+            if (!workspace?.path || workspace.isTemp || isTempWorkspaceId(workspace.id)) {
+              return false;
+            }
+            return isBlockedDialogRoot(workspace.path) === null;
+          })
+          .map((workspace) => workspace.path);
+      } catch (error) {
+        logger.warn("[Dialog] Failed to load recent workspace fallback paths:", error);
+        return [] as string[];
+      }
+    })();
+
+    const fallbacks = [requested, ...recentWorkspaceCandidates].filter(
+      (value, index, values): value is string =>
+        typeof value === "string" && value.length > 0 && values.indexOf(value) === index,
+    );
+
+    for (const fallbackPath of fallbacks) {
+      try {
+        const normalizedPath = path.resolve(fallbackPath);
+        const blockReason = isBlockedDialogRoot(normalizedPath);
+        if (blockReason) {
+          logger.info("[Dialog] Ignoring blocked defaultPath", {
+            reason: blockReason,
+            requestedPath: fallbackPath,
+          });
+          continue;
+        }
+
+        const stats = await fs.stat(normalizedPath);
+        if (stats.isDirectory()) {
+          return normalizedPath;
+        }
+        if (stats.isFile()) {
+          return path.dirname(normalizedPath);
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    return undefined;
+  };
+
+  const showOpenDialogWithLogging = async (
+    dialogKind: "folder" | "files",
+    options: Electron.OpenDialogOptions,
+  ) => {
+    const startedAt = Date.now();
+    const slowLogTimer = setTimeout(() => {
+      logger.warn(`[Dialog:${dialogKind}] showOpenDialog still pending`, {
+        defaultPath: options.defaultPath ?? null,
+        elapsedMs: Date.now() - startedAt,
+        title: options.title ?? null,
+      });
+    }, 5000);
+    slowLogTimer.unref();
+
+    logger.info(`[Dialog:${dialogKind}] showOpenDialog requested`, {
+      defaultPath: options.defaultPath ?? null,
+      parentWindow: false,
+      properties: options.properties ?? [],
+      title: options.title ?? null,
+    });
+
+    try {
+      const result = await dialog.showOpenDialog(options);
+      clearTimeout(slowLogTimer);
+      logger.info(`[Dialog:${dialogKind}] showOpenDialog resolved`, {
+        canceled: result.canceled,
+        durationMs: Date.now() - startedAt,
+        selectionCount: result.filePaths.length,
+      });
+      return result;
+    } catch (error) {
+      clearTimeout(slowLogTimer);
+      logger.error(
+        `[Dialog:${dialogKind}] showOpenDialog failed after ${Date.now() - startedAt}ms:`,
+        error,
+      );
+      throw error;
+    }
+  };
+
   // Handle folder selection
-  ipcMain.handle(IPC_CHANNELS.DIALOG_SELECT_FOLDER, async () => {
-    const result = await dialog.showOpenDialog({
+  ipcMain.handle(IPC_CHANNELS.DIALOG_SELECT_FOLDER, async (_, defaultPath?: string | null) => {
+    const resolvedDefaultPath = await resolveDialogDefaultPath(defaultPath);
+    const result = await showOpenDialogWithLogging("folder", {
       // Allow creating folders directly from the native picker when supported.
       properties: ["openDirectory", "createDirectory"],
       title: "Select Workspace Folder",
+      defaultPath: resolvedDefaultPath,
     });
 
     if (!result.canceled && result.filePaths.length > 0) {
@@ -3090,10 +3235,12 @@ if (!gotTheLock) {
   });
 
   // Handle file selection (attachments)
-  ipcMain.handle(IPC_CHANNELS.DIALOG_SELECT_FILES, async () => {
-    const result = await dialog.showOpenDialog({
+  ipcMain.handle(IPC_CHANNELS.DIALOG_SELECT_FILES, async (_, defaultPath?: string | null) => {
+    const resolvedDefaultPath = await resolveDialogDefaultPath(defaultPath);
+    const result = await showOpenDialogWithLogging("files", {
       properties: ["openFile", "multiSelections"],
       title: "Select Files to Upload",
+      defaultPath: resolvedDefaultPath,
     });
 
     if (result.canceled || result.filePaths.length === 0) {
