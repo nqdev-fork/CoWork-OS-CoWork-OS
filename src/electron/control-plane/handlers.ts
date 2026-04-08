@@ -1293,8 +1293,8 @@ async function routeLocalDeviceProxyRequest(method: string, params?: unknown): P
       return { ok: true };
     }
     case Methods.TASK_SEND_MESSAGE: {
-      const { taskId, message, images } = sanitizeTaskMessageParams(params);
-      await controlPlaneDeps.agentDaemon.sendMessage(taskId, message, images);
+      const { taskId, message, images, quotedAssistantMessage } = sanitizeTaskMessageParams(params);
+      await controlPlaneDeps.agentDaemon.sendMessage(taskId, message, images, quotedAssistantMessage);
       return { ok: true };
     }
     case Methods.APPROVAL_LIST: {
@@ -2572,8 +2572,8 @@ function registerTaskAndWorkspaceMethods(
 
   server.registerMethod(Methods.TASK_SEND_MESSAGE, async (client, params) => {
     requireScope(client, "admin");
-    const { taskId, message, images } = sanitizeTaskMessageParams(params);
-    await agentDaemon.sendMessage(taskId, message, images);
+    const { taskId, message, images, quotedAssistantMessage } = sanitizeTaskMessageParams(params);
+    await agentDaemon.sendMessage(taskId, message, images, quotedAssistantMessage);
     return { ok: true };
   });
 
