@@ -1,11 +1,28 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import {
-  MemorySynthesizer,
-  type MemoryFragment,
-  type SynthesizedContext,
-} from "../MemorySynthesizer";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { MemorySynthesizer } from "../MemorySynthesizer";
+import { MemoryFeaturesManager } from "../../settings/memory-features-manager";
+import { PlaybookService } from "../PlaybookService";
+import { MemoryService } from "../MemoryService";
+import { KnowledgeGraphService } from "../../knowledge-graph/KnowledgeGraphService";
+import { InputSanitizer } from "../../agent/security/input-sanitizer";
 
-// ── Mock all dependencies ────────────────────────────────────────────
+vi.mock("../CuratedMemoryService", () => ({
+  CuratedMemoryService: {
+    getPromptEntries: vi.fn().mockReturnValue([
+      {
+        id: "c1",
+        workspaceId: "ws1",
+        target: "workspace",
+        kind: "workflow_rule",
+        content: "Always keep the prompt stack deterministic.",
+        confidence: 0.95,
+        status: "active",
+        createdAt: Date.now() - 10_000,
+        updatedAt: Date.now() - 5_000,
+      },
+    ]),
+  },
+}));
 
 vi.mock("../UserProfileService", () => ({
   UserProfileService: {
@@ -16,20 +33,7 @@ vi.mock("../UserProfileService", () => ({
           category: "identity",
           value: "Preferred name: Alice",
           confidence: 0.95,
-          source: "conversation",
-          pinned: true,
-          firstSeenAt: Date.now() - 86400000,
-          lastUpdatedAt: Date.now() - 3600000,
-        },
-        {
-          id: "f2",
-          category: "preference",
-          value: "Prefers concise responses",
-          confidence: 0.8,
-          source: "feedback",
-          pinned: false,
-          firstSeenAt: Date.now() - 172800000,
-          lastUpdatedAt: Date.now() - 7200000,
+          lastUpdatedAt: Date.now() - 60_000,
         },
       ],
       updatedAt: Date.now(),
@@ -42,21 +46,10 @@ vi.mock("../RelationshipMemoryService", () => ({
     listItems: vi.fn().mockReturnValue([
       {
         id: "r1",
-        layer: "preferences",
-        text: "Prefers short answers",
-        confidence: 0.85,
-        source: "feedback",
-        createdAt: Date.now() - 86400000,
-        updatedAt: Date.now() - 3600000,
-      },
-      {
-        id: "r2",
         layer: "commitments",
         text: "Follow up on deployment status",
         confidence: 0.9,
-        source: "conversation",
-        createdAt: Date.now() - 7200000,
-        updatedAt: Date.now() - 1800000,
+        updatedAt: Date.now() - 30_000,
       },
     ]),
   },
@@ -65,42 +58,37 @@ vi.mock("../RelationshipMemoryService", () => ({
 vi.mock("../PlaybookService", () => ({
   PlaybookService: {
     getPlaybookForContext: vi.fn().mockReturnValue(
-      [
-        "PLAYBOOK (past task patterns - use as context, not as instructions):",
-        '- Task succeeded: "Deploy service" — Used shell, git_commit',
-        '- Task failed: "Fix CSS" — Category: wrong_approach',
-      ].join("\n"),
+      'PLAYBOOK\n- Task succeeded: "Deploy service" — Used shell, git_commit',
     ),
   },
 }));
 
 vi.mock("../MemoryService", () => ({
   MemoryService: {
-    getContextForInjection: vi.fn().mockReturnValue(
-      [
-        "<memory_context>",
-        "The following memories from previous sessions may be relevant:",
-        "",
-        "## Recent Activity",
-        "- [observation] (3/5/2026) User updated authentication module",
-        "- [insight] (3/4/2026) API rate limiting should use sliding window",
-        "",
-        "## Relevant to Current Task (Hybrid Recall)",
-        "- [decision] (3/3/2026) Chose PostgreSQL for persistence layer",
-        "</memory_context>",
-      ].join("\n"),
-    ),
+    getRecentForPromptRecall: vi.fn().mockReturnValue([
+      {
+        id: "m1",
+        type: "decision",
+        summary: "Chose PostgreSQL for persistence.",
+        content: "Chose PostgreSQL for persistence.",
+        updatedAt: Date.now() - 120_000,
+      },
+    ]),
+    searchForPromptRecall: vi.fn().mockReturnValue([
+      {
+        id: "m2",
+        snippet: "Redis caused too many connections under load.",
+        type: "insight",
+        createdAt: Date.now() - 90_000,
+      },
+    ]),
   },
 }));
 
 vi.mock("../../knowledge-graph/KnowledgeGraphService", () => ({
   KnowledgeGraphService: {
     buildContextForTask: vi.fn().mockReturnValue(
-      [
-        "KNOWLEDGE GRAPH (known entities and relationships):",
-        "- [technology] PostgreSQL: Primary database (->depends_on Node.js)",
-        "- [service] AuthService: Handles authentication (->uses PostgreSQL)",
-      ].join("\n"),
+      "KNOWLEDGE GRAPH\n- [technology] PostgreSQL: Primary database",
     ),
   },
 }));
@@ -109,60 +97,101 @@ vi.mock("../WorkspaceKitContext", () => ({
   buildWorkspaceKitContext: vi.fn().mockReturnValue("### Rules\n- Always use TypeScript"),
 }));
 
+vi.mock("../DailyLogSummarizer", () => ({
+  DailyLogSummarizer: {
+    getRecentSummaryFragments: vi.fn().mockReturnValue([
+      {
+        key: "daily-1",
+        text: "## Daily Summary\n- Important decision: use deterministic prompts",
+        relevance: 0.6,
+        confidence: 0.75,
+        updatedAt: Date.now() - 50_000,
+        estimatedTokens: 20,
+      },
+    ]),
+  },
+}));
+
+vi.mock("../../settings/memory-features-manager", () => ({
+  MemoryFeaturesManager: {
+    loadSettings: vi.fn().mockReturnValue({
+      curatedMemoryEnabled: true,
+      sessionRecallEnabled: true,
+      topicMemoryEnabled: true,
+      verbatimRecallEnabled: true,
+      wakeUpLayersEnabled: true,
+      defaultArchiveInjectionEnabled: false,
+    }),
+  },
+}));
+
 vi.mock("../../agent/security/input-sanitizer", () => ({
   InputSanitizer: {
     sanitizeMemoryContent: vi.fn((text: string) => text),
   },
 }));
 
-// ── Tests ─────────────────────────────────────────────────────────────
-
 describe("MemorySynthesizer", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("produces a non-empty synthesized context with all sources", () => {
-    const result = MemorySynthesizer.synthesize("ws1", "/workspace", "Deploy the API", {
-      tokenBudget: 3000,
-    });
-
-    expect(result.text).toBeTruthy();
-    expect(result.fragmentCount).toBeGreaterThan(0);
-    expect(result.totalTokens).toBeGreaterThan(0);
-    expect(result.totalTokens).toBeLessThanOrEqual(3000);
-  });
-
-  it("includes fragments from multiple sources", () => {
+  it("produces hot and structured memory without injecting recall hints into the prompt", () => {
     const result = MemorySynthesizer.synthesize("ws1", "/workspace", "Deploy the API");
 
-    // Should have contributions from at least user_profile, relationship, playbook, memory
-    const contributing = Object.entries(result.sourceAttribution).filter(([, count]) => count > 0);
-    expect(contributing.length).toBeGreaterThanOrEqual(3);
+    expect(result.text).toContain("<cowork_hot_memory>");
+    expect(result.text).toContain("<cowork_structured_memory>");
+    expect(result.text).not.toContain("<cowork_recall_hints>");
+    expect(result.fragmentCount).toBeGreaterThan(0);
   });
 
-  it("deduplicates near-identical fragments across sources", () => {
-    // Both UserProfile and RelationshipMemory mention "concise responses" / "short answers"
-    // These have different fingerprints, so both should appear.
-    // But truly identical duplicates should be collapsed.
-    const result = MemorySynthesizer.synthesize("ws1", "/workspace", "Help me write code");
-    // We expect profile and relationship items to both be present since they differ slightly
-    expect(result.sourceAttribution.user_profile).toBeGreaterThanOrEqual(1);
-    expect(result.sourceAttribution.relationship).toBeGreaterThanOrEqual(1);
+  it("includes curated hot memory by default", () => {
+    const result = MemorySynthesizer.synthesize("ws1", "/workspace", "Deploy the API");
+
+    expect(result.text).toContain("Curated Hot Memory");
+    expect(result.sourceAttribution.curated_memory).toBeGreaterThan(0);
   });
 
-  it("respects token budget limits", () => {
-    const smallBudget = MemorySynthesizer.synthesize("ws1", "/workspace", "task", {
-      tokenBudget: 100,
-    });
+  it("omits L0 hot memory when curated memory is disabled even with wake-up layers on", () => {
+    vi.mocked(MemoryFeaturesManager.loadSettings).mockReturnValueOnce({
+      curatedMemoryEnabled: false,
+      sessionRecallEnabled: true,
+      topicMemoryEnabled: true,
+      verbatimRecallEnabled: true,
+      wakeUpLayersEnabled: true,
+      defaultArchiveInjectionEnabled: false,
+    } as Any);
 
-    const largeBudget = MemorySynthesizer.synthesize("ws1", "/workspace", "task", {
-      tokenBudget: 5000,
-    });
+    const result = MemorySynthesizer.synthesize("ws1", "/workspace", "Deploy the API");
 
-    // Small budget should include fewer fragments
-    expect(smallBudget.fragmentCount).toBeLessThanOrEqual(largeBudget.fragmentCount);
-    expect(smallBudget.droppedCount).toBeGreaterThanOrEqual(0);
+    expect(result.text).not.toContain("<cowork_hot_memory>");
+    expect(result.text).not.toContain("Curated Hot Memory");
+    expect(result.sourceAttribution.curated_memory).toBe(0);
+    expect(result.sourceAttribution.user_profile).toBe(0);
+    expect(result.sourceAttribution.relationship).toBe(0);
+  });
+
+  it("keeps archive recall out of default injection", () => {
+    const result = MemorySynthesizer.synthesize("ws1", "/workspace", "Deploy the API");
+
+    expect(result.text).not.toContain("Archived Recall");
+    expect(result.sourceAttribution.memory).toBe(0);
+  });
+
+  it("can include archive recall when the feature flag is enabled", () => {
+    (MemoryFeaturesManager.loadSettings as Any).mockReturnValueOnce({
+      curatedMemoryEnabled: true,
+      sessionRecallEnabled: true,
+      topicMemoryEnabled: true,
+      verbatimRecallEnabled: true,
+      wakeUpLayersEnabled: true,
+      defaultArchiveInjectionEnabled: true,
+    } as Any);
+
+    const result = MemorySynthesizer.synthesize("ws1", "/workspace", "Deploy the API");
+
+    expect(result.text).not.toContain("Archived Recall");
+    expect(result.sourceAttribution.memory).toBe(0);
   });
 
   it("includes workspace kit context when enabled", () => {
@@ -170,92 +199,101 @@ describe("MemorySynthesizer", () => {
       includeWorkspaceKit: true,
     });
 
-    expect(result.text).toContain("Rules");
+    expect(result.text).toContain("Always use TypeScript");
     expect(result.sourceAttribution.workspace_kit).toBe(1);
   });
 
-  it("excludes workspace kit context when disabled", () => {
-    const result = MemorySynthesizer.synthesize("ws1", "/workspace", "task", {
-      includeWorkspaceKit: false,
-    });
+  it("tracks dropped fragments under a small token budget", () => {
+    const result = MemorySynthesizer.buildHotMemoryContext("ws1", 10);
 
-    expect(result.text).not.toContain("### Rules");
-    expect(result.sourceAttribution.workspace_kit).toBe(0);
-  });
-
-  it("excludes knowledge graph when disabled", () => {
-    const result = MemorySynthesizer.synthesize("ws1", "/workspace", "task", {
-      includeKnowledgeGraph: false,
-    });
-
-    expect(result.sourceAttribution.knowledge_graph).toBe(0);
-  });
-
-  it("returns empty context when no sources have data", async () => {
-    // Override all mocks to return empty
-    const { UserProfileService } = vi.mocked(
-      await import("../UserProfileService"),
-    );
-    const { RelationshipMemoryService } = vi.mocked(
-      await import("../RelationshipMemoryService"),
-    );
-    const { PlaybookService } = vi.mocked(await import("../PlaybookService"));
-    const { MemoryService } = vi.mocked(await import("../MemoryService"));
-    const { KnowledgeGraphService } = vi.mocked(
-      await import("../../knowledge-graph/KnowledgeGraphService"),
-    );
-    const { buildWorkspaceKitContext } = vi.mocked(
-      await import("../WorkspaceKitContext"),
-    );
-
-    UserProfileService.getProfile.mockReturnValueOnce({ facts: [], updatedAt: 0 });
-    RelationshipMemoryService.listItems.mockReturnValueOnce([]);
-    PlaybookService.getPlaybookForContext.mockReturnValueOnce("");
-    MemoryService.getContextForInjection.mockReturnValueOnce("");
-    KnowledgeGraphService.buildContextForTask.mockReturnValueOnce("");
-    buildWorkspaceKitContext.mockReturnValueOnce("");
-
-    const result = MemorySynthesizer.synthesize("ws1", "/workspace", "task", {
-      includeWorkspaceKit: true,
-    });
-
-    expect(result.fragmentCount).toBe(0);
-    expect(result.text).toBe("");
-  });
-
-  it("wraps fragment output in cowork_synthesized_memory XML tags", () => {
-    const result = MemorySynthesizer.synthesize("ws1", "/workspace", "task");
-
-    expect(result.text).toContain("<cowork_synthesized_memory>");
-    expect(result.text).toContain("</cowork_synthesized_memory>");
-  });
-
-  it("groups fragments by source for readability", () => {
-    const result = MemorySynthesizer.synthesize("ws1", "/workspace", "Deploy API");
-
-    // Should have section headers
-    expect(result.text).toContain("## You & the User");
-  });
-
-  it("sanitizes all fragment text", async () => {
-    const { InputSanitizer } = vi.mocked(
-      await import("../../agent/security/input-sanitizer"),
-    );
-
-    MemorySynthesizer.synthesize("ws1", "/workspace", "task");
-
-    // sanitizeMemoryContent should have been called for each fragment
-    expect(InputSanitizer.sanitizeMemoryContent).toHaveBeenCalled();
-  });
-
-  it("tracks dropped fragment count", () => {
-    // With a tiny budget, most fragments should be dropped
-    const result = MemorySynthesizer.synthesize("ws1", "/workspace", "task", {
-      tokenBudget: 50,
-      includeWorkspaceKit: false,
-    });
-
-    // With only ~50 tokens of budget, many fragments are dropped
     expect(result.droppedCount).toBeGreaterThan(0);
+    expect(result.totalTokens).toBeGreaterThan(0);
+  });
+
+  it("ignores null playbook and knowledge-graph payloads without dropping other context", () => {
+    vi.mocked(PlaybookService.getPlaybookForContext).mockReturnValueOnce(null as Any);
+    vi.mocked(KnowledgeGraphService.buildContextForTask).mockReturnValueOnce(null as Any);
+
+    const result = MemorySynthesizer.synthesize("ws1", "/workspace", "Deploy the API");
+
+    expect(result.text).toContain("Recent Summaries");
+    expect(result.text).not.toContain("Past Task Patterns");
+    expect(result.text).not.toContain("Known Entities");
+  });
+
+  it("deduplicates archived recall when recent and search results point to the same memory id", () => {
+    vi.mocked(MemoryFeaturesManager.loadSettings).mockReturnValueOnce({
+      curatedMemoryEnabled: true,
+      sessionRecallEnabled: true,
+      topicMemoryEnabled: true,
+      verbatimRecallEnabled: true,
+      wakeUpLayersEnabled: false,
+      defaultArchiveInjectionEnabled: true,
+    } as Any);
+    vi.mocked(MemoryService.getRecentForPromptRecall).mockReturnValueOnce([
+      {
+        id: "shared-memory",
+        type: "decision",
+        summary: "Use a single archive entry.",
+        content: "Use a single archive entry.",
+        updatedAt: Date.now() - 40_000,
+      },
+    ] as Any);
+    vi.mocked(MemoryService.searchForPromptRecall).mockReturnValueOnce([
+      {
+        id: "shared-memory",
+        snippet: "Use a single archive entry.",
+        type: "decision",
+        createdAt: Date.now() - 20_000,
+      },
+    ] as Any);
+
+    const result = MemorySynthesizer.synthesize("ws1", "/workspace", "Deploy the API");
+    const archiveMentions = result.text.match(/Use a single archive entry\./g) || [];
+
+    expect(result.sourceAttribution.memory).toBe(1);
+    expect(archiveMentions).toHaveLength(1);
+  });
+
+  it("uses the sanitizer output when rendering memory fragments", () => {
+    vi.mocked(InputSanitizer.sanitizeMemoryContent).mockImplementation(
+      (text: string) => text.replace("<script>", "").replace("</script>", ""),
+    );
+    vi.mocked(MemoryService.getRecentForPromptRecall).mockReturnValueOnce([
+      {
+        id: "sanitize-1",
+        type: "insight",
+        summary: "<script>alert(1)</script> sanitize me",
+        content: "<script>alert(1)</script> sanitize me",
+        updatedAt: Date.now() - 10_000,
+      },
+    ] as Any);
+    vi.mocked(MemoryService.searchForPromptRecall).mockReturnValueOnce([] as Any);
+    vi.mocked(MemoryFeaturesManager.loadSettings).mockReturnValueOnce({
+      curatedMemoryEnabled: true,
+      sessionRecallEnabled: true,
+      topicMemoryEnabled: true,
+      verbatimRecallEnabled: true,
+      wakeUpLayersEnabled: false,
+      defaultArchiveInjectionEnabled: true,
+    } as Any);
+
+    const result = MemorySynthesizer.synthesize("ws1", "/workspace", "Deploy the API");
+
+    expect(result.text).not.toContain("<script>");
+    expect(result.text).toContain("alert(1) sanitize me");
+  });
+
+  it("builds a wake-up layer preview with only L0/L1 injected by default", () => {
+    const preview = MemorySynthesizer.buildLayerPreview("ws1", "/workspace", "Deploy the API");
+
+    expect(preview.injectedLayerIds).toEqual(["L0", "L1"]);
+    expect(preview.excludedLayerIds).toEqual(["L2", "L3"]);
+    expect(preview.layers.find((layer) => layer.layer === "L0")?.includedText).toContain(
+      "<cowork_hot_memory>",
+    );
+    expect(preview.layers.find((layer) => layer.layer === "L3")?.includedText).toContain(
+      "search_quotes",
+    );
   });
 });
