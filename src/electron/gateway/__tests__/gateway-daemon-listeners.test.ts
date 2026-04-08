@@ -78,6 +78,7 @@ describe("ChannelGateway daemon listeners", () => {
     const router = (gateway as Any).router;
     router.sendTaskUpdate = vi.fn();
     router.handleTaskCompletion = vi.fn();
+    router.isPendingTaskTextOnlyChannel = vi.fn().mockReturnValue(false);
 
     emitTimeline("timeline_step_updated", "t1", "assistant_message", {
       message: "Some streamed content that is not the final summary.",
@@ -96,6 +97,7 @@ describe("ChannelGateway daemon listeners", () => {
     const router = (gateway as Any).router;
     router.sendTaskUpdate = vi.fn();
     router.handleTaskCompletion = vi.fn();
+    router.isPendingTaskTextOnlyChannel = vi.fn().mockReturnValue(false);
 
     emitTimeline("timeline_step_finished", "t1", "task_completed", {
       resultSummary: "Final summary from daemon.",
@@ -122,16 +124,17 @@ describe("ChannelGateway daemon listeners", () => {
     );
   });
 
-  it("falls back to last streamed assistant message when resultSummary is missing", () => {
+  it("falls back to the latest streamed assistant message when resultSummary is missing", () => {
     const db = createMockDb();
     const gateway = new ChannelGateway(db, { agentDaemon: agentDaemon as Any });
 
     const router = (gateway as Any).router;
     router.sendTaskUpdate = vi.fn();
     router.handleTaskCompletion = vi.fn();
+    router.isPendingTaskTextOnlyChannel = vi.fn().mockReturnValue(false);
 
-    const first = "First streamed message (short).";
-    const second = "Second streamed message that is longer and should win.";
+    const first = "Draft answer with extra background that should not win.";
+    const second = "Final answer.";
 
     emitTimeline("timeline_step_updated", "t2", "assistant_message", { message: first });
     emitTimeline("timeline_step_updated", "t2", "assistant_message", { message: second });
@@ -147,6 +150,7 @@ describe("ChannelGateway daemon listeners", () => {
     const router = (gateway as Any).router;
     router.sendTaskUpdate = vi.fn();
     router.handleTaskCompletion = vi.fn();
+    router.isPendingTaskTextOnlyChannel = vi.fn().mockReturnValue(false);
 
     const streamed = "Here is the actual result the user should see.";
 
@@ -156,6 +160,29 @@ describe("ChannelGateway daemon listeners", () => {
     });
 
     expect(router.handleTaskCompletion).toHaveBeenCalledWith("t3", streamed);
+  });
+
+  it("prefers the last assistant message over semantic summaries on text-only channels", () => {
+    const db = createMockDb();
+    const gateway = new ChannelGateway(db, { agentDaemon: agentDaemon as Any });
+
+    const router = (gateway as Any).router;
+    router.sendTaskUpdate = vi.fn();
+    router.handleTaskCompletion = vi.fn();
+    router.isPendingTaskTextOnlyChannel = vi.fn().mockReturnValue(true);
+
+    const streamed = "Kitabı bütün metne dayanarak değerlendiriyorum.";
+
+    emitTimeline("timeline_step_updated", "t4", "assistant_message", { message: streamed });
+    emitTimeline("timeline_step_finished", "t4", "task_completed", {
+      resultSummary: "Final summary from daemon.",
+      semanticSummary:
+        "Metnin Tamamına Dayalı Değerlendirme Şartını Doğrulama · Bölüm Yapısını Çıkarma",
+      verificationVerdict: "PASS",
+      verificationReport: "Verifier confirmed the implementation.",
+    });
+
+    expect(router.handleTaskCompletion).toHaveBeenCalledWith("t4", streamed);
   });
 
   it("publishes evidence links only for key-claim evidence events", () => {
@@ -184,5 +211,24 @@ describe("ChannelGateway daemon listeners", () => {
       "t4",
       expect.stringContaining("https://example.com/comp-survey"),
     );
+  });
+
+  it("clears router-side pending approvals when the daemon resolves them elsewhere", () => {
+    const db = createMockDb();
+    const gateway = new ChannelGateway(db, { agentDaemon: agentDaemon as Any });
+
+    const router = (gateway as Any).router;
+    router.clearPendingApproval = vi.fn();
+
+    emitTimeline("timeline_step_finished", "t5", "approval_granted", {
+      approvalId: "approval-123",
+    });
+    emitTimeline("timeline_step_finished", "t5", "approval_denied", {
+      approvalId: "approval-456",
+      reason: "task_ended",
+    });
+
+    expect(router.clearPendingApproval).toHaveBeenCalledWith("approval-123");
+    expect(router.clearPendingApproval).toHaveBeenCalledWith("approval-456");
   });
 });
