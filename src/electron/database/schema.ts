@@ -918,6 +918,24 @@ export class DatabaseManager {
         FOREIGN KEY (task_id) REFERENCES tasks(id)
       );
 
+      CREATE TABLE IF NOT EXISTS curated_memory_entries (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        task_id TEXT,
+        target TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        content TEXT NOT NULL,
+        normalized_key TEXT NOT NULL,
+        source TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 0.7,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        last_confirmed_at INTEGER,
+        FOREIGN KEY (workspace_id) REFERENCES workspaces(id),
+        FOREIGN KEY (task_id) REFERENCES tasks(id)
+      );
+
       -- Local semantic embeddings for hybrid memory retrieval (offline)
       CREATE TABLE IF NOT EXISTS memory_embeddings (
         memory_id TEXT PRIMARY KEY,
@@ -961,6 +979,12 @@ export class DatabaseManager {
       CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type);
       CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);
       CREATE INDEX IF NOT EXISTS idx_memories_compressed ON memories(is_compressed);
+      CREATE INDEX IF NOT EXISTS idx_curated_memory_workspace_target
+        ON curated_memory_entries(workspace_id, target, status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_curated_memory_workspace_kind
+        ON curated_memory_entries(workspace_id, kind, status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_curated_memory_normalized_key
+        ON curated_memory_entries(workspace_id, target, kind, normalized_key, status);
       CREATE INDEX IF NOT EXISTS idx_memory_embeddings_workspace ON memory_embeddings(workspace_id);
       CREATE INDEX IF NOT EXISTS idx_memory_summaries_workspace ON memory_summaries(workspace_id);
       CREATE INDEX IF NOT EXISTS idx_memory_summaries_period ON memory_summaries(time_period, period_start);
@@ -3063,19 +3087,26 @@ export class DatabaseManager {
           source TEXT DEFAULT 'manual',
           source_task_id TEXT,
           created_at INTEGER NOT NULL,
+          valid_from INTEGER,
+          valid_to INTEGER,
           FOREIGN KEY (source_entity_id) REFERENCES kg_entities(id) ON DELETE CASCADE,
-          FOREIGN KEY (target_entity_id) REFERENCES kg_entities(id) ON DELETE CASCADE,
-          UNIQUE(workspace_id, source_entity_id, target_entity_id, edge_type)
+          FOREIGN KEY (target_entity_id) REFERENCES kg_entities(id) ON DELETE CASCADE
         );
 
         CREATE INDEX IF NOT EXISTS idx_kg_edges_workspace ON kg_edges(workspace_id);
         CREATE INDEX IF NOT EXISTS idx_kg_edges_source ON kg_edges(source_entity_id);
         CREATE INDEX IF NOT EXISTS idx_kg_edges_target ON kg_edges(target_entity_id);
         CREATE INDEX IF NOT EXISTS idx_kg_edges_type ON kg_edges(edge_type);
+        CREATE INDEX IF NOT EXISTS idx_kg_edges_validity ON kg_edges(valid_from, valid_to);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_kg_edges_current_unique
+          ON kg_edges(workspace_id, source_entity_id, target_entity_id, edge_type)
+          WHERE valid_to IS NULL;
       `);
     } catch {
       // Table already exists
     }
+
+    this.upgradeKnowledgeGraphEdgesForTemporalValidity();
 
     try {
       this.db.exec(`
@@ -4062,6 +4093,37 @@ export class DatabaseManager {
       // Index already exists
     }
 
+    try {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS curated_memory_entries (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          task_id TEXT,
+          target TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          content TEXT NOT NULL,
+          normalized_key TEXT NOT NULL,
+          source TEXT NOT NULL,
+          confidence REAL NOT NULL DEFAULT 0.7,
+          status TEXT NOT NULL DEFAULT 'active',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          last_confirmed_at INTEGER,
+          FOREIGN KEY (workspace_id) REFERENCES workspaces(id),
+          FOREIGN KEY (task_id) REFERENCES tasks(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_curated_memory_workspace_target
+          ON curated_memory_entries(workspace_id, target, status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_curated_memory_workspace_kind
+          ON curated_memory_entries(workspace_id, kind, status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_curated_memory_normalized_key
+          ON curated_memory_entries(workspace_id, target, kind, normalized_key, status);
+      `);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      schemaLogger.error("[DatabaseManager] Curated memory migration failed:", msg);
+    }
+
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS device_profiles (
         device_id TEXT PRIMARY KEY,
@@ -4852,5 +4914,103 @@ export class DatabaseManager {
 
   close() {
     this.db.close();
+  }
+
+  private upgradeKnowledgeGraphEdgesForTemporalValidity(): void {
+    try {
+      const tableInfo = this.db
+        .prepare("PRAGMA table_info(kg_edges)")
+        .all() as Array<{ name?: string }>;
+      const columns = new Set(tableInfo.map((column) => String(column.name || "")));
+      const tableSqlRow = this.db
+        .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'kg_edges'")
+        .get() as { sql?: string } | undefined;
+      const tableSql = String(tableSqlRow?.sql || "");
+      const hasLegacyUniqueConstraint = /UNIQUE\s*\(\s*workspace_id\s*,\s*source_entity_id\s*,\s*target_entity_id\s*,\s*edge_type\s*\)/i.test(
+        tableSql,
+      );
+
+      if (hasLegacyUniqueConstraint) {
+        const foreignKeysEnabled = this.db.pragma("foreign_keys", { simple: true }) as number;
+        try {
+          this.db.pragma("foreign_keys = OFF");
+          this.db.transaction(() => {
+            this.db.exec("ALTER TABLE kg_edges RENAME TO kg_edges_legacy_temporal");
+            this.db.exec(`
+              CREATE TABLE kg_edges (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                source_entity_id TEXT NOT NULL,
+                target_entity_id TEXT NOT NULL,
+                edge_type TEXT NOT NULL,
+                properties TEXT DEFAULT '{}',
+                confidence REAL DEFAULT 1.0,
+                source TEXT DEFAULT 'manual',
+                source_task_id TEXT,
+                created_at INTEGER NOT NULL,
+                valid_from INTEGER,
+                valid_to INTEGER,
+                FOREIGN KEY (source_entity_id) REFERENCES kg_entities(id) ON DELETE CASCADE,
+                FOREIGN KEY (target_entity_id) REFERENCES kg_entities(id) ON DELETE CASCADE
+              );
+            `);
+            this.db.exec(`
+              INSERT INTO kg_edges (
+                id,
+                workspace_id,
+                source_entity_id,
+                target_entity_id,
+                edge_type,
+                properties,
+                confidence,
+                source,
+                source_task_id,
+                created_at,
+                valid_from,
+                valid_to
+              )
+              SELECT
+                id,
+                workspace_id,
+                source_entity_id,
+                target_entity_id,
+                edge_type,
+                properties,
+                confidence,
+                source,
+                source_task_id,
+                created_at,
+                created_at,
+                NULL
+              FROM kg_edges_legacy_temporal;
+            `);
+            this.db.exec("DROP TABLE kg_edges_legacy_temporal");
+          })();
+        } finally {
+          this.db.pragma(`foreign_keys = ${foreignKeysEnabled ? "ON" : "OFF"}`);
+        }
+      } else {
+        if (!columns.has("valid_from")) {
+          this.db.exec("ALTER TABLE kg_edges ADD COLUMN valid_from INTEGER");
+          this.db.exec("UPDATE kg_edges SET valid_from = created_at WHERE valid_from IS NULL");
+        }
+        if (!columns.has("valid_to")) {
+          this.db.exec("ALTER TABLE kg_edges ADD COLUMN valid_to INTEGER");
+        }
+      }
+
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_kg_edges_workspace ON kg_edges(workspace_id);
+        CREATE INDEX IF NOT EXISTS idx_kg_edges_source ON kg_edges(source_entity_id);
+        CREATE INDEX IF NOT EXISTS idx_kg_edges_target ON kg_edges(target_entity_id);
+        CREATE INDEX IF NOT EXISTS idx_kg_edges_type ON kg_edges(edge_type);
+        CREATE INDEX IF NOT EXISTS idx_kg_edges_validity ON kg_edges(valid_from, valid_to);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_kg_edges_current_unique
+          ON kg_edges(workspace_id, source_entity_id, target_entity_id, edge_type)
+          WHERE valid_to IS NULL;
+      `);
+    } catch (error) {
+      schemaLogger.error("[DatabaseManager] Failed temporal KG edge migration:", error);
+    }
   }
 }
