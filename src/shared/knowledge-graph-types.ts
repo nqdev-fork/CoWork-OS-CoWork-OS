@@ -66,6 +66,8 @@ export interface KGEdge {
   source: "manual" | "auto" | "agent";
   sourceTaskId?: string;
   createdAt: number;
+  validFrom?: number;
+  validTo?: number;
 }
 
 export interface KGObservation {
@@ -116,6 +118,8 @@ export interface CreateEdgeInput {
   edgeType: string;
   properties?: Record<string, unknown>;
   confidence?: number;
+  validFrom?: number;
+  validTo?: number;
 }
 
 export interface AddObservationInput {
