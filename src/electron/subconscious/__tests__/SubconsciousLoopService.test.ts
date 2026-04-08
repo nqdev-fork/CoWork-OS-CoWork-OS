@@ -270,6 +270,21 @@ describeWithSqlite("SubconsciousLoopService", () => {
     ).toBe(true);
   });
 
+  it("does not recreate missing workspace roots when refreshing stale workspace targets", async () => {
+    const workspace = insertWorkspace("stale-root");
+    fs.rmSync(workspace.path, { recursive: true, force: true });
+
+    const { SubconsciousLoopService } = await import("../SubconsciousLoopService");
+    const service = new SubconsciousLoopService(db, { getGlobalRoot: () => tmpDir });
+
+    await service.refreshTargets();
+
+    expect(fs.existsSync(workspace.path)).toBe(false);
+    expect(
+      fs.existsSync(path.join(tmpDir, ".cowork", "subconscious", "brain", "state.json")),
+    ).toBe(true);
+  });
+
   it("excludes persona-template roles from agent_role targets and prunes stale twin targets", async () => {
     const workspace = insertWorkspace("twins");
     const now = Date.now();
