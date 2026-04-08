@@ -1,20 +1,158 @@
-import { exec, execFile } from "child_process";
+import { execFile } from "child_process";
 import { promisify } from "util";
 import * as os from "os";
 import * as path from "path";
 import * as fs from "fs/promises";
 import * as fsSync from "fs";
-import { Workspace } from "../../../shared/types";
+import { Workspace, type VerbatimQuoteSourceType } from "../../../shared/types";
 import { AgentDaemon } from "../daemon";
 import { LLMTool } from "../llm/types";
 import { MemoryService } from "../../memory/MemoryService";
+import { SessionRecallService } from "../../memory/SessionRecallService";
+import { LayeredMemoryIndexService } from "../../memory/LayeredMemoryIndexService";
+import { QuoteRecallService } from "../../memory/QuoteRecallService";
+import { MemoryFeaturesManager } from "../../settings/memory-features-manager";
 import { getUserDataDir } from "../../utils/user-data-dir";
+import {
+  checkProjectAccess,
+  getProjectIdFromWorkspaceRelPath,
+  getWorkspaceRelativePosixPath,
+} from "../../security/project-access";
 
-const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 
 const DEFAULT_TIMEOUT = 30 * 1000; // 30 seconds
 const APPLESCRIPT_TIMEOUT_MS = 240 * 1000; // 4 minutes
+
+function sessionRecallEnabled(): boolean {
+  return MemoryFeaturesManager.loadSettings().sessionRecallEnabled !== false;
+}
+
+function topicMemoryEnabled(): boolean {
+  return MemoryFeaturesManager.loadSettings().topicMemoryEnabled !== false;
+}
+
+function verbatimRecallEnabled(): boolean {
+  return MemoryFeaturesManager.loadSettings().verbatimRecallEnabled !== false;
+}
+
+const PROTECTED_SYSTEM_PATHS = [
+  "/System",
+  "/Library",
+  "/usr",
+  "/bin",
+  "/sbin",
+  "/etc",
+  "/var",
+  "/private",
+  "C:\\Windows",
+  "C:\\Program Files",
+  "C:\\Program Files (x86)",
+];
+
+function normalizeAllowedRoot(root: string): string {
+  try {
+    return fsSync.existsSync(root) ? fsSync.realpathSync(root) : path.resolve(root);
+  } catch {
+    return path.resolve(root);
+  }
+}
+
+function isPathWithinRoot(targetPath: string, rootPath: string): boolean {
+  return targetPath === rootPath || targetPath.startsWith(`${rootPath}${path.sep}`);
+}
+
+function buildSessionRecallTool(description: string): LLMTool {
+  return {
+    name: "search_sessions",
+    description,
+    input_schema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Keywords or phrases to search across transcript spans and checkpoints",
+        },
+        taskId: {
+          type: "string",
+          description: "Optional task ID to scope search to a single task transcript",
+        },
+        limit: {
+          type: "number",
+          description: "Maximum number of results to return (default: 10, max: 50)",
+        },
+        includeCheckpoints: {
+          type: "boolean",
+          description: "Also search transcript checkpoint summaries when available",
+        },
+      },
+      required: ["query"],
+    },
+  };
+}
+
+function buildTopicMemoryTool(description: string): LLMTool {
+  return {
+    name: "memory_topics_load",
+    description,
+    input_schema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Topic or query to use when building/loading topic files",
+        },
+        limit: {
+          type: "number",
+          description: "Maximum number of topic files to return (default: 4, max: 12)",
+        },
+        refresh: {
+          type: "boolean",
+          description: "Whether to rebuild the topic index for the current query before loading",
+        },
+      },
+      required: ["query"],
+    },
+  };
+}
+
+function buildQuoteRecallTool(description: string): LLMTool {
+  return {
+    name: "search_quotes",
+    description,
+    input_schema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description:
+            "Exact wording, phrase fragment, or semantic quote target to locate verbatim spans.",
+        },
+        taskId: {
+          type: "string",
+          description: "Optional task ID to scope recall to a single task or transcript.",
+        },
+        limit: {
+          type: "number",
+          description: "Maximum number of quote hits to return (default: 10, max: 50).",
+        },
+        sourceTypes: {
+          type: "array",
+          items: {
+            type: "string",
+            enum: ["transcript_span", "task_message", "memory", "workspace_markdown"],
+          },
+          description: "Optional source filters for the quote lane.",
+        },
+        includeWorkspaceNotes: {
+          type: "boolean",
+          description: "Whether to include indexed workspace markdown notes from `.cowork/`.",
+        },
+      },
+      required: ["query"],
+    },
+  };
+}
 
 function getElectronApis(): { clipboard?: Any; desktopCapturer?: Any; shell?: Any; app?: Any } {
   try {
@@ -44,6 +182,71 @@ export class SystemTools {
    */
   setWorkspace(workspace: Workspace): void {
     this.workspace = workspace;
+  }
+
+  private requireShellPermission(toolName: string): void {
+    if (this.workspace.permissions.shell) {
+      return;
+    }
+    throw new Error(`Tool "${toolName}" requires shell permission for this workspace`);
+  }
+
+  private isProtectedPath(absolutePath: string): boolean {
+    const normalizedPath = path.normalize(absolutePath).toLowerCase();
+    return PROTECTED_SYSTEM_PATHS.some((protectedPath) =>
+      normalizedPath.startsWith(protectedPath.toLowerCase()),
+    );
+  }
+
+  private resolveAccessibleLocalPath(inputPath: string): string {
+    const workspaceRoot = normalizeAllowedRoot(this.workspace.path);
+    const candidatePath = path.isAbsolute(inputPath)
+      ? path.resolve(inputPath)
+      : path.resolve(workspaceRoot, inputPath);
+
+    let resolvedPath = candidatePath;
+    try {
+      resolvedPath = fsSync.realpathSync(candidatePath);
+    } catch {
+      resolvedPath = candidatePath;
+    }
+
+    if (this.workspace.permissions.unrestrictedFileAccess) {
+      if (this.isProtectedPath(resolvedPath)) {
+        throw new Error("Access denied: path is inside a protected system location");
+      }
+      return resolvedPath;
+    }
+
+    if (isPathWithinRoot(resolvedPath, workspaceRoot)) {
+      return resolvedPath;
+    }
+
+    const allowedRoots = (this.workspace.permissions.allowedPaths || []).map(normalizeAllowedRoot);
+    if (allowedRoots.some((root) => isPathWithinRoot(resolvedPath, root))) {
+      return resolvedPath;
+    }
+
+    throw new Error("Access denied: path must be inside the workspace or an approved Allowed Path");
+  }
+
+  private async enforceProjectAccess(absolutePath: string): Promise<void> {
+    const relPosix = getWorkspaceRelativePosixPath(this.workspace.path, absolutePath);
+    if (relPosix === null) return;
+    const projectId = getProjectIdFromWorkspaceRelPath(relPosix);
+    if (!projectId) return;
+
+    const taskGetter = (this.daemon as Any)?.getTask;
+    const task =
+      typeof taskGetter === "function" ? taskGetter.call(this.daemon, this.taskId) : null;
+    const res = await checkProjectAccess({
+      workspacePath: this.workspace.path,
+      projectId,
+      agentRoleId: task?.assignedAgentRoleId || null,
+    });
+    if (!res.allowed) {
+      throw new Error(res.reason || `Access denied for project "${projectId}"`);
+    }
   }
 
   /**
@@ -240,6 +443,7 @@ export class SystemTools {
     if (!appName || typeof appName !== "string") {
       throw new Error("Invalid appName: must be a non-empty string");
     }
+    this.requireShellPermission("open_application");
 
     this.daemon.logEvent(this.taskId, "tool_call", {
       tool: "open_application",
@@ -249,20 +453,17 @@ export class SystemTools {
     const platform = os.platform();
 
     try {
-      let command: string;
-
       if (platform === "darwin") {
-        // macOS: Use 'open -a' command
-        command = `open -a "${appName}"`;
+        await execFileAsync("open", ["-a", appName], { timeout: DEFAULT_TIMEOUT });
       } else if (platform === "win32") {
-        // Windows: Use 'start' command
-        command = `start "" "${appName}"`;
+        await execFileAsync(
+          "powershell.exe",
+          ["-NoProfile", "-NonInteractive", "-Command", "Start-Process", "-FilePath", appName],
+          { timeout: DEFAULT_TIMEOUT, windowsHide: true },
+        );
       } else {
-        // Linux: Try common launchers
-        command = appName.toLowerCase();
+        await execFileAsync(appName, [], { timeout: DEFAULT_TIMEOUT });
       }
-
-      await execAsync(command, { timeout: DEFAULT_TIMEOUT });
 
       this.daemon.logEvent(this.taskId, "tool_result", {
         tool: "open_application",
@@ -326,10 +527,8 @@ export class SystemTools {
       throw new Error("Invalid path: must be a non-empty string");
     }
 
-    // Resolve relative to workspace
-    const fullPath = path.isAbsolute(filePath)
-      ? filePath
-      : path.resolve(this.workspace.path, filePath);
+    const fullPath = this.resolveAccessibleLocalPath(filePath);
+    await this.enforceProjectAccess(fullPath);
 
     this.daemon.logEvent(this.taskId, "tool_call", {
       tool: "open_path",
@@ -367,9 +566,8 @@ export class SystemTools {
       throw new Error("Invalid path: must be a non-empty string");
     }
 
-    const fullPath = path.isAbsolute(filePath)
-      ? filePath
-      : path.resolve(this.workspace.path, filePath);
+    const fullPath = this.resolveAccessibleLocalPath(filePath);
+    await this.enforceProjectAccess(fullPath);
 
     this.daemon.logEvent(this.taskId, "tool_call", {
       tool: "show_in_folder",
@@ -609,7 +807,12 @@ export class SystemTools {
    * Search workspace memories (including imported ChatGPT conversations)
    * and workspace markdown files (.cowork/ kit files).
    */
-  async searchMemories(input: { query: string; limit?: number }): Promise<{
+  async searchMemories(input: {
+    query: string;
+    limit?: number;
+    lane?: "archive" | "kit" | "all";
+    types?: string[];
+  }): Promise<{
     results: Array<{
       id: string;
       snippet: string;
@@ -627,24 +830,29 @@ export class SystemTools {
 
     try {
       const limit = Math.min(input.limit || 20, 50);
+      const lane = input.lane || "all";
+      const typeFilter = new Set((input.types || []).map((item) => String(item || "").trim()).filter(Boolean));
 
       // Search the memory database (semantic + BM25 hybrid)
-      const dbResults = MemoryService.search(this.workspace.id, input.query, limit);
+      const dbResults =
+        lane === "kit" ? [] : MemoryService.search(this.workspace.id, input.query, limit);
 
       // Also search workspace markdown (.cowork/ kit files)
       let mdResults: typeof dbResults = [];
-      try {
-        const kitRoot = path.join(this.workspace.path, ".cowork");
-        if (fsSync.existsSync(kitRoot) && fsSync.statSync(kitRoot).isDirectory()) {
-          mdResults = MemoryService.searchWorkspaceMarkdown(
-            this.workspace.id,
-            kitRoot,
-            input.query,
-            Math.max(5, Math.floor(limit / 3)),
-          );
+      if (lane !== "archive") {
+        try {
+          const kitRoot = path.join(this.workspace.path, ".cowork");
+          if (fsSync.existsSync(kitRoot) && fsSync.statSync(kitRoot).isDirectory()) {
+            mdResults = MemoryService.searchWorkspaceMarkdown(
+              this.workspace.id,
+              kitRoot,
+              input.query,
+              Math.max(5, Math.floor(limit / 3)),
+            );
+          }
+        } catch {
+          // Best-effort: markdown index may not be available
         }
-      } catch {
-        // Best-effort: markdown index may not be available
       }
 
       // Merge and deduplicate by id, sort by relevanceScore descending
@@ -656,8 +864,11 @@ export class SystemTools {
           merged.push(r);
         }
       }
-      merged.sort((a, b) => b.relevanceScore - a.relevanceScore);
-      const limited = merged.slice(0, limit);
+      const filtered = typeFilter.size
+        ? merged.filter((entry) => typeFilter.has(entry.type))
+        : merged;
+      filtered.sort((a, b) => b.relevanceScore - a.relevanceScore);
+      const limited = filtered.slice(0, limit);
 
       const mapped = limited.map((r) => ({
         id: r.id,
@@ -685,16 +896,289 @@ export class SystemTools {
     }
   }
 
+  async searchSessions(input: {
+    query: string;
+    taskId?: string;
+    limit?: number;
+    includeCheckpoints?: boolean;
+  }): Promise<{
+    results: Array<{
+      taskId: string;
+      timestamp: string;
+      type: string;
+      snippet: string;
+      eventId?: string;
+      seq?: number;
+    }>;
+    totalFound: number;
+  }> {
+    this.daemon.logEvent(this.taskId, "tool_call", {
+      tool: "search_sessions",
+      query: input.query,
+    });
+
+    if (!sessionRecallEnabled()) {
+      const error = "Session recall is disabled in Memory settings.";
+      this.daemon.logEvent(this.taskId, "tool_result", {
+        tool: "search_sessions",
+        success: false,
+        error,
+      });
+      throw new Error(error);
+    }
+
+    try {
+      const results = await SessionRecallService.search({
+        workspacePath: this.workspace.path,
+        query: input.query,
+        taskId: input.taskId,
+        limit: Math.min(input.limit || 10, 50),
+        includeCheckpoints: input.includeCheckpoints === true,
+      });
+      const mapped = results.map((entry) => ({
+        taskId: entry.taskId,
+        timestamp: new Date(entry.timestamp).toISOString(),
+        type: entry.type,
+        snippet: entry.snippet,
+        ...(entry.eventId ? { eventId: entry.eventId } : {}),
+        ...(typeof entry.seq === "number" ? { seq: entry.seq } : {}),
+      }));
+      this.daemon.logEvent(this.taskId, "tool_result", {
+        tool: "search_sessions",
+        success: true,
+        resultCount: mapped.length,
+      });
+      return { results: mapped, totalFound: mapped.length };
+    } catch (error) {
+      this.daemon.logEvent(this.taskId, "tool_result", {
+        tool: "search_sessions",
+        success: false,
+        error: String(error),
+      });
+      return { results: [], totalFound: 0 };
+    }
+  }
+
+  async searchQuotes(input: {
+    query: string;
+    taskId?: string;
+    limit?: number;
+    sourceTypes?: VerbatimQuoteSourceType[];
+    includeWorkspaceNotes?: boolean;
+  }): Promise<{
+    results: Array<{
+      id: string;
+      sourceType: VerbatimQuoteSourceType;
+      objectId: string;
+      taskId?: string;
+      timestamp: string;
+      excerpt: string;
+      path?: string;
+      rankingReason: string;
+      sourcePriority: number;
+      eventId?: string;
+      seq?: number;
+      startLine?: number;
+      endLine?: number;
+      memoryType?: string;
+    }>;
+    totalFound: number;
+  }> {
+    this.daemon.logEvent(this.taskId, "tool_call", {
+      tool: "search_quotes",
+      query: input.query,
+    });
+
+    if (!verbatimRecallEnabled()) {
+      const error = "Verbatim recall is disabled in Memory settings.";
+      this.daemon.logEvent(this.taskId, "tool_result", {
+        tool: "search_quotes",
+        success: false,
+        error,
+      });
+      throw new Error(error);
+    }
+
+    try {
+      const results = await QuoteRecallService.search({
+        db: this.daemon.getDatabase(),
+        workspaceId: this.workspace.id,
+        workspacePath: this.workspace.path,
+        query: input.query,
+        taskId: input.taskId,
+        limit: Math.min(input.limit || 10, 50),
+        sourceTypes: input.sourceTypes,
+        includeWorkspaceNotes: input.includeWorkspaceNotes,
+      });
+      const mapped = results.map((entry) => ({
+        id: entry.id,
+        sourceType: entry.sourceType,
+        objectId: entry.objectId,
+        ...(entry.taskId ? { taskId: entry.taskId } : {}),
+        timestamp: new Date(entry.timestamp).toISOString(),
+        excerpt: entry.excerpt,
+        ...(entry.path ? { path: entry.path } : {}),
+        rankingReason: entry.rankingReason,
+        sourcePriority: entry.sourcePriority,
+        ...(entry.eventId ? { eventId: entry.eventId } : {}),
+        ...(typeof entry.seq === "number" ? { seq: entry.seq } : {}),
+        ...(typeof entry.startLine === "number" ? { startLine: entry.startLine } : {}),
+        ...(typeof entry.endLine === "number" ? { endLine: entry.endLine } : {}),
+        ...(entry.memoryType ? { memoryType: entry.memoryType } : {}),
+      }));
+      this.daemon.logEvent(this.taskId, "tool_result", {
+        tool: "search_quotes",
+        success: true,
+        resultCount: mapped.length,
+      });
+      return { results: mapped, totalFound: mapped.length };
+    } catch (error) {
+      this.daemon.logEvent(this.taskId, "tool_result", {
+        tool: "search_quotes",
+        success: false,
+        error: String(error),
+      });
+      return { results: [], totalFound: 0 };
+    }
+  }
+
+  async loadMemoryTopics(input: {
+    query: string;
+    limit?: number;
+    refresh?: boolean;
+  }): Promise<{
+    indexPath: string;
+    topics: Array<{
+      title: string;
+      path: string;
+      snippet: string;
+      source: "memory" | "markdown";
+    }>;
+    totalFound: number;
+  }> {
+    this.daemon.logEvent(this.taskId, "tool_call", {
+      tool: "memory_topics_load",
+      query: input.query,
+    });
+
+    if (!topicMemoryEnabled()) {
+      const error = "Topic memory is disabled in Memory settings.";
+      this.daemon.logEvent(this.taskId, "tool_result", {
+        tool: "memory_topics_load",
+        success: false,
+        error,
+      });
+      throw new Error(error);
+    }
+
+    try {
+      const topicLimit = Math.min(input.limit || 4, 12);
+      const shouldRefresh = input.refresh === true;
+      const topics = shouldRefresh
+        ? (
+            await LayeredMemoryIndexService.refreshIndex({
+              workspaceId: this.workspace.id,
+              workspacePath: this.workspace.path,
+              taskPrompt: input.query,
+              topicLimit,
+            })
+          ).topics
+        : (await LayeredMemoryIndexService.loadRelevantTopicSnippets({
+            workspaceId: this.workspace.id,
+            workspacePath: this.workspace.path,
+            query: input.query,
+            limit: topicLimit,
+          }));
+      const mapped = topics.map((topic) => ({
+        title: topic.title,
+        path: path.relative(this.workspace.path, topic.path),
+        snippet: topic.content,
+        source: topic.source,
+      }));
+      this.daemon.logEvent(this.taskId, "tool_result", {
+        tool: "memory_topics_load",
+        success: true,
+        resultCount: mapped.length,
+      });
+      return {
+        indexPath: path.relative(
+          this.workspace.path,
+          LayeredMemoryIndexService.resolveMemoryIndexPath(this.workspace.path),
+        ),
+        topics: mapped,
+        totalFound: mapped.length,
+      };
+    } catch (error) {
+      this.daemon.logEvent(this.taskId, "tool_result", {
+        tool: "memory_topics_load",
+        success: false,
+        error: String(error),
+      });
+      return {
+        indexPath: path.relative(
+          this.workspace.path,
+          LayeredMemoryIndexService.resolveMemoryIndexPath(this.workspace.path),
+        ),
+        topics: [],
+        totalFound: 0,
+      };
+    }
+  }
+
   /**
    * Static method to get tool definitions
    */
   static getToolDefinitions(options?: { headless?: boolean }): LLMTool[] {
     const headless = options?.headless === true;
+    const enableSessionRecall = sessionRecallEnabled();
+    const enableTopicMemory = topicMemoryEnabled();
+    const enableVerbatimRecall = verbatimRecallEnabled();
+    const sessionRecallTools: LLMTool[] = enableSessionRecall
+      ? [
+          buildSessionRecallTool(
+            "Search recent task/session transcript spans and optional checkpoints for prior task context. " +
+              "Use this when you need to recall what happened in a specific recent run, not just durable memory.",
+          ),
+        ]
+      : [];
+    const quoteRecallTools: LLMTool[] = enableVerbatimRecall
+      ? [
+          buildQuoteRecallTool(
+            "Search exact quoted spans across transcripts, task messages, imported memories, and workspace notes. " +
+              "Prefer this when the task needs the verbatim wording of what was actually said.",
+          ),
+        ]
+      : [];
+    const topicMemoryTools: LLMTool[] = enableTopicMemory
+      ? [
+          buildTopicMemoryTool(
+            "Load topical memory packs from `.cowork/memory/topics` for the current query. " +
+              "Use this when the task is topical and you want a small focused memory pack instead of broad recall.",
+          ),
+        ]
+      : [];
+    const conciseSessionRecallTools: LLMTool[] = enableSessionRecall
+      ? [
+          buildSessionRecallTool(
+            "Search recent task/session transcript spans and optional checkpoints for prior task context.",
+          ),
+        ]
+      : [];
+    const conciseQuoteRecallTools: LLMTool[] = enableVerbatimRecall
+      ? [
+          buildQuoteRecallTool(
+            "Search exact quoted spans across transcripts, task messages, imported memories, and workspace notes.",
+          ),
+        ]
+      : [];
+    const conciseTopicMemoryTools: LLMTool[] = enableTopicMemory
+      ? [buildTopicMemoryTool("Load topical memory packs from `.cowork/memory/topics` for the current query.")]
+      : [];
 
     // In headless/VPS mode, avoid exposing tools that require an interactive desktop session.
     // Keep informational tools and memory search available.
     if (headless) {
-      return [
+      const tools: LLMTool[] = [
         {
           name: "system_info",
           description: "Get system information including OS, CPU, memory, and user details",
@@ -746,14 +1230,28 @@ export class SystemTools {
                 type: "number",
                 description: "Maximum number of results to return (default: 20, max: 50)",
               },
+              lane: {
+                type: "string",
+                enum: ["archive", "kit", "all"],
+                description: "Restrict search to archive memories, workspace kit markdown, or both",
+              },
+              types: {
+                type: "array",
+                items: { type: "string" },
+                description: "Optional memory types to keep (for example decision, insight, constraint)",
+              },
             },
             required: ["query"],
           },
         },
+        ...quoteRecallTools,
+        ...sessionRecallTools,
+        ...topicMemoryTools,
       ];
+      return tools;
     }
 
-    return [
+    const tools: LLMTool[] = [
       {
         name: "system_info",
         description: "Get system information including OS, CPU, memory, and user details",
@@ -920,10 +1418,24 @@ export class SystemTools {
               type: "number",
               description: "Maximum number of results to return (default: 20, max: 50)",
             },
+            lane: {
+              type: "string",
+              enum: ["archive", "kit", "all"],
+              description: "Restrict search to archive memories, workspace kit markdown, or both",
+            },
+            types: {
+              type: "array",
+              items: { type: "string" },
+              description: "Optional memory types to keep (for example decision, insight, constraint)",
+            },
           },
           required: ["query"],
         },
       },
+      ...conciseQuoteRecallTools,
+      ...conciseSessionRecallTools,
+      ...conciseTopicMemoryTools,
     ];
+    return tools;
   }
 }
