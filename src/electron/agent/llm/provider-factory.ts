@@ -733,6 +733,8 @@ export interface CachedModelInfo {
 }
 
 interface ProviderRoutingSettings {
+  fallbackProviders?: LLMProviderFallbackConfig[];
+  failoverPrimaryRetryCooldownSeconds?: number;
   profileRoutingEnabled?: boolean;
   strongModelKey?: string;
   cheapModelKey?: string;
@@ -943,44 +945,65 @@ export class LLMProviderFactory {
       settings.providerType = "bedrock";
     }
 
-    this.normalizeFallbackProviders(settings);
+    this.normalizeProviderFailoverSettings(settings);
   }
 
-  private static normalizeFallbackProviders(settings: LLMSettings): void {
-    if (!Array.isArray(settings.fallbackProviders)) {
-      delete settings.fallbackProviders;
-    } else {
-      const normalized: LLMProviderFallbackConfig[] = [];
-      const seen = new Set<string>();
-      for (const entry of settings.fallbackProviders) {
-        const providerType = resolveCustomProviderId(
-          entry?.providerType as LLMProviderType,
+  private static normalizeProviderFailoverSettings(
+    settings: LLMSettings,
+  ): void {
+    const normalizeNode = (node: ProviderRoutingSettings | undefined): void => {
+      if (!node) return;
+
+      if (Array.isArray(node.fallbackProviders)) {
+        const normalized: LLMProviderFallbackConfig[] = [];
+        const seen = new Set<string>();
+        for (const entry of node.fallbackProviders) {
+          const providerType = resolveCustomProviderId(
+            entry?.providerType as LLMProviderType,
+          );
+          if (!providerType) continue;
+          const modelKey = normalizeModelKey(entry?.modelKey);
+          const dedupeKey = `${providerType}:${modelKey || ""}`;
+          if (seen.has(dedupeKey)) continue;
+          seen.add(dedupeKey);
+          normalized.push({
+            providerType,
+            ...(modelKey ? { modelKey } : {}),
+          });
+        }
+        node.fallbackProviders = normalized.slice(0, 5);
+      }
+
+      const parsedCooldown = Number(node.failoverPrimaryRetryCooldownSeconds);
+      if (Number.isFinite(parsedCooldown)) {
+        node.failoverPrimaryRetryCooldownSeconds = Math.max(
+          0,
+          Math.min(3600, Math.floor(parsedCooldown)),
         );
-        if (!providerType) continue;
-        const modelKey = normalizeModelKey(entry?.modelKey);
-        const dedupeKey = `${providerType}:${modelKey || ""}`;
-        if (seen.has(dedupeKey)) continue;
-        seen.add(dedupeKey);
-        normalized.push({
-          providerType,
-          ...(modelKey ? { modelKey } : {}),
-        });
+      } else {
+        delete node.failoverPrimaryRetryCooldownSeconds;
       }
+    };
 
-      settings.fallbackProviders = normalized.slice(0, 5);
-      if (settings.fallbackProviders.length === 0) {
-        delete settings.fallbackProviders;
+    normalizeNode(settings);
+    normalizeNode(settings.anthropic);
+    normalizeNode(settings.bedrock);
+    normalizeNode(settings.ollama);
+    normalizeNode(settings.gemini);
+    normalizeNode(settings.openrouter);
+    normalizeNode(settings.openai);
+    normalizeNode(settings.azure);
+    normalizeNode(settings.azureAnthropic);
+    normalizeNode(settings.groq);
+    normalizeNode(settings.xai);
+    normalizeNode(settings.kimi);
+    normalizeNode(settings.pi);
+    normalizeNode(settings.openaiCompatible);
+
+    if (settings.customProviders) {
+      for (const provider of Object.values(settings.customProviders)) {
+        normalizeNode(provider);
       }
-    }
-
-    const parsedCooldown = Number(settings.failoverPrimaryRetryCooldownSeconds);
-    if (Number.isFinite(parsedCooldown)) {
-      settings.failoverPrimaryRetryCooldownSeconds = Math.max(
-        0,
-        Math.min(3600, Math.floor(parsedCooldown)),
-      );
-    } else {
-      delete settings.failoverPrimaryRetryCooldownSeconds;
     }
   }
 
@@ -1232,6 +1255,27 @@ export class LLMProviderFactory {
     };
   }
 
+  static getProviderFailoverSettings(
+    settings: LLMSettings,
+    providerType: LLMProviderType,
+  ): Required<
+    Pick<ProviderRoutingSettings, "fallbackProviders" | "failoverPrimaryRetryCooldownSeconds">
+  > {
+    const configured = this.getProviderRoutingSettingsNode(
+      settings,
+      providerType,
+      false,
+    );
+    return {
+      fallbackProviders:
+        configured?.fallbackProviders ?? settings.fallbackProviders ?? [],
+      failoverPrimaryRetryCooldownSeconds:
+        configured?.failoverPrimaryRetryCooldownSeconds ??
+        settings.failoverPrimaryRetryCooldownSeconds ??
+        60,
+    };
+  }
+
   private static resolveModelIdForProvider(
     settings: LLMSettings,
     providerType: LLMProviderType,
@@ -1442,8 +1486,12 @@ export class LLMProviderFactory {
     const seen = new Set<string>([
       `${resolveCustomProviderId(primarySelection.providerType)}:${normalizeModelKey(primarySelection.modelKey) || ""}`,
     ]);
+    const failoverSettings = this.getProviderFailoverSettings(
+      settings,
+      primarySelection.providerType,
+    );
 
-    for (const entry of settings.fallbackProviders || []) {
+    for (const entry of failoverSettings.fallbackProviders || []) {
       const providerType = resolveCustomProviderId(entry.providerType);
       if (!this.isProviderConfigured(settings, providerType)) {
         continue;
