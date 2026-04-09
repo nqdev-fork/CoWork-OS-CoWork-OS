@@ -55,6 +55,7 @@ import { ChannelTools } from "./channel-tools";
 import { EmailImapTools } from "./email-imap-tools";
 import { GitTools } from "./git-tools";
 import { MemoryTools } from "./memory-tools";
+import { SupermemoryTools } from "./supermemory-tools";
 import { ChannelRepository } from "../../database/repositories";
 import { readFilesByPatterns } from "./read-files";
 import type { LLMTool, LLMToolPromptRenderContext } from "../llm/types";
@@ -501,6 +502,7 @@ export class ToolRegistry {
   private knowledgeGraphTools: KnowledgeGraphTools;
   private scrapingTools: ScrapingTools;
   private memoryTools: MemoryTools;
+  private supermemoryTools: SupermemoryTools;
   private documentTools: DocumentTools;
   private scratchpadTools: ScratchpadTools;
   private qaTools: QATools;
@@ -571,6 +573,7 @@ export class ToolRegistry {
     this.knowledgeGraphTools = new KnowledgeGraphTools(workspace, daemon, taskId);
     this.scrapingTools = new ScrapingTools(workspace, daemon, taskId);
     this.memoryTools = new MemoryTools(workspace, daemon, taskId);
+    this.supermemoryTools = new SupermemoryTools(workspace, daemon, taskId);
     this.documentTools = new DocumentTools(workspace.path, taskId, (tid, fp, mime) =>
       daemon.logEvent(tid, "artifact_created", { path: fp, mimeType: mime }),
     );
@@ -986,6 +989,7 @@ export class ToolRegistry {
     this.knowledgeGraphTools.setWorkspace(workspace);
     this.scrapingTools.setWorkspace(workspace);
     this.memoryTools.setWorkspace(workspace);
+    this.supermemoryTools.setWorkspace(workspace);
     this.documentTools.setWorkspace(workspace);
     this._codeExecTools = undefined;
     this.invalidateToolCaches();
@@ -1189,6 +1193,7 @@ export class ToolRegistry {
 
     // Memory tools (explicit save during task execution)
     allTools.push(...MemoryTools.getToolDefinitions());
+    allTools.push(...SupermemoryTools.getToolDefinitions());
 
     // Scraping tools (Scrapling integration - anti-bot, stealth, structured extraction)
     // Only add when scraping is enabled in settings
@@ -1722,6 +1727,10 @@ export class ToolRegistry {
     register("memory_save", async ({ request }) => this.memoryTools.save(request.input));
     register("memory_curate", async ({ request }) => this.memoryTools.curate(request.input), exclusiveSchedulerSpec);
     register("memory_curated_read", async ({ request }) => this.memoryTools.readCurated(request.input), readParallelSchedulerSpec);
+    register("supermemory_profile", async ({ request }) => this.supermemoryTools.profile(request.input), readParallelSchedulerSpec);
+    register("supermemory_search", async ({ request }) => this.supermemoryTools.search(request.input), readParallelSchedulerSpec);
+    register("supermemory_remember", async ({ request }) => this.supermemoryTools.remember(request.input));
+    register("supermemory_forget", async ({ request }) => this.supermemoryTools.forget(request.input), exclusiveSchedulerSpec);
     register("scratchpad_write", async ({ request }) => this.scratchpadTools.write(request.input));
     register("scratchpad_read", async ({ request }) => this.scratchpadTools.read(request.input));
     register("read_clipboard", async () => this.systemTools.readClipboard());
@@ -2143,12 +2152,26 @@ export class ToolRegistry {
       const mcpTools = mcpManager.getAllTools();
       const settings = MCPSettingsManager.loadSettings();
       const prefix = settings.toolNamePrefix || "mcp_";
+      const serverNamesById = new Map(
+        (settings.servers || []).map((server) => [server.id, server.name]),
+      );
 
-      return mcpTools.map((tool: { name: string; description?: string; inputSchema: Any }) => ({
-        name: `${prefix}${tool.name}`,
-        description: tool.description || `MCP tool: ${tool.name}`,
-        input_schema: tool.inputSchema,
-      }));
+      return mcpTools.map((tool: { name: string; description?: string; inputSchema: Any }) => {
+        const serverId =
+          typeof (mcpManager as Any).getServerIdForTool === "function"
+            ? (mcpManager as Any).getServerIdForTool(tool.name)
+            : null;
+        const serverName = serverId ? serverNamesById.get(serverId) : null;
+        const baseDescription = tool.description || `MCP tool: ${tool.name}`;
+
+        return {
+          name: `${prefix}${tool.name}`,
+          description: serverName
+            ? `${baseDescription} Provided by MCP server "${serverName}".`
+            : baseDescription,
+          input_schema: tool.inputSchema,
+        };
+      });
     } catch  {
       // MCP not initialized yet, return empty array
       return [];
@@ -2808,6 +2831,10 @@ System Tools:
 - memory_save: Save an observation, decision, insight, or error to workspace memory for future recall
 - memory_curate: Add, replace, or remove curated hot-memory facts that should stay prompt-visible
 - memory_curated_read: Inspect the current curated hot-memory entries
+- supermemory_profile: Fetch external Supermemory profile context for the current workspace/container
+- supermemory_search: Search external Supermemory memories and chunks
+- supermemory_remember: Store a durable external memory in Supermemory
+- supermemory_forget: Forget an outdated or incorrect Supermemory entry
 ${hasAnyVisibleTools(
   "computer_screenshot",
   "computer_click",
@@ -3214,6 +3241,10 @@ ${skillDescriptions}`;
     if (name === "memory_save") return await this.memoryTools.save(input);
     if (name === "memory_curate") return await this.memoryTools.curate(input);
     if (name === "memory_curated_read") return await this.memoryTools.readCurated(input);
+    if (name === "supermemory_profile") return await this.supermemoryTools.profile(input);
+    if (name === "supermemory_search") return await this.supermemoryTools.search(input);
+    if (name === "supermemory_remember") return await this.supermemoryTools.remember(input);
+    if (name === "supermemory_forget") return await this.supermemoryTools.forget(input);
     if (name === "scratchpad_write") return this.scratchpadTools.write(input);
     if (name === "scratchpad_read") return this.scratchpadTools.read(input);
     if (name === "read_clipboard") return await this.systemTools.readClipboard();

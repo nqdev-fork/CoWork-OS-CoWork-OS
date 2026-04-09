@@ -5,6 +5,11 @@ const mockMcpState = {
   tools: [] as Any[],
 };
 
+const mockMcpSettings = {
+  toolNamePrefix: "mcp_",
+  servers: [] as Array<{ id: string; name: string }>,
+};
+
 const mockBuiltinSettings = {
   categories: {
     code: { enabled: true, priority: "high" },
@@ -58,6 +63,10 @@ vi.mock("../../../mcp/client/MCPClientManager", () => ({
     getInstance: vi.fn(() => ({
       getAllTools: vi.fn(() => mockMcpState.tools),
       getToolCatalogVersion: vi.fn(() => mockMcpState.version),
+      getServerIdForTool: vi.fn((toolName: string) => {
+        const tool = mockMcpState.tools.find((entry) => entry.name === toolName);
+        return tool?.serverId ?? null;
+      }),
       hasTool: vi.fn((toolName: string) =>
         mockMcpState.tools.some((tool) => tool.name === toolName),
       ),
@@ -70,8 +79,8 @@ vi.mock("../../../mcp/settings", () => ({
   MCPSettingsManager: {
     initialize: vi.fn(),
     loadSettings: vi.fn(() => ({
-      toolNamePrefix: "mcp_",
-      servers: [],
+      toolNamePrefix: mockMcpSettings.toolNamePrefix,
+      servers: [...mockMcpSettings.servers],
     })),
     updateServer: vi.fn(),
   },
@@ -139,6 +148,8 @@ describe("ToolRegistry tool catalog versioning", () => {
     vi.clearAllMocks();
     mockMcpState.version = 1;
     mockMcpState.tools = [];
+    mockMcpSettings.toolNamePrefix = "mcp_";
+    mockMcpSettings.servers = [];
     mockBuiltinSettings.toolOverrides = {};
     mockBuiltinSettings.version = "1.0.0";
     isToolEnabledMock.mockImplementation((toolName: string) => {
@@ -165,6 +176,24 @@ describe("ToolRegistry tool catalog versioning", () => {
 
     const secondTools = registry.getTools();
     expect(secondTools.some((tool) => tool.name === "mcp_alpha")).toBe(true);
+  });
+
+  it("annotates MCP tool descriptions with the source server name", () => {
+    mockMcpSettings.servers = [{ id: "server-shuttle", name: "Shuttle" }];
+    mockMcpState.version = 2;
+    mockMcpState.tools = [
+      {
+        name: "search_docs",
+        description: "Search project docs",
+        inputSchema: { type: "object", properties: {}, required: [] },
+        serverId: "server-shuttle",
+      },
+    ];
+
+    const registry = new ToolRegistry(createWorkspace(), createDaemon(), "task-mcp-server-name");
+    const tool = registry.getTools().find((entry) => entry.name === "mcp_search_docs");
+
+    expect(tool?.description).toContain('Provided by MCP server "Shuttle".');
   });
 
   it("invalidates cached tool definitions when built-in tool settings change", () => {
