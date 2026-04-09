@@ -332,6 +332,7 @@ export function App() {
     | "subconscious"
     | "health"
     | "suggestions"
+    | "traces"
   >("appearance");
   const [homeAutomationFocusTick, setHomeAutomationFocusTick] = useState(0);
   const [events, setEvents] = useState<TaskEvent[]>([]);
