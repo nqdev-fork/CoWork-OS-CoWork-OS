@@ -627,6 +627,7 @@ export class TaskStrategyService {
       "revise_plan",
       "request_user_input",
       "task_history",
+      "tool_search",
       "set_personality",
       "set_agent_name",
       "set_user_name",
@@ -642,6 +643,10 @@ export class TaskStrategyService {
       "memory_save",
       "memory_curate",
       "memory_curated_read",
+      "supermemory_profile",
+      "supermemory_search",
+      "supermemory_remember",
+      "supermemory_forget",
       // System
       "system_info",
       // Diagrams (lightweight UI-only, no side effects)
@@ -658,9 +663,10 @@ export class TaskStrategyService {
       return new Set(["*"]);
     }
 
-    // Chat / thinking: direct-answer mode, no tools.
+    // Chat / thinking: keep the lightweight discovery path so sessions can still
+    // surface deferred MCP/integration capabilities when the user asks about them.
     if (intent === "chat" || intent === "thinking") {
-      return new Set();
+      return new Set(["tool_search"]);
     }
 
     // Advice and planning: core + web + documents

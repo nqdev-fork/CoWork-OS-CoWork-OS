@@ -55,6 +55,11 @@ describe("TaskStrategyService getRelevantToolSet", () => {
     expect(planning.has("request_user_input")).toBe(true);
     expect(advice.has("request_user_input")).toBe(true);
   });
+
+  it("keeps tool_search available for chat intent so deferred MCP tools remain discoverable", () => {
+    const chat = TaskStrategyService.getRelevantToolSet("chat");
+    expect(chat.has("tool_search")).toBe(true);
+  });
 });
 
 describe("TaskStrategyService decoratePrompt", () => {
