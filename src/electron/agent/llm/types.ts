@@ -78,6 +78,7 @@ export interface LLMTool {
     type: "object";
     properties: Record<string, Any>;
     required?: string[];
+    [key: string]: Any;
   };
   runtime?: RuntimeToolMetadata;
   prompting?: LLMToolPromptMetadata;
