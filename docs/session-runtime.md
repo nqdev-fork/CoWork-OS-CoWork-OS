@@ -21,6 +21,18 @@ SessionRuntime groups all mutable session state into explicit buckets:
 
 This is the state that used to be mirrored across the executor and related helpers. It now lives in one place so task resume, retry, and completion logic read the same source of truth.
 
+## Managed Session Relationship
+
+Managed Agents adds a durable API-facing run object, `ManagedSession`, above the existing runtime.
+
+The ownership split is:
+
+- `ManagedSession` is the stable control-plane resource for reusable runs, event history, and resume/cancel semantics
+- `Task` remains the execution worker that owns `SessionRuntime`
+- `SessionRuntime` still owns mutable task-session state and `session_runtime_v2` snapshots
+
+In practice, a managed session points at one backing task and optionally one backing team run. Managed-session events mirror sanitized task and daemon events so UI/backend consumers can observe one durable session stream without bypassing the task runtime.
+
 ## Tool Availability and Rendering
 
 SessionRuntime also owns the runtime-facing available-tools path used by execution and follow-up turns.
