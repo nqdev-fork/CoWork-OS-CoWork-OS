@@ -392,6 +392,57 @@ describe("HooksServer", () => {
       );
     });
 
+    it("accepts the token for the selected same-path mapping only", async () => {
+      server.setHooksConfig({
+        enabled: true,
+        token: "test-secret-token",
+        path: "/hooks",
+        maxBodyBytes: 256 * 1024,
+        presets: [],
+        mappings: [
+          {
+            id: "gmail-alert",
+            token: "gmail-token",
+            match: { path: "shared", source: "gmail" },
+            action: "agent",
+            messageTemplate: "Gmail: {{payload.text}}",
+          },
+          {
+            id: "slack-alert",
+            token: "slack-token",
+            match: { path: "shared", source: "slack" },
+            action: "agent",
+            messageTemplate: "Slack: {{payload.text}}",
+          },
+        ],
+      });
+
+      const onAgent = vi.fn().mockResolvedValue({ taskId: "task-slack" });
+      server.setHandlers({ onAgent });
+
+      const slackResponse = await makeRequest(
+        "POST",
+        "/hooks/shared",
+        { source: "slack", text: "deploy alert" },
+        { Authorization: "Bearer slack-token" },
+      );
+      const wrongTokenResponse = await makeRequest(
+        "POST",
+        "/hooks/shared",
+        { source: "gmail", text: "mail alert" },
+        { Authorization: "Bearer slack-token" },
+      );
+
+      expect(slackResponse.statusCode).toBe(202);
+      expect(wrongTokenResponse.statusCode).toBe(401);
+      expect(onAgent).toHaveBeenCalledTimes(1);
+      expect(onAgent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: "Slack: deploy alert",
+        }),
+      );
+    });
+
     it("should call onTaskMessage handler", async () => {
       const onTaskMessage = vi.fn().mockResolvedValue(undefined);
       server.setHandlers({ onTaskMessage });

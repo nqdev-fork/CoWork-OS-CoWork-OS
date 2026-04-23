@@ -123,25 +123,34 @@ export async function applyHookMappings(
 ): Promise<HookMappingResult | null> {
   if (mappings.length === 0) return null;
 
+  const mapping = findHookMapping(mappings, ctx);
+  if (!mapping) return null;
+
+  const base = buildActionFromMapping(mapping, ctx);
+  if (!base.ok) return base;
+
+  let override: HookTransformResult = null;
+  if (mapping.transform) {
+    const transform = await loadTransform(mapping.transform);
+    override = await transform(ctx);
+    if (override === null) {
+      return { ok: true, action: null, skipped: true };
+    }
+  }
+
+  if (!base.action) return { ok: true, action: null, skipped: true };
+  const merged = mergeAction(base.action, override, mapping.action);
+  if (!merged.ok) return merged;
+  return merged;
+}
+
+export function findHookMapping(
+  mappings: HookMappingResolved[],
+  ctx: HookMappingContext,
+): HookMappingResolved | null {
   for (const mapping of mappings) {
     if (!mappingMatches(mapping, ctx)) continue;
-
-    const base = buildActionFromMapping(mapping, ctx);
-    if (!base.ok) return base;
-
-    let override: HookTransformResult = null;
-    if (mapping.transform) {
-      const transform = await loadTransform(mapping.transform);
-      override = await transform(ctx);
-      if (override === null) {
-        return { ok: true, action: null, skipped: true };
-      }
-    }
-
-    if (!base.action) return { ok: true, action: null, skipped: true };
-    const merged = mergeAction(base.action, override, mapping.action);
-    if (!merged.ok) return merged;
-    return merged;
+    return mapping;
   }
 
   return null;
