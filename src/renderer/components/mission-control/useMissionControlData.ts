@@ -125,6 +125,10 @@ export type FeedItem = {
   timestamp: number;
 };
 
+type MissionControlHeartbeatEvent = HeartbeatEvent & {
+  rendererEventId: string;
+};
+
 export type MCTab = "overview" | "agents" | "board" | "feed" | "ops";
 export type OpsSubTab = "overview" | "operators" | "outputs" | "execution" | "planner" | "harness";
 export type DetailPanelView =
@@ -298,7 +302,8 @@ export function useMissionControlData(
   const [activities, setActivities] = useState<ActivityData[]>([]);
   const [mentions, setMentions] = useState<MentionData[]>([]);
   const [heartbeatStatuses, setHeartbeatStatuses] = useState<HeartbeatStatusInfo[]>([]);
-  const [events, setEvents] = useState<HeartbeatEvent[]>([]);
+  const [events, setEvents] = useState<MissionControlHeartbeatEvent[]>([]);
+  const heartbeatEventSequenceRef = useRef(0);
 
   // ── Issue context ──
   const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
@@ -655,7 +660,17 @@ export function useMissionControlData(
     };
 
     const unsubHeartbeat = window.electronAPI.onHeartbeatEvent((event: HeartbeatEvent) => {
-      setEvents((prev) => [event, ...prev].slice(0, 100));
+      const sequence = heartbeatEventSequenceRef.current++;
+      const rendererEventId = [
+        "heartbeat",
+        event.runId || "no-run",
+        event.agentRoleId,
+        event.type,
+        event.timestamp,
+        sequence,
+      ].join("-");
+
+      setEvents((prev) => [{ ...event, rendererEventId }, ...prev].slice(0, 100));
       setHeartbeatStatuses((prev) =>
         prev.map((s) => {
           if (s.agentRoleId !== event.agentRoleId) return s;
@@ -1213,7 +1228,7 @@ export function useMissionControlData(
     const heartbeatItems = events
       .filter((e) => { if (e.type === "completed") return false; if (e.type === "no_work" && e.result?.silent) return false; return true; })
       .map<FeedItem>((e) => ({
-        id: `event-${e.timestamp}`,
+        id: e.rendererEventId,
         type: "status",
         agentId: e.agentRoleId,
         agentName: normalizeMissionControlAgentDisplayName(e.agentName),
