@@ -22,7 +22,12 @@ import {
   DEFAULT_HOOKS_MAX_BODY_BYTES,
   DEFAULT_HOOKS_PORT as _DEFAULT_HOOKS_PORT,
 } from "./types";
-import { resolveHookMappings, applyHookMappings, normalizeHooksPath as _normalizeHooksPath } from "./mappings";
+import {
+  resolveHookMappings,
+  applyHookMappings,
+  findHookMapping,
+  normalizeHooksPath as _normalizeHooksPath,
+} from "./mappings";
 
 const RESEND_SIGNATURE_ALLOWED_DRIFT_SECONDS = 300;
 const RESEND_REPLAY_CACHE_MAX_ENTRIES = 10_000;
@@ -259,7 +264,7 @@ export class HooksServer {
     // Extract the hook path after base
     const hookPath = url.pathname.slice(basePath.length).replace(/^\/+/, "").replace(/\/+$/, "");
 
-    const mappedToken = this.findMappedToken(hookPath, req.method || "GET");
+    const mappedTokens = this.findMappedTokenCandidates(hookPath, req.method || "GET");
 
     // Emit request event
     this.emitEvent({
@@ -271,7 +276,7 @@ export class HooksServer {
 
     // Verify authentication
     const tokenResult = this.extractHookToken(req, url);
-    if (!this.verifyToken(tokenResult.token, mappedToken)) {
+    if (!this.verifyAnyToken(tokenResult.token, mappedTokens)) {
       this.sendJsonResponse(res, 401, { success: false, error: "Invalid or missing token" });
       return;
     }
@@ -521,9 +526,8 @@ export class HooksServer {
       path: hookPath,
     };
 
-    const result = await applyHookMappings(this.hooksConfig.mappings, ctx);
-
-    if (!result) {
+    const selectedMapping = findHookMapping(this.hooksConfig.mappings, ctx);
+    if (!selectedMapping) {
       if (hookPath === "resend") {
         const eventType = typeof body.type === "string" ? body.type : undefined;
         if (eventType && eventType !== "email.received") {
@@ -535,6 +539,19 @@ export class HooksServer {
           return;
         }
       }
+      this.sendJsonResponse(res, 404, { success: false, error: "No matching hook mapping" });
+      return;
+    }
+
+    const tokenResult = this.extractHookToken(req, url);
+    if (!this.verifyToken(tokenResult.token, selectedMapping.token)) {
+      this.sendJsonResponse(res, 401, { success: false, error: "Invalid or missing token" });
+      return;
+    }
+
+    const result = await applyHookMappings(this.hooksConfig.mappings, ctx);
+
+    if (!result) {
       this.sendJsonResponse(res, 404, { success: false, error: "No matching hook mapping" });
       return;
     }
@@ -649,16 +666,37 @@ export class HooksServer {
     return crypto.timingSafeEqual(expected, actual);
   }
 
-  private findMappedToken(hookPath: string, method: string): string | undefined {
-    if (method.toUpperCase() !== "POST") return undefined;
-    const mapping = this.findMappingByPath(hookPath);
-    return mapping?.token;
+  private verifyAnyToken(
+    provided: string | undefined,
+    overrides?: Array<string | undefined>,
+  ): boolean {
+    if (!overrides) return this.verifyToken(provided);
+    return overrides.some((override) => this.verifyToken(provided, override));
   }
 
-  private findMappingByPath(hookPath: string): HookMappingResolved | undefined {
-    if (!this.hooksConfig?.mappings?.length) return undefined;
+  private findMappedTokenCandidates(
+    hookPath: string,
+    method: string,
+  ): Array<string | undefined> | undefined {
+    if (method.toUpperCase() !== "POST") return undefined;
+    const mappings = this.findMappingsByPath(hookPath);
+    if (mappings.length === 0) return undefined;
+    const tokens = new Set<string>();
+    let includeGlobalToken = false;
+    for (const mapping of mappings) {
+      if (mapping.token) {
+        tokens.add(mapping.token);
+      } else {
+        includeGlobalToken = true;
+      }
+    }
+    return [...tokens, ...(includeGlobalToken ? [undefined] : [])];
+  }
+
+  private findMappingsByPath(hookPath: string): HookMappingResolved[] {
+    if (!this.hooksConfig?.mappings?.length) return [];
     const normalizedPath = hookPath.replace(/^\/+/, "").replace(/\/+$/, "");
-    return this.hooksConfig.mappings.find((mapping) => mapping.matchPath === normalizedPath);
+    return this.hooksConfig.mappings.filter((mapping) => mapping.matchPath === normalizedPath);
   }
 
   /**
